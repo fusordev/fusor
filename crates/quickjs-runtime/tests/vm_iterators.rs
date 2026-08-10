@@ -798,6 +798,190 @@ fn iterator_consumers_close_only_for_validation_callbacks_and_early_exit() {
 }
 
 #[test]
+fn iterator_includes_uses_same_value_zero_skipping_and_normal_close() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "let method=Iterator.prototype.includes;
+         let descriptor=Object.getOwnPropertyDescriptor(Iterator.prototype,'includes');
+         let nextGets=0,nextCalls=0,returnCalls=0;
+         let iterator={get next(){nextGets++;return function(){nextCalls++;
+           return nextCalls<=3?{done:false,value:nextCalls}:{done:true};};},
+           return(){returnCalls++;return {};}};
+         let matched=method.call(iterator,2,1);
+         let token={},identity=[{},token].values().includes(token);
+         return [matched,nextGets,nextCalls,returnCalls,[NaN].values().includes(NaN),
+           [-0].values().includes(+0),identity,[4].values().includes(4,1),
+           method.name,method.length,descriptor.writable,!descriptor.enumerable,
+           descriptor.configurable].join('|');",
+    );
+
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("Iterator.prototype.includes comparison and close");
+    assert_eq!(
+        string_value(&result),
+        "true|1|2|1|true|true|true|false|includes|1|true|true|true"
+    );
+}
+
+#[test]
+fn iterator_includes_validates_before_next_and_does_not_close_step_failures() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "let method=Iterator.prototype.includes,validationLog='',valueOfCalls=0;
+         function validation(value){let iterator={get next(){validationLog+='n';throw {};},
+           return(){validationLog+='r';return {};}};let type='';
+           try{method.call(iterator,0,value);}catch(error){type=error.name;}return type;}
+         let objectType=validation({valueOf(){valueOfCalls++;return 0;}});
+         let negativeType=validation(-1),largeType=validation(Number.MAX_SAFE_INTEGER+1);
+         let stepError={},stepCloses=0,stepPreserved=false;
+         try{method.call({next(){return {get done(){throw stepError;}};},
+           return(){stepCloses++;return {};}} ,0);}catch(error){stepPreserved=error===stepError;}
+         let naturalReturns=0,natural=method.call({next(){return {done:true};},
+           return(){naturalReturns++;return {};}} ,0,Infinity);
+         return [objectType,negativeType,largeType,validationLog,valueOfCalls,
+           stepPreserved,stepCloses,natural,naturalReturns].join('|');",
+    );
+
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("Iterator.prototype.includes validation and abrupt order");
+    assert_eq!(
+        string_value(&result),
+        "TypeError|RangeError|RangeError|rrr|0|true|0|false|0"
+    );
+}
+
+#[test]
+fn iterator_join_formats_values_and_publishes_the_intrinsic_contract() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "let method=Iterator.prototype.join;
+         let descriptor=Object.getOwnPropertyDescriptor(Iterator.prototype,'join');
+         let separatorCalls=0,separator={toString(){separatorCalls++;return '--';}};
+         let result=method.call([1,null,undefined,'x'].values(),separator);
+         let defaulted=[1,null,3].values().join();
+         let empty=[].values().join('-');
+         return [result,defaulted,empty,separatorCalls,method.name,method.length,
+           descriptor.writable,!descriptor.enumerable,descriptor.configurable].join('|');",
+    );
+
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("Iterator.prototype.join results and descriptor");
+    assert_eq!(
+        string_value(&result),
+        "1------x|1,,3||1|join|1|true|true|true"
+    );
+}
+
+#[test]
+fn iterator_join_closes_only_string_conversion_failures() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "let method=Iterator.prototype.join;
+         let bad={toString(){return {};},valueOf(){return {};}};
+         let separatorClose=0,separatorNext=false,separatorType=false;
+         try{method.call({get next(){separatorNext=true;},
+           return(){separatorClose++;}},bad);}catch(error){separatorType=error instanceof TypeError;}
+         let elementClose=0,elementType=false,elementStep=0;
+         try{method.call({next(){elementStep++;return elementStep===1?
+           {done:false,value:bad}:{done:true};},return(){elementClose++;}});}
+           catch(error){elementType=error instanceof TypeError;}
+         let nextError={},nextClose=0,nextPreserved=false;
+         try{method.call({get next(){throw nextError;},return(){nextClose++;}});}
+           catch(error){nextPreserved=error===nextError;}
+         let exhaustionClose=0,exhausted=method.call({next(){return {done:true};},
+           return(){exhaustionClose++;}});
+         let protocolClose=0,protocolType=false;
+         try{method.call({next(){return 1;},return(){protocolClose++;}});}
+           catch(error){protocolType=error instanceof TypeError;}
+         return [separatorType,separatorClose,separatorNext,elementType,elementClose,
+           nextPreserved,nextClose,exhausted,exhaustionClose,protocolType,protocolClose].join('|');",
+    );
+
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("Iterator.prototype.join close ordering");
+    assert_eq!(
+        string_value(&result),
+        "true|1|false|true|1|true|0||0|true|0"
+    );
+}
+
+#[test]
+fn iterator_chunks_and_windows_use_retained_helper_buffers() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "function source(){return [0,1,2,3,4].values();}\
+         let chunks=Array.from(source().chunks(2));\
+         let windows=Array.from(source().windows(3));\
+         let partial=Array.from([0,1].values().windows(3,'allow-partial'));\
+         return [chunks.length,chunks[0].join(','),chunks[1].join(','),\
+           chunks[2].join(','),chunks[0]!==chunks[1],windows.length,\
+           windows[0].join(','),windows[1].join(','),windows[2].join(','),\
+           windows[0]!==windows[1],partial.length,partial[0].join(','),\
+           Iterator.prototype.chunks.name,Iterator.prototype.chunks.length,\
+           Iterator.prototype.windows.name,Iterator.prototype.windows.length].join('|');",
+    );
+
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("Iterator chunking helper buffers");
+    assert_eq!(
+        string_value(&result),
+        "3|0,1|2,3|4|true|3|0,1,2|1,2,3|2,3,4|true|1|0,1|chunks|1|windows|1"
+    );
+}
+
+#[test]
+fn iterator_chunking_validation_and_exhaustion_close_in_spec_order() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "let log='',chunksType=false,windowsType=false;\
+         function invalid(){return {get next(){log+='n';throw {};},\
+           return(){log+='r';return {};}};}\
+         try{Iterator.prototype.chunks.call(invalid(),'2');}\
+         catch(error){chunksType=error instanceof TypeError;}\
+         try{Iterator.prototype.windows.call(invalid(),1,'bad');}\
+         catch(error){windowsType=error instanceof TypeError;}\
+         let step=0,exhaustedReturns=0;\
+         let exhausted=Iterator.prototype.chunks.call({next(){step++;return step===1\
+           ?{done:false,value:1}:{done:true};},return(){exhaustedReturns++;throw {}; }},2);\
+         let partial=exhausted.next();let exhaustedReturn=true;\
+         try{exhausted.return();}catch(error){exhaustedReturn=false;}\
+         let closes=0,open=Iterator.prototype.windows.call({\
+           next(){return {done:false,value:1};},return(){closes++;return {};}},2);\
+         open.return();open.return();\
+         return [log,chunksType,windowsType,partial.value.join(','),exhaustedReturn,\
+           exhaustedReturns,closes].join('|');",
+    );
+
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("Iterator chunking validation and close order");
+    assert_eq!(string_value(&result), "rr|true|true|1|true|0|1");
+}
+
+#[test]
 fn iterator_reduce_distinguishes_missing_and_explicit_initial_values() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
@@ -1255,7 +1439,7 @@ fn nested_abrupt_spreads_close_inner_then_outer() {
 }
 
 #[test]
-fn array_iterator_length_uses_quickjs_uint32_conversion() {
+fn array_iterator_length_uses_spec_to_length_conversion() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
     let mut context = runtime.context(&realm).expect("context");
@@ -1263,16 +1447,42 @@ fn array_iterator_length_uses_quickjs_uint32_conversion() {
         &mut context,
         "let values=Array.prototype.values;\
          let negative=values.call({0:7,length:-1}).next();\
-         let wrappedZero=values.call({0:8,length:4294967296}).next();\
-         let wrappedOne=values.call({0:9,length:4294967297}).next();\
-         return negative.done+'|'+negative.value+'|'+wrappedZero.done+'|'\
-           +wrappedOne.done+'|'+wrappedOne.value;",
+         let aboveUint32=values.call({0:8,length:4294967296}).next();\
+         let aboveUint32Again=values.call({0:9,length:4294967297}).next();\
+         return negative.done+'|'+aboveUint32.done+'|'+aboveUint32.value+'|'\
+           +aboveUint32Again.done+'|'+aboveUint32Again.value;",
     );
 
     let value = context
         .call(&run, &[], ExecutionLimits::default())
-        .expect("uint32 lengths");
-    assert_eq!(string_value(&value), "false|7|true|false|9");
+        .expect("ToLength lengths");
+    assert_eq!(string_value(&value), "true|false|8|false|9");
+}
+
+#[test]
+fn array_iterator_uses_a_live_typed_array_witness() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = dynamic_function(
+        &mut context,
+        "let buffer=new ArrayBuffer(4,{maxByteLength:8});\
+         let values=new Uint8Array(buffer,0,4);values[0]=9;\
+         let iterator=Array.prototype.values.call(values);buffer.resize(2);\
+         let threw=false;try{iterator.next();}catch(error){threw=error instanceof TypeError;}\
+         buffer.resize(4);let recovered=iterator.next();\
+         let tracking=new Uint8Array(buffer);let keys=Array.prototype.keys.call(tracking);\
+         let first=keys.next();buffer.resize(6);\
+         let rest=[keys.next().value,keys.next().value,keys.next().value,\
+                   keys.next().value,keys.next().value,keys.next().done].join(',');\
+         return threw+'|'+recovered.value+'|'+recovered.done+'|'\
+           +first.value+'|'+rest;",
+    );
+
+    let value = context
+        .call(&run, &[], ExecutionLimits::default())
+        .expect("typed-array Array iterator witness");
+    assert_eq!(string_value(&value), "true|9|false|0|1,2,3,4,5,true");
 }
 
 #[test]

@@ -71,9 +71,9 @@ fn synthesized_class_constructor_flow(
     Ok(flow)
 }
 
-/// Each supported instance element is initialized in the constructor frame.
-/// Private methods and accessors are installed before any field initializer;
-/// each group otherwise preserves class-element source order.
+/// Each supported instance element is initialized by one hidden strict method
+/// retained by the class. Private methods and accessors are installed before
+/// any field initializer; each group otherwise preserves source order.
 pub(in crate::lowering) struct InstanceFieldDefinitions {
     pub(in crate::lowering) derived: bool,
     pub(in crate::lowering) elements: Vec<NodeId>,
@@ -128,7 +128,14 @@ impl CompilationContext<'_, '_, '_> {
                     .default_class_constructors
                     .get(&node_id)
                     .copied()
-                    == Some(executable) =>
+                    == Some(executable)
+                    || self
+                        .planned
+                        .identities
+                        .class_instance_initializers
+                        .get(&node_id)
+                        .copied()
+                        == Some(executable) =>
             {
                 class
             }
@@ -323,7 +330,7 @@ impl<'compiler, 'statement, 'unit, 'arena, 'scope, 'layout>
             && !instance_fields.derived
             && !instance_fields.elements.is_empty()
         {
-            work.push(StatementWork::InitializeInstanceFields);
+            work.push(StatementWork::InitializeInstanceFields(function.span));
         }
         work.push(StatementWork::PushScope {
             scope: function_scope,
@@ -356,6 +363,11 @@ impl<'compiler, 'statement, 'unit, 'arena, 'scope, 'layout>
         let function_scope =
             compiler.created_scope(arrow.scope_id.get(), arrow.node_id.get(), arrow.span)?;
         let flow = PlannedControlFlow::new(limits);
+        let return_opcode = if arrow.r#async {
+            FinalOpcode::ReturnAsync
+        } else {
+            FinalOpcode::Return
+        };
         let mut work = if arrow.expression {
             let [Statement::ExpressionStatement(expression)] = arrow.body.statements.as_slice()
             else {
@@ -373,7 +385,7 @@ impl<'compiler, 'statement, 'unit, 'arena, 'scope, 'layout>
             vec![
                 StatementWork::PopScope(function_scope),
                 StatementWork::Emit(PlannedInstruction::new(
-                    FinalOpcode::Return,
+                    return_opcode,
                     Operands::None,
                     arrow.body.span,
                 )),
@@ -405,7 +417,11 @@ impl<'compiler, 'statement, 'unit, 'arena, 'scope, 'layout>
                 completion: StatementCompletion::Discard,
             },
             flow,
-            terminal: FunctionTerminal::Ordinary,
+            terminal: if arrow.r#async {
+                FunctionTerminal::Async
+            } else {
+                FunctionTerminal::Ordinary
+            },
         })
     }
 
@@ -516,11 +532,12 @@ impl CompilationContext<'_, '_, '_> {
             ExecutableKind::Script {
                 asynchronous: false,
             } => self.validate_script(executable, tree_layout, limits),
-            ExecutableKind::Arrow {
-                asynchronous: false,
-            } => self.validate_arrow(executable, tree_layout, limits),
+            ExecutableKind::Arrow { .. } => self.validate_arrow(executable, tree_layout, limits),
             ExecutableKind::ClassDefaultConstructor => {
                 self.validate_default_class_constructor(executable, tree_layout, limits)
+            }
+            ExecutableKind::ClassInstanceInitializer => {
+                self.validate_class_instance_initializer(executable, tree_layout, limits)
             }
             _ => self.validate_function(executable, tree_layout, limits),
         }
@@ -538,13 +555,11 @@ impl CompilationContext<'_, '_, '_> {
     ) -> Result<ValidatedFunction, LeafCompilationError> {
         let (executable, class) = self.selected_default_class_constructor(executable_id)?;
         let layout = FrameLayout::new(FrameLayoutInput::new(&self.planned.plan, executable_id))?;
-        for child in tree_layout.children(executable_id)? {
-            if !self.is_direct_instance_field_initializer_child(executable_id, *child)? {
-                return Err(LeafCompilationError::SemanticInvariant {
-                    invariant: "synthesized default constructor owns only direct instance-field initializer templates",
-                    span: Some(class.span),
-                });
-            }
+        if !tree_layout.children(executable_id)?.is_empty() {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "synthesized default constructor delegates all instance elements to its hidden initializer",
+                span: Some(class.span),
+            });
         }
         let constants = tree_layout.constant_pool(executable_id)?;
         let function_scope =
@@ -587,11 +602,10 @@ impl CompilationContext<'_, '_, '_> {
         let mut flow =
             synthesized_class_constructor_flow(derived_class_constructor, class.span, limits)?;
         if !instance_fields.elements.is_empty() {
-            ExpressionPlanner::new(self).plan_instance_field_initializations(
+            ExpressionPlanner::new(self).plan_call_instance_initializer(
                 executable_id,
                 &layout,
-                tree_layout,
-                constants,
+                class.span,
                 &mut flow,
             )?;
         }
@@ -634,33 +648,99 @@ impl CompilationContext<'_, '_, '_> {
         })
     }
 
-    fn is_direct_instance_field_initializer_child(
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the hidden initializer's frame, captures, and source mapping form one compiler certificate"
+    )]
+    fn validate_class_instance_initializer(
         &self,
-        parent: ExecutableId,
-        child: ExecutableId,
-    ) -> Result<bool, LeafCompilationError> {
-        let child_node = self
-            .planned
-            .identities
-            .node_by_executable
-            .get(child.index())
-            .copied()
-            .ok_or(LeafCompilationError::InvalidExecutable { executable: child })?;
-        let fields = self.instance_field_definitions(parent)?.ok_or(
+        executable_id: ExecutableId,
+        tree_layout: &FunctionTreeLayout,
+        limits: VerificationLimits,
+    ) -> Result<ValidatedFunction, LeafCompilationError> {
+        let (executable, class) = self.selected_class_instance_initializer(executable_id)?;
+        if !executable.is_strict() {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "class instance initializer is strict",
+                span: Some(class.span),
+            });
+        }
+        let layout = FrameLayout::new(FrameLayoutInput::new(&self.planned.plan, executable_id))?;
+        let constants = tree_layout.constant_pool(executable_id)?;
+        let function_scope =
+            self.created_scope(Some(class.scope_id()), class.node_id(), class.span)?;
+        let capture_layout =
+            self.compiler_capture_layout(executable_id, function_scope, &layout, tree_layout)?;
+        let closure_variables = self.compiled_closure_variables(executable_id, tree_layout)?;
+        let realm_globals = self.compiled_realm_globals(executable_id, tree_layout, constants)?;
+        let variable_definitions = self.compiled_variable_definitions(
+            executable_id,
+            function_scope,
+            &layout,
+            tree_layout,
+            constants,
+        )?;
+        let closure_definitions =
+            self.compiled_closure_definitions(&closure_variables, &realm_globals, constants)?;
+        let capture_count = checked_function_entry_count(
+            closure_variables
+                .len()
+                .checked_add(realm_globals.len())
+                .ok_or(LeafCompilationError::CapacityExceeded {
+                    domain: "class instance initializer closure variables",
+                })?,
+            "class instance initializer closure variables",
+        )?;
+        let fields = self.instance_field_definitions(executable_id)?.ok_or(
             LeafCompilationError::SemanticInvariant {
-                invariant: "synthesized default constructor has instance-field definitions",
-                span: None,
+                invariant: "hidden initializer owns its class instance elements",
+                span: Some(class.span),
             },
         )?;
-        let nodes = self.unit.semantic().nodes();
-        for ancestor in nodes.ancestor_ids(child_node) {
-            match nodes.kind(ancestor) {
-                AstKind::Function(_) | AstKind::ArrowFunctionExpression(_) => return Ok(false),
-                AstKind::PropertyDefinition(_) => return Ok(fields.elements.contains(&ancestor)),
-                _ => {}
-            }
+        if fields.elements.is_empty() {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "hidden initializer has at least one instance element",
+                span: Some(class.span),
+            });
         }
-        Ok(false)
+        let mut flow = PlannedControlFlow::new(limits);
+        ExpressionPlanner::new(self).plan_instance_field_initializations(
+            executable_id,
+            &layout,
+            tree_layout,
+            constants,
+            &mut flow,
+        )?;
+        flow.ensure_terminal(class.span)?;
+
+        Ok(ValidatedFunction {
+            executable_kind: CompilerExecutableKind::ClassInstanceInitializer,
+            strict: true,
+            derived_class_constructor: false,
+            argument_count: 0,
+            defined_argument_count: 0,
+            local_count: layout.local_count,
+            capture_count,
+            capture_layout,
+            locals: layout
+                .locals
+                .iter()
+                .map(|local| LoweredLocal {
+                    binding: local.binding,
+                    slot: local.slot,
+                })
+                .collect(),
+            constants: Arc::clone(constants.entries()),
+            atoms: Arc::clone(constants.atoms()),
+            closure_variables,
+            realm_globals,
+            function_name: None,
+            variable_definitions,
+            closure_definitions,
+            function_span: source_byte_span(class.span),
+            function_name_span: None,
+            flow,
+        })
     }
 
     fn validate_arrow(
@@ -705,7 +785,11 @@ impl CompilationContext<'_, '_, '_> {
         )?;
 
         Ok(ValidatedFunction {
-            executable_kind: CompilerExecutableKind::OrdinaryArrow,
+            executable_kind: if arrow.r#async {
+                CompilerExecutableKind::AsyncArrow
+            } else {
+                CompilerExecutableKind::OrdinaryArrow
+            },
             strict: executable.is_strict(),
             derived_class_constructor: false,
             argument_count: executable.parameter_count(),
@@ -1025,7 +1109,8 @@ const fn direct_eval_header(
             capabilities.allows_new_target(),
             capabilities.allows_super_property(),
             capabilities.allows_super_call(),
-        ),
+        )
+        .with_instance_elements(capabilities.has_instance_elements()),
     )
 }
 
@@ -1059,7 +1144,15 @@ const fn executable_header(
                 variable_reference_count,
             )
         }
-        CompilerExecutableKind::OrdinaryMethod => {
+        CompilerExecutableKind::AsyncArrow => {
+            UnverifiedFunctionHeader::async_arrow_with_variable_references(
+                strict,
+                defined_argument_count,
+                variable_reference_count,
+            )
+        }
+        CompilerExecutableKind::OrdinaryMethod
+        | CompilerExecutableKind::ClassInstanceInitializer => {
             UnverifiedFunctionHeader::ordinary_method_with_variable_references(
                 strict,
                 defined_argument_count,
@@ -1207,6 +1300,7 @@ impl CompilationContext<'_, '_, '_> {
         );
         let finished = flow.finish()?;
         let parameter_initialization_end = finished.parameter_initialization_end();
+        let function_initializer_prefix_start = finished.function_initializer_prefix_start();
         let eval_reference_call_instructions: Arc<[u32]> =
             finished.eval_reference_call_instructions().into();
         let (source_instructions, control_flow) = finished.verify_with_layouts(
@@ -1222,6 +1316,16 @@ impl CompilationContext<'_, '_, '_> {
                 PcSourceSpan::new(instruction.pc(), source_byte_span(instruction.span()))
             })
             .collect::<Vec<_>>();
+        let strict_mode_pcs = if strict {
+            Arc::from([])
+        } else {
+            source_instructions
+                .iter()
+                .filter(|instruction| self.span_has_class_strict_context(instruction.span()))
+                .map(|instruction| instruction.pc())
+                .collect::<Vec<_>>()
+                .into()
+        };
         let metadata = UnverifiedFunctionMetadata::new(
             function_name,
             variable_definitions.into(),
@@ -1232,7 +1336,8 @@ impl CompilationContext<'_, '_, '_> {
                 function_span,
                 function_name_span,
                 source_mappings.into(),
-            ),
+            )
+            .with_strict_mode_pcs(strict_mode_pcs),
         )
         .with_executable_kind(executable_kind);
 
@@ -1249,6 +1354,7 @@ impl CompilationContext<'_, '_, '_> {
             control_flow: Arc::new(control_flow),
             eval_reference_call_instructions,
             parameter_initialization_end,
+            function_initializer_prefix_start,
             metadata,
         })
     }

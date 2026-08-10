@@ -462,7 +462,7 @@ pub(super) fn advance_array_callback(
                 state.current = index;
                 state.advance();
 
-                let key = element_key(index)?;
+                let key = element_key(runtime, index)?;
                 // Most methods skip a missing index; the `find` family visits it
                 // and sees `undefined`.
                 if state.skip_holes {
@@ -666,7 +666,7 @@ fn append_element(
         }
         .into());
     };
-    let key = element_key(state.written)?;
+    let key = element_key(runtime, state.written)?;
     match define_static_property(runtime, destination, key, value, execution_budget)? {
         PropertyWriteOutcome::Complete => {
             state.written = state.written.saturating_add(1);
@@ -813,7 +813,7 @@ fn begin_array_callback_element_get(
     return_to: Option<CallReturn>,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<GetContinuationDispatch<ArrayCallbackContinuation>, NativeFailure> {
-    let key = element_key(state.current)?;
+    let key = element_key(runtime, state.current)?;
     charge_callback_lookup(runtime, &state.target, execution_budget)?;
     state.stage = ArrayCallbackStage::AwaitElement;
     let dispatch = begin_value_get(
@@ -895,14 +895,14 @@ fn index_as_f64(index: u64) -> f64 {
 }
 
 /// Returns the property key for one element index.
-fn element_key(index: u64) -> Result<PropertyKey, NativeFailure> {
-    let index = u32::try_from(index).map_err(|_| EngineFault::RuntimeInvariant {
-        message: "array callback index exceeded the array-index domain",
-    })?;
-    let index = ArrayIndex::new(index).ok_or(EngineFault::RuntimeInvariant {
-        message: "array callback index reached the non-index sentinel",
-    })?;
-    Ok(PropertyKey::from_index(index))
+fn element_key(runtime: &mut Runtime, index: u64) -> Result<PropertyKey, NativeFailure> {
+    if let Ok(index) = u32::try_from(index)
+        && let Some(index) = ArrayIndex::new(index)
+    {
+        return Ok(PropertyKey::from_index(index));
+    }
+    let name = JsNumber::from_f64(index_as_f64(index)).to_javascript_string()?;
+    Ok(runtime.property_key_from_string(&name)?)
 }
 
 /// Extracts the awaited completion value.
@@ -1209,7 +1209,7 @@ pub(super) fn advance_array_reduction(
                 state.current = index;
                 state.advance();
                 if state.skip_holes {
-                    let key = element_key(index)?;
+                    let key = element_key(runtime, index)?;
                     charge_callback_lookup(runtime, &state.target, execution_budget)?;
                     state.stage = ArrayReductionStage::AwaitSeedPresence;
                     let dispatch = begin_value_has(
@@ -1263,7 +1263,7 @@ pub(super) fn advance_array_reduction(
                 state.current = index;
                 state.advance();
                 if state.skip_holes {
-                    let key = element_key(index)?;
+                    let key = element_key(runtime, index)?;
                     charge_callback_lookup(runtime, &state.target, execution_budget)?;
                     // A hole is skipped: the callback never sees it.
                     state.stage = ArrayReductionStage::AwaitElementPresence;
@@ -1372,7 +1372,7 @@ fn begin_array_reduction_element_get(
     return_to: Option<CallReturn>,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<GetContinuationDispatch<ArrayReductionContinuation>, NativeFailure> {
-    let key = element_key(state.current)?;
+    let key = element_key(runtime, state.current)?;
     charge_callback_lookup(runtime, &state.target, execution_budget)?;
     state.stage = next_stage;
     let dispatch = begin_value_get(

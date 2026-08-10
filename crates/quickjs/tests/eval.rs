@@ -47,10 +47,119 @@ fn eval_intrinsic_has_the_standard_global_descriptor() {
 }
 
 #[test]
+fn direct_eval_binding_defaults_apply_named_evaluation_to_anonymous_definitions() {
+    evaluate(
+        r#"
+        let definitions = [
+            ["function() {}", false],
+            ["function named() {}", true],
+            ["function*() {}", false],
+            ["function* named() {}", true],
+            ["async function() {}", false],
+            ["async function named() {}", true],
+            ["() => {}", false],
+            ["async () => {}", false],
+            ["class {}", false],
+            ["class named {}", true],
+        ];
+        let failures = [];
+        function check(actual, expected, context) {
+            if (actual !== expected) failures.push(context + ":" + actual + "!=" + expected);
+        }
+        for (let [definition, named] of definitions) {
+            let property = eval(`(function({ value = ${definition} }) { return value; })`);
+            check(property({}).name, named ? "named" : "value", "property " + definition);
+            let element = eval(`(function([value = ${definition}]) { return value; })`);
+            check(element([]).name, named ? "named" : "value", "element " + definition);
+            let parameter = eval(`(function(value = ${definition}) { return value; })`);
+            check(parameter().name, named ? "named" : "value", "parameter " + definition);
+        }
+        let pattern = eval(`(function({ name } = class {}) { return name; })`);
+        check(pattern(), "", "pattern class");
+        failures.join("|");
+        "#,
+        |value| assert_eq!(string(value), ""),
+    );
+}
+
+#[test]
 fn closed_direct_eval_returns_the_script_completion() {
     evaluate(
         "function local(){return eval('let answer=40+2;answer;');} local();",
         |value| assert!(number(value).strict_equals(JsNumber::from_i32(42))),
+    );
+}
+
+#[test]
+fn spread_direct_eval_materializes_the_iterator_and_evaluates_only_the_first_argument() {
+    evaluate(
+        "let elements=['x=1;','x=2;'],nextCount=0;let iterable={[Symbol.iterator](){return{next(){let index=nextCount++;return index<elements.length?{done:false,value:elements[index]}:{done:true};}};}};let result=(function(){let x='local';eval(...iterable);return x;})();result===1&&nextCount===3;",
+        |value| assert_eq!(value.as_boolean(), Ok(Some(true))),
+    );
+}
+
+#[test]
+fn empty_spreads_around_direct_eval_preserve_argument_list_order() {
+    evaluate(
+        "let nextCount=0;let empty={[Symbol.iterator](){return{next(){nextCount++;return{done:true};}};}};let missing=eval(...empty);let x=1;eval(...empty,'x=2;');eval('x=3;',...empty);missing===undefined&&x===3&&nextCount===3;",
+        |value| assert_eq!(value.as_boolean(), Ok(Some(true))),
+    );
+}
+
+#[test]
+fn spread_eval_identity_fallback_preserves_bare_and_with_reference_receivers() {
+    evaluate(
+        "let bareThis,withThis;let replacement=function(a,b){'use strict';bareThis=this;return a+b;};let bare=(function(eval){return eval(...[20,22]);})(replacement);let object={eval:function(a,b){'use strict';withThis=this;return a+b;}};let referenced;with(object){referenced=eval(...[19,23]);}bare===42&&referenced===42&&bareThis===undefined&&withThis===object;",
+        |value| assert_eq!(value.as_boolean(), Ok(Some(true))),
+    );
+}
+
+#[test]
+fn canonical_spread_eval_from_with_remains_direct_and_cleans_its_reference_receiver() {
+    evaluate(
+        "let object={answer:1,eval};let result;with(object){result=eval(...['answer=42;answer;']);}result===42&&object.answer===42;",
+        |value| assert_eq!(value.as_boolean(), Ok(Some(true))),
+    );
+}
+
+#[test]
+fn static_initializer_direct_eval_inherits_the_class_this_binding() {
+    evaluate(
+        "let block;let Box=class{static value='test';static direct=eval('this.value')+'262';static arrow=(()=>eval('this'))();static{block=eval('this');}static ordinary=(function(){return eval('this');}).call({marker:7});};Box.direct==='test262'&&Box.arrow===Box&&block===Box&&Box.ordinary.marker===7;",
+        |value| assert_eq!(value.as_boolean(), Ok(Some(true))),
+    );
+}
+
+#[test]
+fn class_field_direct_eval_resolves_the_initialized_inner_name_binding() {
+    evaluate(
+        "let Box=class Inner{field=eval('Inner');static field=eval('Inner');};Box.field===Box&&new Box().field===Box;",
+        |value| assert_eq!(value.as_boolean(), Ok(Some(true))),
+    );
+}
+
+#[test]
+fn direct_eval_in_inline_class_code_inherits_strictness() {
+    evaluate(
+        "function check(){try{class Box{static[eval(\"Object.preventExtensions({}).value=1\")];}return false;}catch(error){return error.name==='TypeError';}}check();",
+        |value| assert_eq!(value.as_boolean(), Ok(Some(true))),
+    );
+}
+
+#[test]
+fn inline_class_regions_use_strict_reference_semantics() {
+    evaluate(
+        "let computed=false;try{let target=Object.preventExtensions({});class C{[target.value=1](){}}}catch(error){computed=error.name==='TypeError';}\
+         let heritage=false;try{let target=Object.preventExtensions({});let Base=function(){};class C extends(target.value=Base){}}catch(error){heritage=error.name==='TypeError';}\
+         let field=false;try{let target=Object.preventExtensions({});class C{static value=(target.value=1);}}catch(error){field=error.name==='TypeError';}\
+         let block=false;try{let target=Object.preventExtensions({});class C{static{target.value=1;}}}catch(error){block=error.name==='TypeError';}\
+         let superWrite=false;try{class Base{}Object.defineProperty(Base,'value',{value:1,writable:false});class C extends Base{static value=(super.value=2);}}catch(error){superWrite=error.name==='TypeError';}\
+         let functionName=false;try{(function self(){class C{static[self=1];}})();}catch(error){functionName=error.name==='TypeError';}\
+         let unresolved=false;try{class C{static[__class_strict_missing__=1];}}catch(error){unresolved=error.name==='ReferenceError';}\
+         delete globalThis.__class_strict_missing__;\
+         let deletion=false;try{let target={};Object.defineProperty(target,'value',{value:1,configurable:false});class C{static[delete target.value];}}catch(error){deletion=error.name==='TypeError';}\
+         computed&&heritage&&field&&block&&superWrite&&functionName&&unresolved&&deletion;",
+        |value| assert_eq!(value.as_boolean(), Ok(Some(true))),
     );
 }
 
@@ -63,6 +172,14 @@ fn eval_preserves_lone_surrogates_in_legacy_regexp_literals() {
          let indirect=(0,eval)(source);\
          direct.source===('\\\\'+unit)&&direct.test(unit)&&\
            indirect.source===('\\\\'+unit)&&indirect.test(unit);",
+        |value| assert_eq!(value.as_boolean(), Ok(Some(true))),
+    );
+}
+
+#[test]
+fn eval_legacy_string_escapes_follow_the_eval_source_strictness() {
+    evaluate(
+        r#"let sloppy=eval("'\\141'");let strict=false;try{eval("'use strict'; '\\1';");}catch(error){strict=error.constructor===SyntaxError;}sloppy==='a'&&strict;"#,
         |value| assert_eq!(value.as_boolean(), Ok(Some(true))),
     );
 }
@@ -695,6 +812,24 @@ fn direct_eval_inherits_new_target_from_function_code() {
 }
 
 #[test]
+fn new_target_defaults_survive_nested_declarations_and_direct_eval() {
+    evaluate(
+        "let matches=0;\
+         function check(expected,actual=new.target){if(actual===expected)matches++;}\
+         new check(check);check(undefined);\
+         let evald=eval('('+check.toString()+')');new evald(evald);evald(undefined);\
+         function outer(){\
+           function nested(expected,actual=new.target){if(actual===expected)matches++;}\
+           new nested(nested);nested(undefined);\
+           let evaldNested=eval('('+nested.toString()+')');\
+           new evaldNested(evaldNested);evaldNested(undefined);\
+         }\
+         outer();new outer();matches;",
+        |value| assert!(number(value).strict_equals(JsNumber::from_i32(12))),
+    );
+}
+
+#[test]
 fn direct_eval_in_arrow_function_code_rejects_new_target() {
     evaluate(
         "let caught;let arrow=()=>eval('new.target;');try{arrow();}catch(error){caught=error;}typeof caught==='object'&&caught.constructor===SyntaxError;",
@@ -719,10 +854,62 @@ fn direct_eval_super_call_initializes_the_derived_this_environment() {
 }
 
 #[test]
-fn direct_eval_super_call_with_instance_fields_fails_closed() {
+fn direct_eval_super_call_initializes_public_and_private_instance_elements() {
     evaluate(
-        "class Base{}class Derived extends Base{answer=42;constructor(){eval('super();');}}let caught;try{new Derived();}catch(error){caught=error;}caught.constructor===SyntaxError;",
-        |value| assert_eq!(value.as_boolean(), Ok(Some(true))),
+        "let order=[];\
+         class Base{constructor(...values){order.push('base:'+values.join(','));}}\
+         class Derived extends Base{\
+           answer=order.push('public');\
+           #secret=order.push('private');\
+           constructor(){let result=eval('super(...[1,2]);');order.push(result===this?'same':'different');}\
+           secret(){return this.#secret;}\
+         }\
+         let value=new Derived();order.join('|')+'|'+value.answer+'|'+value.secret();",
+        |value| assert_eq!(string(value), "base:1,2|public|private|same|2|3"),
+    );
+}
+
+#[test]
+fn nested_and_arrow_direct_eval_super_calls_initialize_instance_elements() {
+    evaluate(
+        "let count=0;class Base{}\
+         class Nested extends Base{field=++count;constructor(){eval(\"eval('super()')\");}}\
+         class EvalArrow extends Base{field=++count;constructor(){eval('(()=>super())()');}}\
+         class OuterArrow extends Base{field=++count;constructor(){(()=>eval('super()'))();}}\
+         let nested=new Nested();let evalArrow=new EvalArrow();let outerArrow=new OuterArrow();\
+         nested.field+'|'+evalArrow.field+'|'+outerArrow.field+'|'+count;",
+        |value| assert_eq!(string(value), "1|2|3|3"),
+    );
+}
+
+#[test]
+fn direct_eval_super_rejects_rebinding_without_reinitializing_elements() {
+    evaluate(
+        "let initializations=0;class Base{}class Derived extends Base{\
+           field=++initializations;\
+           constructor(){\
+             eval('super()');let repeated=false;\
+             try{eval('super()');}catch(error){repeated=error instanceof ReferenceError;}\
+             this.repeated=repeated;\
+           }\
+         }\
+         let value=new Derived();value.field+'|'+value.repeated+'|'+initializations;",
+        |value| assert_eq!(string(value), "1|true|1"),
+    );
+}
+
+#[test]
+fn abrupt_eval_super_instance_initialization_leaves_this_bound() {
+    evaluate(
+        "let initializations=0;class Base{}class Derived extends Base{\
+           field=(()=>{initializations++;throw 17;})();\
+           constructor(){\
+             let caught=false;try{eval('super()');}catch(error){caught=error===17;}\
+             this.caught=caught;\
+           }\
+         }\
+         let value=new Derived();value.caught+'|'+('field' in value)+'|'+initializations;",
+        |value| assert_eq!(string(value), "true|false|1"),
     );
 }
 

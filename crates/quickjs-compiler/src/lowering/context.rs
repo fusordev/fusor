@@ -88,6 +88,7 @@ pub struct CompilationContext<'unit, 'arena, 'scope> {
     pub(super) planned: PlannedStorage,
     pub(super) source_text: Arc<str>,
     pub(super) source_substitutions: Arc<[SourceTextSubstitution]>,
+    strict_class_ranges: Arc<[Span]>,
     pub(super) source_name: Arc<str>,
     pub(super) identity: Arc<ContextIdentity>,
 }
@@ -138,13 +139,28 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         let planned = build_planned_storage(unit)?;
         let source_text = Arc::from(unit.program().source_text);
         validate_source_substitutions(unit, &source_text, &source_substitutions)?;
+        let strict_class_ranges = collect_strict_class_ranges(unit);
         Ok(Self {
             unit,
             planned,
             source_text,
             source_substitutions,
+            strict_class_ranges,
             source_name,
             identity: Arc::new(ContextIdentity),
+        })
+    }
+
+    /// Returns whether a lowered instruction span is wholly contained by
+    /// class syntax, whose inline evaluation is strict even in a sloppy
+    /// surrounding executable.
+    pub(super) fn span_has_class_strict_context(&self, span: Span) -> bool {
+        let insertion = self
+            .strict_class_ranges
+            .partition_point(|range| range.start <= span.start);
+        insertion.checked_sub(1).is_some_and(|index| {
+            let range = self.strict_class_ranges[index];
+            span.start < range.end && span.end <= range.end
         })
     }
 
@@ -501,6 +517,31 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             .id();
         self.compile_subtree_with_all_limits(root, limits, graph_limits, bytecode_limits)
     }
+}
+
+fn collect_strict_class_ranges(unit: &ParsedUnit<'_, '_>) -> Arc<[Span]> {
+    let mut ranges = unit
+        .semantic()
+        .nodes()
+        .iter()
+        .filter_map(|node| match node.kind() {
+            AstKind::Class(class) => Some(class.span),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    ranges.sort_unstable_by_key(|range| (range.start, range.end));
+
+    let mut merged: Vec<Span> = Vec::new();
+    for range in ranges {
+        if let Some(previous) = merged.last_mut()
+            && range.start <= previous.end
+        {
+            previous.end = previous.end.max(range.end);
+        } else {
+            merged.push(range);
+        }
+    }
+    merged.into()
 }
 
 fn validate_source_substitutions(

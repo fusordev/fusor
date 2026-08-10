@@ -587,6 +587,10 @@ pub(crate) struct BytecodeFunction {
     /// Record. Direct eval uses this independently of the current `new.target`
     /// value when applying `PerformEval`'s contextual early errors.
     pub(crate) lexical_eval_in_function: bool,
+    /// Whether an arrow's lexical `this` chain reaches a class field
+    /// initializer Function Environment Record. `PerformEval` uses this to
+    /// apply the initializer-only `ContainsArguments` early error.
+    pub(crate) lexical_eval_in_class_field_initializer: bool,
     pub(crate) lexical_new_target: Option<FunctionId>,
     /// The derived constructor whose mutable `this` environment is retained
     /// by this arrow, paired with `lexical_derived_this`.
@@ -1296,6 +1300,12 @@ pub(crate) enum NativeFunctionKind {
     ObjectCreate,
     ObjectPrototypeToString,
     ObjectPrototypeValueOf,
+    ObjectPrototypeProtoGetter,
+    ObjectPrototypeProtoSetter,
+    ObjectPrototypeDefineGetter,
+    ObjectPrototypeDefineSetter,
+    ObjectPrototypeLookupGetter,
+    ObjectPrototypeLookupSetter,
     ObjectPrototypeHasOwnProperty,
     ObjectPrototypeIsPrototypeOf,
     ObjectPrototypePropertyIsEnumerable,
@@ -1515,14 +1525,18 @@ pub(crate) enum NativeFunctionKind {
     IteratorZip,
     IteratorZipKeyed,
     IteratorFrom,
+    IteratorPrototypeChunks,
     IteratorPrototypeDispose,
     IteratorPrototypeDrop,
+    IteratorPrototypeIncludes,
+    IteratorPrototypeJoin,
     IteratorPrototypeConsumer(IteratorConsumer),
     IteratorPrototypeFilter,
     IteratorPrototypeFlatMap,
     IteratorPrototypeMap,
     IteratorPrototypeTake,
     IteratorPrototypeToArray,
+    IteratorPrototypeWindows,
     IteratorPrototypeConstructorGetter,
     IteratorPrototypeConstructorSetter,
     IteratorPrototypeToStringTagGetter,
@@ -4721,6 +4735,7 @@ impl NativeFunctionKind {
                 | Self::ErrorConstructor(_)
                 | Self::BooleanConstructor
                 | Self::NumberConstructor
+                | Self::BigIntConstructor
                 | Self::StringConstructor
                 | Self::ArrayConstructor
                 | Self::ArrayBufferConstructor
@@ -4747,6 +4762,7 @@ impl NativeFunctionKind {
                 | Self::TemporalPlainYearMonthConstructor
                 | Self::TemporalZonedDateTimeConstructor
                 | Self::RegExpConstructor
+                | Self::SymbolConstructor
                 | Self::IteratorConstructor
                 | Self::GeneratorFunctionConstructor
                 | Self::AsyncFunctionConstructor
@@ -5636,8 +5652,10 @@ fn require_root_kind(
             "source function cannot execute as a dynamic-function Script"
         }
         CompilerExecutableKind::OrdinaryMethod
+        | CompilerExecutableKind::ClassInstanceInitializer
         | CompilerExecutableKind::ClassConstructor
         | CompilerExecutableKind::OrdinaryArrow
+        | CompilerExecutableKind::AsyncArrow
         | CompilerExecutableKind::GeneratorFunction
         | CompilerExecutableKind::GeneratorMethod
         | CompilerExecutableKind::AsyncFunction
@@ -5684,7 +5702,10 @@ fn preflight_opcodes(authority: &VerifiedBytecode) -> Result<(), InstallError> {
 const fn is_supported_instruction(instruction: Instruction) -> bool {
     is_supported_opcode(instruction.opcode())
         && (!matches!(instruction.opcode(), FinalOpcode::ThrowError)
-            || matches!(instruction.operands(), Operands::AtomU8 { value: 4, .. }))
+            || matches!(
+                instruction.operands(),
+                Operands::AtomU8 { value: 3 | 4, .. }
+            ))
 }
 
 #[allow(
@@ -5730,11 +5751,14 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::Swap
             | FinalOpcode::Rot3l
             | FinalOpcode::Rot3r
+            | FinalOpcode::Rot4l
             | FinalOpcode::Call
             | FinalOpcode::CallMethod
             | FinalOpcode::CallConstructor
             | FinalOpcode::Apply
             | FinalOpcode::Eval
+            | FinalOpcode::ApplyEval
+            | FinalOpcode::Import
             | FinalOpcode::CheckCtorReturn
             | FinalOpcode::CheckCtor
             | FinalOpcode::InitCtor
@@ -5770,6 +5794,7 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::SetLocUninitialized
             | FinalOpcode::GetLocCheck
             | FinalOpcode::PutLocCheck
+            | FinalOpcode::PutLocCheckInit
             | FinalOpcode::SetLocCheck
             | FinalOpcode::GetVarRefCheck
             | FinalOpcode::PutVarRefCheck
@@ -5779,6 +5804,8 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::ForOfStart
             | FinalOpcode::ForAwaitOfStart
             | FinalOpcode::ForOfNext
+            | FinalOpcode::ForAwaitOfNext
+            | FinalOpcode::IteratorGetValueDone
             | FinalOpcode::IteratorClose
             | FinalOpcode::IteratorNext
             | FinalOpcode::IteratorCall

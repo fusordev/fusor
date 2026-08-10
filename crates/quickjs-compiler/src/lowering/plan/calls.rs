@@ -68,6 +68,14 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
             ))
     }
 
+    fn contextual_direct_eval_has_instance_elements(&self) -> bool {
+        matches!(
+            self.unit.goal(),
+            CompilationGoal::DirectEval(context)
+                if context.capabilities().has_instance_elements()
+        )
+    }
+
     fn adjusted_eval_scope_index(
         &self,
         call: &CallExpression<'arena>,
@@ -217,8 +225,11 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
                         Operands::None,
                         member.expression.span(),
                     )));
+                    work.push(ExpressionWork::SuperPropertyBaseAfterKey {
+                        span: member.object.span(),
+                    });
                     work.push(ExpressionWork::Visit(&member.expression));
-                    work.push(ExpressionWork::SuperPropertyBase {
+                    work.push(ExpressionWork::SuperPropertyReceiver {
                         span: member.object.span(),
                         call_receiver: true,
                     });
@@ -239,7 +250,7 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
                 });
             }
             Some(MemberCallee::Private(member)) => {
-                self.plan_private_member_callee(member, layout, work)?;
+                self.plan_private_member_callee(member, layout, tree_layout, work)?;
             }
             None => match with_identifier {
                 Some(identifier) => {
@@ -291,7 +302,13 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
                     span: Some(call.span),
                 },
             )?;
-            if !self.is_contextual_direct_eval_derived_constructor(constructor, call.span)? {
+            if self.is_contextual_direct_eval_derived_constructor(constructor, call.span)? {
+                if self.contextual_direct_eval_has_instance_elements() {
+                    work.push(ExpressionWork::InitializeContextualInstanceFields {
+                        span: call.span,
+                    });
+                }
+            } else {
                 let instance_fields = self.instance_field_definitions(constructor)?.ok_or(
                     LeafCompilationError::SemanticInvariant {
                         invariant: "super constructor call resolves its derived class constructor",
@@ -304,14 +321,11 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
                         span: Some(call.span),
                     });
                 }
-                if constructor != layout.executable && !instance_fields.elements.is_empty() {
-                    return Err(LeafCompilationError::SemanticInvariant {
-                        invariant: "storage rejects arrow super calls that need reusable instance initialization",
-                        span: Some(call.span),
+                if !instance_fields.elements.is_empty() {
+                    work.push(ExpressionWork::InitializeInstanceFields {
+                        constructor,
+                        span: call.span,
                     });
-                }
-                if constructor == layout.executable && !instance_fields.elements.is_empty() {
-                    work.push(ExpressionWork::InitializeInstanceFields);
                 }
             }
             work.push(ExpressionWork::Emit(PlannedInstruction::new(
@@ -478,21 +492,59 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
             }
             match member {
                 Some(MemberCallee::Static(member)) => {
-                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
-                        FinalOpcode::GetField2,
-                        Operands::Atom(constants.property_atom_index(member.property.span)?),
-                        member.span,
-                    )));
-                    work.push(ExpressionWork::Visit(&member.object));
+                    if matches!(&member.object, Expression::Super(_)) {
+                        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                            FinalOpcode::GetSuperValue,
+                            Operands::None,
+                            member.span,
+                        )));
+                        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                            FinalOpcode::PushAtomValue,
+                            Operands::Atom(constants.property_atom_index(member.property.span)?),
+                            member.property.span,
+                        )));
+                        work.push(ExpressionWork::SuperPropertyBase {
+                            span: member.object.span(),
+                            call_receiver: true,
+                        });
+                    } else {
+                        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                            FinalOpcode::GetField2,
+                            Operands::Atom(constants.property_atom_index(member.property.span)?),
+                            member.span,
+                        )));
+                        work.push(ExpressionWork::Visit(&member.object));
+                    }
                 }
                 Some(MemberCallee::Computed(member)) => {
-                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
-                        FinalOpcode::GetArrayEl2,
-                        Operands::None,
-                        member.span,
-                    )));
-                    work.push(ExpressionWork::Visit(&member.expression));
-                    work.push(ExpressionWork::Visit(&member.object));
+                    if matches!(&member.object, Expression::Super(_)) {
+                        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                            FinalOpcode::GetSuperValue,
+                            Operands::None,
+                            member.span,
+                        )));
+                        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                            FinalOpcode::ToPropKey,
+                            Operands::None,
+                            member.expression.span(),
+                        )));
+                        work.push(ExpressionWork::SuperPropertyBaseAfterKey {
+                            span: member.object.span(),
+                        });
+                        work.push(ExpressionWork::Visit(&member.expression));
+                        work.push(ExpressionWork::SuperPropertyReceiver {
+                            span: member.object.span(),
+                            call_receiver: true,
+                        });
+                    } else {
+                        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                            FinalOpcode::GetArrayEl2,
+                            Operands::None,
+                            member.span,
+                        )));
+                        work.push(ExpressionWork::Visit(&member.expression));
+                        work.push(ExpressionWork::Visit(&member.object));
+                    }
                 }
                 Some(MemberCallee::Chain(chain)) => {
                     work.push(ExpressionWork::VisitOptionalChain {
@@ -501,7 +553,7 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
                     });
                 }
                 Some(MemberCallee::Private(member)) => {
-                    self.plan_private_member_callee(member, layout, work)?;
+                    self.plan_private_member_callee(member, layout, tree_layout, work)?;
                 }
                 None => match with_identifier {
                     Some(identifier) => {
@@ -604,8 +656,11 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
                         Operands::None,
                         member.expression.span(),
                     )));
+                    work.push(ExpressionWork::SuperPropertyBaseAfterKey {
+                        span: member.object.span(),
+                    });
                     work.push(ExpressionWork::Visit(&member.expression));
-                    work.push(ExpressionWork::SuperPropertyBase {
+                    work.push(ExpressionWork::SuperPropertyReceiver {
                         span: member.object.span(),
                         call_receiver: true,
                     });
@@ -626,7 +681,7 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
                 });
             }
             Some(MemberCallee::Private(member)) => {
-                self.plan_private_member_callee(member, layout, work)?;
+                self.plan_private_member_callee(member, layout, tree_layout, work)?;
             }
             None => match with_identifier {
                 Some(identifier) => {
@@ -677,7 +732,11 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
                 span: Some(call.span),
             },
         )?;
-        if !self.is_contextual_direct_eval_derived_constructor(constructor, call.span)? {
+        if self.is_contextual_direct_eval_derived_constructor(constructor, call.span)? {
+            if self.contextual_direct_eval_has_instance_elements() {
+                work.push(ExpressionWork::InitializeContextualInstanceFields { span: call.span });
+            }
+        } else {
             let instance_fields = self.instance_field_definitions(constructor)?.ok_or(
                 LeafCompilationError::SemanticInvariant {
                     invariant: "super spread call resolves its derived class constructor",
@@ -690,14 +749,11 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
                     span: Some(call.span),
                 });
             }
-            if constructor != layout.executable && !instance_fields.elements.is_empty() {
-                return Err(LeafCompilationError::SemanticInvariant {
-                    invariant: "storage rejects arrow super calls that need reusable instance initialization",
-                    span: Some(call.span),
+            if !instance_fields.elements.is_empty() {
+                work.push(ExpressionWork::InitializeInstanceFields {
+                    constructor,
+                    span: call.span,
                 });
-            }
-            if constructor == layout.executable && !instance_fields.elements.is_empty() {
-                work.push(ExpressionWork::InitializeInstanceFields);
             }
         }
         work.push(ExpressionWork::Emit(PlannedInstruction::new(
@@ -1139,8 +1195,11 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
                 Operands::None,
                 member.expression.span(),
             )));
+            work.push(ExpressionWork::SuperPropertyBaseAfterKey {
+                span: member.object.span(),
+            });
             work.push(ExpressionWork::Visit(&member.expression));
-            work.push(ExpressionWork::SuperPropertyBase {
+            work.push(ExpressionWork::SuperPropertyReceiver {
                 span: member.object.span(),
                 call_receiver: false,
             });
@@ -1228,14 +1287,29 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
                 Operands::None,
                 assignment.span,
             )));
-            work.push(ExpressionWork::Visit(&assignment.right));
+            // A computed super reference retains its raw key through RHS
+            // evaluation. PutValue performs ToPropertyKey only afterwards.
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::Swap,
+                Operands::None,
+                member.span,
+            )));
             work.push(ExpressionWork::Emit(PlannedInstruction::new(
                 FinalOpcode::ToPropKey,
                 Operands::None,
                 member.expression.span(),
             )));
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::Swap,
+                Operands::None,
+                member.span,
+            )));
+            work.push(ExpressionWork::Visit(&assignment.right));
+            work.push(ExpressionWork::SuperPropertyBaseAfterKey {
+                span: member.object.span(),
+            });
             work.push(ExpressionWork::Visit(&member.expression));
-            work.push(ExpressionWork::SuperPropertyBase {
+            work.push(ExpressionWork::SuperPropertyReceiver {
                 span: member.object.span(),
                 call_receiver: false,
             });

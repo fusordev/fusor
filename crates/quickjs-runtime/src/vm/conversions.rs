@@ -515,6 +515,9 @@ pub(super) fn finish_intrinsic_get(
     outer_continuations: &[NativeContinuation],
 ) -> Result<NativeDispatch, NativeFailure> {
     match continuation {
+        IntrinsicGetContinuation::ObjectConstructor { new_target } => {
+            finish_object_constructor_wrapper(runtime, new_target, &value)
+        }
         IntrinsicGetContinuation::BooleanConstructor {
             new_target,
             value: boolean_value,
@@ -1503,9 +1506,20 @@ pub(super) fn advance_operator_primitive_conversion(
                         .into());
                     }
                 };
-                if let Some((function, arguments)) =
-                    use_operator_primitive_property(&mut state, property, &value)?
+                let operation = match use_operator_primitive_property(&mut state, property, &value)
                 {
+                    Ok(operation) => operation,
+                    Err(error) => {
+                        return resume_operator_primitive_target_abrupt(
+                            runtime,
+                            state.target,
+                            error,
+                            return_to,
+                            execution_budget,
+                        );
+                    }
+                };
+                if let Some((function, arguments)) = operation {
                     return operator_primitive_method_call(state, function, arguments, return_to);
                 }
             }
@@ -1513,11 +1527,15 @@ pub(super) fn advance_operator_primitive_conversion(
                 if matches!(value, StoredValue::Function(_) | StoredValue::Object(_)) =>
             {
                 if matches!(state.hint, OperatorPrimitiveHint::String) {
-                    return Err(primitive_conversion_type_error(
-                        state.realm,
-                        &state.origin,
-                        "toPrimitive",
-                    )?);
+                    let error =
+                        primitive_conversion_type_error(state.realm, &state.origin, "toPrimitive")?;
+                    return resume_operator_primitive_target_abrupt(
+                        runtime,
+                        state.target,
+                        error,
+                        return_to,
+                        execution_budget,
+                    );
                 }
                 state.stage = OperatorPrimitiveStage::ToString;
             }
@@ -1527,21 +1545,29 @@ pub(super) fn advance_operator_primitive_conversion(
                 if matches!(state.hint, OperatorPrimitiveHint::String) {
                     state.stage = OperatorPrimitiveStage::ValueOf;
                 } else {
-                    return Err(primitive_conversion_type_error(
-                        state.realm,
-                        &state.origin,
-                        "toPrimitive",
-                    )?);
+                    let error =
+                        primitive_conversion_type_error(state.realm, &state.origin, "toPrimitive")?;
+                    return resume_operator_primitive_target_abrupt(
+                        runtime,
+                        state.target,
+                        error,
+                        return_to,
+                        execution_budget,
+                    );
                 }
             }
             OperatorPrimitiveStage::AwaitExotic
                 if matches!(value, StoredValue::Function(_) | StoredValue::Object(_)) =>
             {
-                return Err(primitive_conversion_type_error(
-                    state.realm,
-                    &state.origin,
-                    "toPrimitive",
-                )?);
+                let error =
+                    primitive_conversion_type_error(state.realm, &state.origin, "toPrimitive")?;
+                return resume_operator_primitive_target_abrupt(
+                    runtime,
+                    state.target,
+                    error,
+                    return_to,
+                    execution_budget,
+                );
             }
             OperatorPrimitiveStage::AwaitExotic
             | OperatorPrimitiveStage::AwaitValueOf
@@ -1599,7 +1625,7 @@ pub(super) fn advance_operator_primitive_conversion(
         }
     };
     state.stage = awaiting_property;
-    let dispatch = begin_internal_get(
+    let dispatch = match begin_internal_get(
         runtime,
         reference,
         state.receiver.duplicate(),
@@ -1608,8 +1634,40 @@ pub(super) fn advance_operator_primitive_conversion(
         return_to,
         state.origin.clone(),
         execution_budget,
-    )?;
+    ) {
+        Ok(dispatch) => dispatch,
+        Err(error) => {
+            return resume_operator_primitive_target_abrupt(
+                runtime,
+                state.target,
+                error,
+                return_to,
+                execution_budget,
+            );
+        }
+    };
     continue_operator_primitive_get_after(runtime, dispatch, state, return_to, execution_budget)
+}
+
+fn resume_operator_primitive_target_abrupt(
+    runtime: &mut Runtime,
+    target: OperatorPrimitiveTarget,
+    error: NativeFailure,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    match (target, error) {
+        (
+            OperatorPrimitiveTarget::DynamicImportSpecifier(state),
+            NativeFailure::Abrupt(pending) | NativeFailure::AbruptAfterTransient(pending),
+        ) => resume_dynamic_import_abrupt(runtime, &state, pending),
+        (
+            OperatorPrimitiveTarget::IteratorJoin(state),
+            NativeFailure::Abrupt(pending) | NativeFailure::AbruptAfterTransient(pending),
+        ) => resume_iterator_join_abrupt(runtime, *state, pending, return_to, execution_budget),
+        (_, NativeFailure::Execution(error)) => Err(NativeFailure::Execution(error)),
+        (_, error) => Err(error),
+    }
 }
 
 fn continue_operator_primitive_get_after(
@@ -1782,6 +1840,9 @@ fn finish_operator_primitive_target(
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     match target {
+        OperatorPrimitiveTarget::DynamicImportSpecifier(state) => {
+            finish_dynamic_import_specifier(runtime, *state, value, return_to, execution_budget)
+        }
         OperatorPrimitiveTarget::Unary { opcode } => {
             apply_unary_operator(opcode, value, realm, origin)
         }
@@ -3032,6 +3093,9 @@ fn finish_operator_primitive_target(
         }
         OperatorPrimitiveTarget::IteratorLimit(state) => {
             advance_iterator_limit(runtime, *state, value, return_to, execution_budget)
+        }
+        OperatorPrimitiveTarget::IteratorJoin(state) => {
+            finish_iterator_join_primitive(runtime, *state, value, return_to, execution_budget)
         }
         OperatorPrimitiveTarget::FunctionApplyLength(state) => {
             finish_function_apply_length(runtime, state, value, return_to, execution_budget)
@@ -4446,6 +4510,36 @@ fn finish_property_key_target(
             });
             Ok(NativeDispatch::Immediate(StoredValue::Boolean(enumerable)))
         }
+        PropertyKeyTarget::LegacyDefineAccessor {
+            target,
+            accessor,
+            kind,
+            realm,
+        } => finish_legacy_define_accessor(
+            runtime,
+            &target,
+            property.key,
+            accessor,
+            kind,
+            realm,
+            return_to,
+            origin.clone(),
+            execution_budget,
+        ),
+        PropertyKeyTarget::LegacyLookupAccessor {
+            target,
+            kind,
+            realm,
+        } => finish_legacy_lookup_accessor(
+            runtime,
+            &target,
+            property.key,
+            kind,
+            realm,
+            return_to,
+            origin.clone(),
+            execution_budget,
+        ),
         PropertyKeyTarget::ReflectHas { target, realm }
         | PropertyKeyTarget::In { target, realm } => {
             let reference = target

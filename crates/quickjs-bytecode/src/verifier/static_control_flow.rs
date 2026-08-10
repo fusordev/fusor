@@ -114,6 +114,8 @@ pub(super) fn validate_static_semantics(
                     FinalOpcode::ForOfStart
                         | FinalOpcode::ForAwaitOfStart
                         | FinalOpcode::ForOfNext
+                        | FinalOpcode::ForAwaitOfNext
+                        | FinalOpcode::IteratorGetValueDone
                         | FinalOpcode::IteratorClose
                         | FinalOpcode::IteratorNext
                         | FinalOpcode::IteratorCall
@@ -123,8 +125,8 @@ pub(super) fn validate_static_semantics(
                 )
             {
                 // Compiler-owned control flow is still non-executable. The
-                // whole-function verifier proves the exact synchronous
-                // iterator record and eval scope metadata before granting
+                // whole-function verifier proves the exact synchronous or
+                // asynchronous iterator record and eval scope metadata before granting
                 // authority. `copy_data_properties`' packed stack offsets keep
                 // their net-zero effect (three operand slots popped and
                 // re-pushed).

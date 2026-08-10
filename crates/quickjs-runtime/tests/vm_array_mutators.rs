@@ -234,6 +234,32 @@ fn shift_and_unshift_slide_the_elements() {
     ]);
 }
 
+/// `unshift` does not allocate a move plan proportional to `LengthOfArrayLike`.
+#[test]
+fn unshift_large_lengths_use_a_bounded_lazy_scan() {
+    assert_all(&[
+        (
+            "(function(){const o={length:2**53};const result=Array.prototype.unshift.call(o);return result+'|'+o.length;})()",
+            "9007199254740991|9007199254740991",
+        ),
+        (
+            "(function(){\
+                const marker={};let caught=false;\
+                const o={\
+                    get '9007199254740986'(){throw marker;},\
+                    '9007199254740987':'a',\
+                    '9007199254740989':'b',\
+                    length:2**53-2\
+                };\
+                try{Array.prototype.unshift.call(o,null)}catch(error){caught=error===marker;}\
+                return caught+'|'+o.length+'|'+o['9007199254740988']+'|'\
+                    +('9007199254740989' in o)+'|'+o['9007199254740990'];\
+            })()",
+            "true|9007199254740990|a|false|b",
+        ),
+    ]);
+}
+
 /// `reverse` exchanges each pair in place and returns the same object.
 #[test]
 fn reverse_exchanges_pairs_in_place() {
@@ -257,6 +283,10 @@ fn fill_writes_across_its_resolved_range() {
         ("[1,2,3].fill(0).join()", "0,0,0"),
         ("[1,2,3].fill(0,1).join()", "1,0,0"),
         ("[1,2,3].fill(0,1,2).join()", "1,0,3"),
+        // An explicit `undefined` end has the same meaning as an absent end.
+        ("[1,2].fill(0,0,undefined).join()", "0,0"),
+        // `undefined` start still converts through `ToIntegerOrInfinity` to 0.
+        ("[1,2].fill(0,undefined).join()", "0,0"),
         // Negative bounds count from the end.
         ("[1,2,3].fill(0,-2).join()", "1,0,0"),
         ("[1,2,3].fill(0,0,-1).join()", "0,0,3"),
@@ -266,6 +296,18 @@ fn fill_writes_across_its_resolved_range() {
         // An absent value fills with `undefined`.
         ("String([1,2].fill()[0])", "undefined"),
     ]);
+}
+
+#[test]
+fn fill_reaches_the_first_observable_write_without_materializing_a_safe_integer_range() {
+    assert_all(&[(
+        "(function(){\
+            const object={length:Infinity,set 0(value){throw 'invoked';}};\
+            try{Array.prototype.fill.call(object,0)}catch(error){return error;}\
+            return 'miss';\
+        })()",
+        "invoked",
+    )]);
 }
 
 /// `copyWithin` copies a resolved range in place and returns its receiver.
@@ -550,6 +592,20 @@ fn growing_past_the_maximum_length_is_rejected() {
     );
 }
 
+/// A real Array publishes the non-index property before its exotic length
+/// write rejects `2^32` with `RangeError`.
+#[test]
+fn push_preserves_the_element_before_invalid_array_length_rejection() {
+    assert_all(&[(
+        "(function(){\
+            const a=[];a.length=4294967295;let range=false;\
+            try{a.push('x')}catch(error){range=error instanceof RangeError;}\
+            return range+'|'+a[4294967295]+'|'+a.length;\
+        })()",
+        "true|x|4294967295",
+    )]);
+}
+
 /// A nullish receiver is rejected before the length is read.
 #[test]
 fn a_nullish_receiver_is_rejected() {
@@ -588,7 +644,37 @@ fn reverse_uses_proxy_internal_methods() {
             Array.prototype.reverse.call(proxy);\
             return log+'|'+target.join();\
         })()",
-        "glength;h0;g0;h1;g1;s1=1;s0=2;|2,1",
+        "glength;h0;g0;h1;g1;s0=2;s1=1;|2,1",
+    )]);
+}
+
+/// A maximum `ToLength` reverse uses ordinary decimal property keys and starts
+/// observable work immediately instead of allocating one swap per pair.
+#[test]
+fn reverse_large_proxy_is_lazy_and_preserves_trap_order() {
+    assert_all(&[(
+        "(function(){\
+            function StopReverse(){}\
+            const target={\
+                0:'zero',2:'two',\
+                get 4(){throw new StopReverse();},\
+                9007199254740987:'high3',\
+                9007199254740990:'high0',\
+                length:2**53+2\
+            };\
+            const log=[];\
+            const proxy=new Proxy(target,{\
+                getOwnPropertyDescriptor:function(t,k){log.push('GetOwnPropertyDescriptor:'+k);return Reflect.getOwnPropertyDescriptor(t,k);},\
+                defineProperty:function(t,k,d){log.push('DefineProperty:'+k);return Reflect.defineProperty(t,k,d);},\
+                has:function(t,k){log.push('Has:'+k);return Reflect.has(t,k);},\
+                get:function(t,k,r){log.push('Get:'+k);return Reflect.get(t,k,r);},\
+                set:function(t,k,v,r){log.push('Set:'+k);return Reflect.set(t,k,v,r);},\
+                deleteProperty:function(t,k){log.push('Delete:'+k);return Reflect.deleteProperty(t,k);}\
+            });\
+            try{Array.prototype.reverse.call(proxy);}catch(error){if(!(error instanceof StopReverse))throw error;}\
+            return log.join(';');\
+        })()",
+        "Get:length;Has:0;Get:0;Has:9007199254740990;Get:9007199254740990;Set:0;GetOwnPropertyDescriptor:0;DefineProperty:0;Set:9007199254740990;GetOwnPropertyDescriptor:9007199254740990;DefineProperty:9007199254740990;Has:1;Has:9007199254740989;Has:2;Get:2;Has:9007199254740988;Delete:2;Set:9007199254740988;GetOwnPropertyDescriptor:9007199254740988;DefineProperty:9007199254740988;Has:3;Has:9007199254740987;Get:9007199254740987;Set:3;GetOwnPropertyDescriptor:3;DefineProperty:3;Delete:9007199254740987;Has:4;Get:4",
     )]);
 }
 

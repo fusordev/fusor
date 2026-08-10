@@ -3,7 +3,8 @@ use quickjs_bytecode::{
     VerificationLimits,
 };
 use quickjs_compiler::{
-    CompilationContext, CompiledFunctionTree, CompiledRealmGlobalSource, LeafCompilationError,
+    CompilationContext, CompiledFunctionTree, CompiledRealmGlobalSource, DeclarationKind,
+    LeafCompilationError,
 };
 use quickjs_frontend::{
     CompilationGoal, DirectEvalBinding, DirectEvalBindingKind, DirectEvalBindingLocation,
@@ -125,6 +126,56 @@ fn closed_sloppy_direct_eval_certifies_eval_local_lexicals() {
 }
 
 #[test]
+fn direct_eval_keeps_named_class_binding_in_tdz_through_computed_names() {
+    let tree = compile("class EvalDeclaration { [EvalDeclaration]() {} }", false)
+        .expect("named class direct-eval authority");
+    let root = tree.root();
+    let binding = root
+        .storage_plan()
+        .bindings_for(root.executable())
+        .expect("direct-eval root bindings")
+        .iter()
+        .find(|binding| binding.policy().kind() == DeclarationKind::ClassName)
+        .expect("synthetic class-name binding");
+    let slot = root
+        .locals()
+        .iter()
+        .find(|local| local.binding() == binding.id())
+        .expect("class-name local")
+        .slot()
+        .index();
+    let initialization = match slot {
+        0 => (FinalOpcode::PutLoc0, Operands::NoneLoc),
+        1 => (FinalOpcode::PutLoc1, Operands::NoneLoc),
+        2 => (FinalOpcode::PutLoc2, Operands::NoneLoc),
+        3 => (FinalOpcode::PutLoc3, Operands::NoneLoc),
+        slot => (
+            FinalOpcode::PutLoc8,
+            Operands::Loc8(u8::try_from(slot).expect("small direct-eval local layout")),
+        ),
+    };
+    let instructions = root
+        .control_flow()
+        .instructions()
+        .iter()
+        .map(|instruction| {
+            let instruction = instruction.decoded().instruction();
+            (instruction.opcode(), instruction.operands())
+        })
+        .collect::<Vec<_>>();
+    let computed_name_read = instructions
+        .iter()
+        .position(|instruction| *instruction == (FinalOpcode::GetLocCheck, Operands::Loc(slot)))
+        .expect("computed name reads the uninitialized inner binding");
+    let class_name_initialization = instructions
+        .iter()
+        .position(|instruction| *instruction == initialization)
+        .expect("class constructor initializes the inner binding");
+
+    assert!(computed_name_read < class_name_initialization);
+}
+
+#[test]
 fn caller_strictness_makes_direct_eval_var_declarations_local() {
     let tree =
         compile("var answer = 40 + 2; answer;", true).expect("closed strict direct eval authority");
@@ -229,6 +280,53 @@ fn direct_eval_certifies_inherited_derived_constructor_authority() {
             .iter()
             .any(|instruction| {
                 instruction.decoded().instruction().opcode() == FinalOpcode::CheckCtorReturn
+            })
+    );
+}
+
+#[test]
+fn direct_eval_certifies_contextual_instance_element_initialization() {
+    let tree = compile_with_capabilities(
+        "super();",
+        DirectEvalCapabilities::new()
+            .with_new_target(true)
+            .with_super_call(true)
+            .with_instance_elements(true),
+    )
+    .expect("contextual instance-element direct eval authority");
+    let root = tree.verified_bytecode().root();
+    assert!(
+        root.function()
+            .control_flow()
+            .function_header()
+            .flags()
+            .direct_eval_has_instance_elements()
+    );
+    assert!(
+        root.function()
+            .control_flow()
+            .instructions()
+            .windows(7)
+            .any(|instructions| {
+                let expected = [
+                    (FinalOpcode::CheckCtorReturn, Operands::None),
+                    (FinalOpcode::SpecialObject, Operands::U8(6)),
+                    (FinalOpcode::PushThis, Operands::None),
+                    (FinalOpcode::Swap, Operands::None),
+                    (
+                        FinalOpcode::CallMethod,
+                        Operands::NPop { argument_count: 0 },
+                    ),
+                    (FinalOpcode::Drop, Operands::None),
+                    (FinalOpcode::Drop, Operands::None),
+                ];
+                instructions
+                    .iter()
+                    .zip(expected)
+                    .all(|(instruction, (opcode, operands))| {
+                        let instruction = instruction.decoded().instruction();
+                        instruction.opcode() == opcode && instruction.operands() == operands
+                    })
             })
     );
 }

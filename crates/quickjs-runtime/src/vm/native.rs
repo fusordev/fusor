@@ -44,6 +44,7 @@ pub(super) enum NativeDispatch {
     ForOfRecord {
         iterator: StoredValue,
         next: StoredValue,
+        asynchronous: bool,
     },
     ForOfStep {
         value: StoredValue,
@@ -282,7 +283,17 @@ pub(super) fn resume_iterator_abrupt_continuations(
                         execution_budget,
                     )
                 }
+                OperatorPrimitiveTarget::DynamicImportSpecifier(state) => {
+                    resume_dynamic_import_abrupt(runtime, &state, pending)
+                }
                 OperatorPrimitiveTarget::IteratorLimit(state) => resume_iterator_limit_abrupt(
+                    runtime,
+                    *state,
+                    pending,
+                    return_to,
+                    execution_budget,
+                ),
+                OperatorPrimitiveTarget::IteratorJoin(state) => resume_iterator_join_abrupt(
                     runtime,
                     *state,
                     pending,
@@ -299,6 +310,9 @@ pub(super) fn resume_iterator_abrupt_continuations(
             },
             NativeContinuation::RegExp(state) if state.handles_abrupt() => {
                 resume_regexp_abrupt(runtime, &state, pending)
+            }
+            NativeContinuation::DynamicImport(state) => {
+                resume_dynamic_import_abrupt(runtime, &state, pending)
             }
             NativeContinuation::Promise(state) => {
                 resume_promise_abrupt(runtime, state, pending, return_to, execution_budget)
@@ -1036,6 +1050,12 @@ pub(super) fn resume_native_continuations(
             NativeContinuation::IteratorZipClose(state) => {
                 advance_iterator_zip_close(runtime, *state, value, return_to, execution_budget)?
             }
+            NativeContinuation::IteratorIncludes(state) => {
+                advance_iterator_includes(runtime, state, value, return_to, execution_budget)?
+            }
+            NativeContinuation::IteratorJoin(state) => {
+                advance_iterator_join(runtime, state, value, return_to, execution_budget)?
+            }
             NativeContinuation::IteratorConsumer(state) => {
                 advance_iterator_consumer(runtime, state, value, return_to, execution_budget)?
             }
@@ -1080,7 +1100,7 @@ pub(super) fn resume_native_continuations(
                 advance_for_of_next(runtime, state, value, return_to, execution_budget)?
             }
             NativeContinuation::ForOfClose(state) => {
-                advance_for_of_close(state, &value, return_to)?
+                advance_for_of_close(runtime, state, value, return_to, execution_budget)?
             }
             NativeContinuation::AsyncFromSync(state) => {
                 advance_async_from_sync(runtime, state, value, return_to, execution_budget)?
@@ -1095,7 +1115,7 @@ pub(super) fn resume_native_continuations(
                 advance_iterator_append(runtime, state, value, return_to, execution_budget)?
             }
             NativeContinuation::IteratorClose(state) => {
-                advance_iterator_close(state, value, return_to)?
+                advance_iterator_close(runtime, state, value, return_to, execution_budget)?
             }
             NativeContinuation::ForIn(state) => advance_for_in(
                 runtime,
@@ -1160,6 +1180,9 @@ pub(super) fn resume_native_continuations(
                 return_to,
                 execution_budget,
             )?,
+            NativeContinuation::ArrayToString(state) => {
+                finish_array_to_string(runtime, state, &value, return_to, execution_budget)?
+            }
             NativeContinuation::ArrayJoin(state) => advance_array_join(
                 runtime,
                 *state,
@@ -1483,6 +1506,13 @@ pub(super) fn resume_native_continuations(
             NativeContinuation::InstanceOf(state) => {
                 advance_instance_of(runtime, state, &value, return_to, execution_budget)?
             }
+            NativeContinuation::DynamicImport(state) => advance_dynamic_import(
+                runtime,
+                *state,
+                value.duplicate(),
+                return_to,
+                execution_budget,
+            )?,
             NativeContinuation::Promise(state) => advance_promise_continuation(
                 runtime,
                 state,
@@ -1504,6 +1534,9 @@ pub(super) fn resume_native_continuations(
                 return_to,
                 execution_budget,
             )?,
+            NativeContinuation::OrdinaryConstructorPrototype(state) => {
+                finish_ordinary_constructor_prototype(runtime, *state, &value)?
+            }
             NativeContinuation::ProxyGet(state) => advance_proxy_get(
                 runtime,
                 *state,
@@ -1575,6 +1608,16 @@ pub(super) fn resume_native_continuations(
                 execution_budget,
             )?,
             NativeContinuation::ObjectMeta(state) => advance_object_meta(state, &value)?,
+            NativeContinuation::LegacyAccessorLookup(state) => advance_legacy_lookup_accessor(
+                runtime,
+                *state,
+                value.duplicate(),
+                return_to,
+                execution_budget,
+            )?,
+            NativeContinuation::LegacyDefineAccessor => {
+                NativeDispatch::Immediate(StoredValue::Undefined)
+            }
             NativeContinuation::OwnDescriptorQuery(state) => {
                 advance_own_descriptor_query(runtime, state, value.duplicate())?
             }
@@ -2189,6 +2232,31 @@ fn resolve_native_dispatch_inner(
 
         let supplied_argument_count = call.arguments.remaining().len();
         let construction = call.new_target;
+        if construction.is_none() && bytecode_function_is_class_constructor(runtime, call.function)?
+        {
+            let pending = PendingException {
+                // ECMAScript function [[Call]] creates this TypeError in the
+                // class constructor's callee context.
+                realm: runtime.function_realm(call.function)?,
+                payload: PendingExceptionPayload::EngineError {
+                    kind: ExceptionKind::TypeError,
+                    message: class_constructor_call_message(runtime, call.function)?,
+                },
+                origin: call.origin,
+            };
+            dispatch = resume_iterator_abrupt_continuations(
+                runtime,
+                call.continuations,
+                pending,
+                call.return_to,
+                active_root_frames,
+                active_frames,
+                active_frame_values,
+                compiler,
+                execution_budget,
+            )?;
+            continue;
+        }
         let plan = plan_frame(
             runtime,
             call.function,
@@ -2202,6 +2270,11 @@ fn resolve_native_dispatch_inner(
             },
         )
         .map_err(NativeFailure::Execution)?;
+        let operation_realm = if let Some(frame) = active_root_frames.last() {
+            code(runtime, frame.code)?.realm
+        } else {
+            runtime.function_realm(call.function)?
+        };
         let mut frame = create_frame(
             runtime,
             plan,
@@ -2216,16 +2289,65 @@ fn resolve_native_dispatch_inner(
             None,
         )
         .map_err(NativeFailure::Execution)?;
-        if let Some(new_target) = construction
+        frame.native_caller = call.native_caller;
+        apply_native_pre_call(runtime, call.pre_call.as_ref())?;
+        if construction.is_some()
             && frame.constructor_state != ConstructorState::DerivedUninitialized
         {
-            frame.receiver =
-                StoredValue::Object(create_ordinary_constructor_receiver(runtime, new_target)?);
-            frame.constructor_state = ConstructorState::Ordinary;
+            let outcome = begin_ordinary_constructor_receiver(
+                runtime,
+                frame,
+                operation_realm,
+                call.origin,
+                execution_budget,
+            );
+            let outcome = match outcome {
+                Ok(outcome) => outcome,
+                Err(
+                    NativeFailure::Abrupt(pending) | NativeFailure::AbruptAfterTransient(pending),
+                ) => {
+                    dispatch = resume_iterator_abrupt_continuations(
+                        runtime,
+                        call.continuations,
+                        pending,
+                        call.return_to,
+                        active_root_frames,
+                        active_frames,
+                        active_frame_values,
+                        compiler,
+                        execution_budget,
+                    )?;
+                    continue;
+                }
+                Err(NativeFailure::Execution(error)) => {
+                    return Err(NativeFailure::Execution(error));
+                }
+            };
+            match outcome {
+                NativeDispatch::Frame(mut frame) => {
+                    attach_native_continuations(&mut frame, call.continuations)?;
+                    return Ok(NativeDispatch::Frame(frame));
+                }
+                NativeDispatch::Call(mut inner) => {
+                    prepend_native_continuations(&mut inner, call.continuations)?;
+                    dispatch = NativeDispatch::Call(inner);
+                    continue;
+                }
+                NativeDispatch::Immediate(_)
+                | NativeDispatch::Pair(_, _)
+                | NativeDispatch::ForOfRecord { .. }
+                | NativeDispatch::ForOfStep { .. }
+                | NativeDispatch::ForOfClosed
+                | NativeDispatch::CopyDataPropertiesDone
+                | NativeDispatch::AsyncAwait { .. } => {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "ordinary constructor prototype Get produced an invalid dispatch",
+                    }
+                    .into());
+                }
+            }
         }
-        frame.native_caller = call.native_caller;
         attach_native_continuations(&mut frame, call.continuations)?;
-        apply_native_pre_call(runtime, call.pre_call.as_ref())?;
         return Ok(NativeDispatch::Frame(frame));
     }
 }
@@ -2602,10 +2724,16 @@ pub(super) fn dispatch_native_call_with_frames(
             };
             Ok(NativeDispatch::Immediate(StoredValue::Boolean(is_error)))
         }
-        NativeFunctionKind::ObjectConstructor => {
-            let mut arguments = inputs.arguments;
-            object_constructor(runtime, native.realm, arguments.take_first())
-        }
+        NativeFunctionKind::ObjectConstructor => begin_object_constructor(
+            runtime,
+            function,
+            native.realm,
+            inputs.arguments.take_first(),
+            inputs.new_target,
+            return_to,
+            origin,
+            execution_budget,
+        ),
         NativeFunctionKind::ObjectGetPrototypeOf => {
             let mut arguments = inputs.arguments;
             get_prototype_of(
@@ -2895,6 +3023,48 @@ pub(super) fn dispatch_native_call_with_frames(
                 execution_budget,
             )
         }
+        NativeFunctionKind::ObjectPrototypeDefineGetter
+        | NativeFunctionKind::ObjectPrototypeDefineSetter => {
+            let mut arguments = inputs.arguments;
+            let key = arguments.take_first_or_undefined();
+            let accessor = arguments.take_first_or_undefined();
+            let kind = if matches!(native.kind, NativeFunctionKind::ObjectPrototypeDefineGetter) {
+                LegacyAccessorKind::Getter
+            } else {
+                LegacyAccessorKind::Setter
+            };
+            begin_legacy_define_accessor(
+                runtime,
+                native.realm,
+                inputs.receiver,
+                key,
+                &accessor,
+                kind,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::ObjectPrototypeLookupGetter
+        | NativeFunctionKind::ObjectPrototypeLookupSetter => {
+            let mut arguments = inputs.arguments;
+            let key = arguments.take_first_or_undefined();
+            let kind = if matches!(native.kind, NativeFunctionKind::ObjectPrototypeLookupGetter) {
+                LegacyAccessorKind::Getter
+            } else {
+                LegacyAccessorKind::Setter
+            };
+            begin_legacy_lookup_accessor(
+                runtime,
+                native.realm,
+                inputs.receiver,
+                key,
+                kind,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
         // `isPrototypeOf` walks the argument's prototype chain, so it needs no
         // key conversion at all. A primitive argument has no chain to walk and a
         // receiver never precedes itself, which is why `p.isPrototypeOf(p)` is
@@ -2910,6 +3080,27 @@ pub(super) fn dispatch_native_call_with_frames(
                 &candidate,
                 return_to,
                 origin,
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::ObjectPrototypeProtoGetter => object_prototype_proto_getter(
+            runtime,
+            native.realm,
+            inputs.receiver,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::ObjectPrototypeProtoSetter => {
+            let mut arguments = inputs.arguments;
+            let requested = arguments.take_first_or_undefined();
+            object_prototype_proto_setter(
+                runtime,
+                native.realm,
+                &inputs.receiver,
+                &requested,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
                 execution_budget,
             )
         }
@@ -4436,6 +4627,41 @@ pub(super) fn dispatch_native_call_with_frames(
                 execution_budget,
             )
         }
+        NativeFunctionKind::IteratorPrototypeIncludes => {
+            let search_element = inputs.arguments.take_first_or_undefined();
+            let skipped_elements = inputs.arguments.take_first();
+            begin_iterator_includes(
+                runtime,
+                inputs.receiver,
+                search_element,
+                skipped_elements.as_ref(),
+                native.realm,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::IteratorPrototypeJoin => begin_iterator_join(
+            runtime,
+            inputs.receiver,
+            inputs.arguments.take_first_or_undefined(),
+            native.realm,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::IteratorPrototypeChunks => {
+            let chunk_size = inputs.arguments.take_first_or_undefined();
+            begin_iterator_chunks(
+                runtime,
+                inputs.receiver,
+                &chunk_size,
+                native.realm,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
         NativeFunctionKind::IteratorPrototypeDispose => begin_iterator_dispose(
             runtime,
             inputs.receiver,
@@ -4506,6 +4732,20 @@ pub(super) fn dispatch_native_call_with_frames(
             origin.unwrap_or_else(native_function_host_origin),
             execution_budget,
         ),
+        NativeFunctionKind::IteratorPrototypeWindows => {
+            let window_size = inputs.arguments.take_first_or_undefined();
+            let undersized = inputs.arguments.take_first_or_undefined();
+            begin_iterator_windows(
+                runtime,
+                inputs.receiver,
+                &window_size,
+                undersized,
+                native.realm,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
         NativeFunctionKind::IteratorPrototypeConstructorGetter => Ok(NativeDispatch::Immediate(
             StoredValue::Function(runtime.realm_iterator_constructor(native.realm)?),
         )),
@@ -4615,6 +4855,16 @@ pub(super) fn dispatch_native_call_with_frames(
             execution_budget,
         ),
         NativeFunctionKind::SymbolConstructor => {
+            if inputs.new_target.is_some() {
+                return Err(NativeFailure::Abrupt(PendingException {
+                    realm: native.realm,
+                    payload: PendingExceptionPayload::EngineError {
+                        kind: ExceptionKind::TypeError,
+                        message: JsString::from_utf8("Symbol is not a constructor")?,
+                    },
+                    origin: origin.unwrap_or_else(native_function_host_origin),
+                }));
+            }
             let mut arguments = inputs.arguments;
             let Some(argument) = arguments.take_first() else {
                 return Ok(NativeDispatch::Immediate(StoredValue::Symbol(
@@ -4714,14 +4964,10 @@ pub(super) fn dispatch_native_call_with_frames(
                 execution_budget,
             )
         }
-        // `Array.prototype.toString` is `join` with no separator: the pinned
-        // table dispatches it straight to `js_array_join`
-        // (`quickjs.c:44558`).
-        NativeFunctionKind::ArrayPrototypeToString => begin_array_join(
+        NativeFunctionKind::ArrayPrototypeToString => begin_array_to_string(
             runtime,
             native.realm,
             inputs.receiver,
-            None,
             return_to,
             origin.unwrap_or_else(native_function_host_origin),
             execution_budget,
@@ -5580,24 +5826,49 @@ fn begin_function_bind(
         target,
         bound_this,
         bound_arguments,
+        prototype: FunctionBindPrototype::Pending,
         length: JsNumber::from_i32(0),
         realm,
-        stage: FunctionBindStage::AwaitLengthValue,
+        stage: FunctionBindStage::AwaitPrototype,
         origin,
     };
-    let target_value = StoredValue::Function(target);
+    let dispatch = begin_internal_get_prototype_of(
+        runtime,
+        HeapReference::Function(target),
+        realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    )?;
+    continue_get_after(
+        dispatch,
+        state,
+        NativeContinuation::FunctionBind,
+        |state, value| {
+            advance_function_bind(runtime, state, Some(value), return_to, execution_budget)
+        },
+        "Function bind [[GetPrototypeOf]] produced a structured result",
+    )
+}
+
+fn begin_function_bind_length(
+    runtime: &mut Runtime,
+    mut state: FunctionBindContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let target_value = StoredValue::Function(state.target);
     let length_key = runtime.predefined_property_key(PredefinedAtom::Length);
     if runtime
-        .proxy_state(HeapReference::Function(target))?
+        .proxy_state(HeapReference::Function(state.target))?
         .is_some()
     {
-        let mut state = state;
         state.stage = FunctionBindStage::AwaitLengthDescriptor;
         let dispatch = begin_internal_get_own_property(
             runtime,
-            HeapReference::Function(target),
+            HeapReference::Function(state.target),
             length_key,
-            realm,
+            state.realm,
             return_to,
             state.origin.clone(),
             execution_budget,
@@ -5613,13 +5884,14 @@ fn begin_function_bind(
         );
     }
     let has_length = runtime
-        .object_record(HeapReference::Function(target))
+        .object_record(HeapReference::Function(state.target))
         .map_err(NativeFailure::from)?
         .own_property(&length_key)
         .is_some();
     if !has_length {
         return bind_name_read(runtime, state, return_to, execution_budget);
     }
+    state.stage = FunctionBindStage::AwaitLengthValue;
     begin_function_bind_get(
         runtime,
         state,
@@ -5649,6 +5921,31 @@ fn advance_function_bind(
         .into());
     };
     match state.stage {
+        FunctionBindStage::AwaitPrototype => {
+            let prototype = match value {
+                StoredValue::Null => FunctionBindPrototype::Null,
+                StoredValue::Function(function) => {
+                    FunctionBindPrototype::Heap(HeapReference::Function(function))
+                }
+                StoredValue::Object(object) => {
+                    FunctionBindPrototype::Heap(HeapReference::Object(object))
+                }
+                StoredValue::Undefined
+                | StoredValue::Boolean(_)
+                | StoredValue::Number(_)
+                | StoredValue::BigInt(_)
+                | StoredValue::String(_)
+                | StoredValue::Symbol(_) => {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "Function bind [[GetPrototypeOf]] returned neither object nor null",
+                    }
+                    .into());
+                }
+            };
+            let mut state = state;
+            state.prototype = prototype;
+            begin_function_bind_length(runtime, state, return_to, execution_budget)
+        }
         FunctionBindStage::AwaitLengthDescriptor => {
             if matches!(value, StoredValue::Undefined) {
                 return bind_name_read(runtime, state, return_to, execution_budget);
@@ -5785,9 +6082,16 @@ fn bind_name_value(
         | StoredValue::Object(_) => JsString::empty(),
     };
     let name = JsString::from_utf8("bound ")?.concat(&name)?;
-    let prototype = runtime
-        .realm_function_prototype(state.realm)
-        .map_err(NativeFailure::from)?;
+    let prototype = match state.prototype {
+        FunctionBindPrototype::Pending => {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "Function bind allocation lost the target prototype",
+            }
+            .into());
+        }
+        FunctionBindPrototype::Null => None,
+        FunctionBindPrototype::Heap(prototype) => Some(prototype),
+    };
     check_execution_limit(
         RuntimeResource::HeapFunctions,
         runtime.limits.max_heap_functions,
@@ -5807,7 +6111,7 @@ fn bind_name_value(
         })?;
     let length_key = runtime.predefined_property_key(PredefinedAtom::Length);
     let name_key = runtime.predefined_property_key(PredefinedAtom::Name);
-    let mut object = crate::object::ObjectRecord::empty(Some(HeapReference::Function(prototype)));
+    let mut object = crate::object::ObjectRecord::empty(prototype);
     object
         .try_reserve_data(2)
         .map_err(|_| ExecutionError::AllocationFailed {

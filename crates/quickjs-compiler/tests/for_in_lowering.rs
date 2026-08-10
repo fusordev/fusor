@@ -5,7 +5,6 @@ use quickjs_bytecode::{
 };
 use quickjs_compiler::{
     CompilationContext, CompiledFunctionTree, CompiledLeafFunction, LeafCompilationError,
-    UnsupportedLeafFeature,
 };
 use quickjs_frontend::{
     CompilationGoal, FrontendDiagnosticCode, FrontendOptions, GlobalScriptGoal, with_parsed_program,
@@ -46,24 +45,6 @@ fn compile_verified_tree(source: &str, name: &str) -> CompiledFunctionTree {
             context
                 .compile_tree(&executable, VerificationLimits::default())
                 .expect("for-in tree lowering")
-        },
-    )
-    .expect("front-end acceptance")
-}
-
-fn compile_tree_error(source: &str, name: &str) -> LeafCompilationError {
-    with_parsed_program(
-        source,
-        FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
-        |unit| {
-            let context = CompilationContext::new(unit).expect("storage planning");
-            let executable = context
-                .executables()
-                .find(|candidate| candidate.metadata().name() == Some(name))
-                .expect("named function");
-            context
-                .compile_tree(&executable, VerificationLimits::default())
-                .expect_err("for-in lowering must reject the selected source")
         },
     )
     .expect("front-end acceptance")
@@ -597,30 +578,40 @@ fn strict_legacy_var_initializer_is_rejected_by_the_published_oxc_frontend() {
 }
 
 #[test]
-fn valid_destructuring_heads_remain_fail_closed_at_the_exact_target_span() {
-    for (source, expected, expected_feature) in [
+fn declaration_and_assignment_destructuring_heads_use_the_iteration_value() {
+    for (name, source, checked_initializations, scope_activations) in [
         (
-            "function declarationPattern(object){ for (const {key} in object) {} }",
-            "{key}",
-            UnsupportedLeafFeature::UnsupportedDeclaration,
+            "declarationPattern",
+            "function declarationPattern(object){for(const {length,[length-1]:tail} in object){return tail;}}",
+            2,
+            4,
         ),
         (
-            "function assignmentPattern(object,key){ for ([key] in object) {} }",
-            "[key]",
-            UnsupportedLeafFeature::UnsupportedExpression,
+            "assignmentPattern",
+            "function assignmentPattern(object,key){for([key] in object){return key;}}",
+            0,
+            0,
         ),
     ] {
-        let name = if expected == "{key}" {
-            "declarationPattern"
-        } else {
-            "assignmentPattern"
-        };
-        let LeafCompilationError::Unsupported { feature, span } = compile_tree_error(source, name)
-        else {
-            panic!("destructuring for-in head must fail closed");
-        };
-        assert_eq!(feature, expected_feature);
-        assert_eq!(&source[span.start as usize..span.end as usize], expected);
+        let compiled = compile_tree(source, name);
+        let opcodes = opcodes(&compiled);
+        assert!(opcodes.contains(&FinalOpcode::ForInNext), "{name}");
+        assert_eq!(
+            opcodes
+                .iter()
+                .filter(|&&opcode| opcode == FinalOpcode::PutLocCheckInit)
+                .count(),
+            checked_initializations,
+            "{name}"
+        );
+        assert_eq!(
+            opcodes
+                .iter()
+                .filter(|&&opcode| opcode == FinalOpcode::SetLocUninitialized)
+                .count(),
+            scope_activations,
+            "{name}"
+        );
     }
 }
 

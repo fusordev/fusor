@@ -579,15 +579,23 @@ pub(super) fn begin_async_generator_await_resume(
             let mut frame = record.frame.take().ok_or(EngineFault::RuntimeInvariant {
                 message: "async-generator reaction lost its suspended frame",
             })?;
-            match kind {
-                crate::object::PromiseReactionKind::Fulfill => push(&mut frame, argument),
-                crate::object::PromiseReactionKind::Reject => {
-                    let realm = code(runtime, frame.code)?.realm;
-                    frame.resume_abrupt = Some(PendingException {
-                        realm,
-                        payload: PendingExceptionPayload::ThrownValue(argument),
-                        origin: awaited.origin,
-                    });
+            if !resume_pending_async_iterator_close(
+                runtime,
+                &mut frame,
+                kind,
+                argument.duplicate(),
+                awaited.origin.clone(),
+            )? {
+                match kind {
+                    crate::object::PromiseReactionKind::Fulfill => push(&mut frame, argument),
+                    crate::object::PromiseReactionKind::Reject => {
+                        let realm = code(runtime, frame.code)?.realm;
+                        frame.resume_abrupt = Some(PendingException {
+                            realm,
+                            payload: PendingExceptionPayload::ThrownValue(argument),
+                            origin: awaited.origin,
+                        });
+                    }
                 }
             }
             runtime.collection_pending = true;

@@ -62,6 +62,17 @@ fn field_initializer_arrows_capture_the_lexical_super_home_object() {
 }
 
 #[test]
+fn optional_and_spread_super_calls_preserve_receiver_and_short_circuiting() {
+    run_with(
+        "function run(){let effects=0;class Base{method(...values){return this.value+values[0]+values[1];}get missing(){return null;}}Base.prototype[0]={answer:7};class Derived extends Base{constructor(){super()?.missing;this.value=10;}test(){let direct=super.method?.(1,2)===13;let computed=super['method']?.(3,4)===17;let parenthesized=(super.method)?.(1,2)===13;let parenthesizedComputed=(super['method'])?.(3,4)===17;let missing=super.missing?.(effects++)===void 0&&effects===0;let spread=super.method(...[5,6])===21;let computedSpread=super['method'](...[7,8])===25;let chained=super[0]?.answer===7;return direct&&computed&&parenthesized&&parenthesizedComputed&&missing&&spread&&computedSpread&&chained;}}return new Derived().test();}",
+        |result| {
+            let value = result.expect("optional and spread super call execution");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+}
+
+#[test]
 fn a_class_constructor_rejects_direct_calls_but_remains_constructable() {
     run_with(
         "function run(){class Box{constructor(){}}Box();}",
@@ -114,6 +125,39 @@ fn a_default_derived_constructor_forwards_arguments_and_installs_both_inheritanc
         "function run(){class Base{constructor(value){this.value=value;}}class Derived extends Base{static answer(){return 7;}}let instance=new Derived(9);return instance.value===9&&instance.constructor===Derived&&Derived.answer()===7;}",
         |result| {
             let value = result.expect("derived class execution");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+}
+
+#[test]
+fn an_object_subclass_allocates_from_the_derived_new_target() {
+    run_with(
+        "function run(){class Derived extends ({}).constructor{value(){return 42;}}let ignored={};let instance=new Derived(ignored);return instance!==ignored&&instance.value()===42&&instance.constructor===Derived&&instance instanceof Derived&&instance instanceof ({}).constructor;}",
+        |result| {
+            let value = result.expect("Object subclass construction");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+}
+
+#[test]
+fn symbol_and_bigint_are_valid_heritage_but_reject_construction_before_coercion() {
+    run_with(
+        "function run(){let global=(function(){return this;})();let reflect=global.Reflect;let SymbolConstructor=global.Symbol;let BigIntConstructor=global.BigInt;function isConstructor(value){try{reflect.construct(function(){},[],value);return true;}catch(error){return false;}}class SymbolSubclass extends SymbolConstructor{}class BigIntSubclass extends BigIntConstructor{}let effects=0;let poison={valueOf(){effects++;throw 'valueOf';},toString(){effects++;throw 'toString';}};let symbol=false;let bigint=false;let symbolSubclass=false;let bigintSubclass=false;try{reflect.construct(SymbolConstructor,[poison]);}catch(error){symbol=error.name==='TypeError';}try{reflect.construct(BigIntConstructor,[poison]);}catch(error){bigint=error.name==='TypeError';}try{new SymbolSubclass(poison);}catch(error){symbolSubclass=error.name==='TypeError';}try{new BigIntSubclass(poison);}catch(error){bigintSubclass=error.name==='TypeError';}return isConstructor(SymbolConstructor)&&isConstructor(BigIntConstructor)&&symbol&&bigint&&symbolSubclass&&bigintSubclass&&effects===0;}",
+        |result| {
+            let value = result.expect("primitive constructor rejection");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+}
+
+#[test]
+fn class_constructors_reject_native_call_and_apply_paths_before_running_the_body() {
+    run_with(
+        "function run(){let entries=0;class Base{constructor(){entries++;}}class Derived extends Base{constructor(){entries+=10;super();}}let rejected=0;try{Base.call({});}catch(error){if(error.name==='TypeError')rejected++;}try{Base.apply({},[]);}catch(error){if(error.name==='TypeError')rejected++;}try{Derived.call({});}catch(error){if(error.name==='TypeError')rejected++;}try{Derived.apply({},[]);}catch(error){if(error.name==='TypeError')rejected++;}return rejected===4&&entries===0;}",
+        |result| {
+            let value = result.expect("class call/apply rejection");
             assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
         },
     );
@@ -307,9 +351,9 @@ fn interleaved_computed_fields_evaluate_all_keys_before_static_initializers() {
 }
 
 #[test]
-fn uncomputed_instance_field_initializers_observe_this_super_and_new_target() {
+fn uncomputed_instance_field_initializers_observe_this_super_and_undefined_new_target() {
     run_with(
-        "function run(){class Base{constructor(value){this._value=value;}get value(){return this._value;}}class Derived extends Base{fromSuper=super.value;target=new.target;constructor(value){super(value);this.bodySeesFields=this.fromSuper===value&&this.target===Derived;}}let value=new Derived(7);return value.fromSuper===7&&value.target===Derived&&value.bodySeesFields;}",
+        "function run(){class Base{constructor(value){this._value=value;}get value(){return this._value;}}class Derived extends Base{fromSuper=super.value;target=new.target;constructor(value){super(value);this.bodySeesFields=this.fromSuper===value&&this.target===void 0;}}let value=new Derived(7);return value.fromSuper===7&&value.target===void 0&&value.bodySeesFields;}",
         |result| {
             let value = result.expect("this, super, and new.target field execution");
             assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
@@ -318,9 +362,9 @@ fn uncomputed_instance_field_initializers_observe_this_super_and_new_target() {
 }
 
 #[test]
-fn uncomputed_instance_field_initializers_create_closures_in_the_constructor_environment() {
+fn uncomputed_instance_field_initializers_create_closures_in_the_hidden_environment() {
     run_with(
-        "function run(){let seed=2;class Default{value=3;read=()=>this.value+seed;readFunction=function(){return this.value+seed;};}class Explicit{value=4;read=()=>this.value+seed;constructor(){}}class Parent{value=5;}class Derived extends Parent{read=()=>this.value+seed;selected=seed?this.value+seed:0;}let defaultBox=new Default;let explicitBox=new Explicit;let derivedBox=new Derived;return defaultBox.read()===5&&defaultBox.read.name==='read'&&defaultBox.readFunction()===5&&defaultBox.readFunction.name==='readFunction'&&explicitBox.read()===6&&explicitBox.read.name==='read'&&derivedBox.read()===7&&derivedBox.read.name==='read'&&derivedBox.selected===7;}",
+        "function run(){let seed=2;class Default{value=3;read=()=>this.value+seed;target=()=>new.target;readFunction=function(){return this.value+seed;};}class Explicit{value=4;read=()=>this.value+seed;constructor(){}}class Parent{value=5;}class Derived extends Parent{read=()=>this.value+seed;selected=seed?this.value+seed:0;}let defaultBox=new Default;let explicitBox=new Explicit;let derivedBox=new Derived;return defaultBox.read()===5&&defaultBox.read.name==='read'&&defaultBox.target()===void 0&&defaultBox.readFunction()===5&&defaultBox.readFunction.name==='readFunction'&&explicitBox.read()===6&&explicitBox.read.name==='read'&&derivedBox.read()===7&&derivedBox.read.name==='read'&&derivedBox.selected===7;}",
         |result| {
             let value = result.expect("field initializer closure execution");
             assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
@@ -356,6 +400,50 @@ fn derived_constructor_arrows_share_the_mutable_this_binding_for_super_calls() {
         "function run(){let calls=0;let escaped;class Base{constructor(){calls++;}}class First extends Base{constructor(){let call=()=>super();let receiver=call();this.same=receiver===this;}}class Nested extends Base{constructor(){let call=()=>()=>super();call()();this.ready=true;}}class After extends Base{constructor(){let read=()=>this;super();this.arrowSeesReceiver=read()===this;}}class Before extends Base{constructor(){let read=()=>this;let early=false;try{read();}catch(error){early=error.name==='ReferenceError';}super();this.early=early;}}class Override extends Base{constructor(){escaped=()=>this;return {};}}class Twice extends Base{constructor(){let call=()=>super();super();call();}}class DirectTwice extends Base{constructor(){super();super();}}let first=new First;let nested=new Nested;let after=new After;let before=new Before;new Override;let escapedThrows=false;let repeated=false;let directRepeated=false;try{escaped();}catch(error){escapedThrows=error.name==='ReferenceError';}try{new Twice;}catch(error){repeated=error.name==='ReferenceError';}try{new DirectTwice;}catch(error){directRepeated=error.name==='ReferenceError';}return first.same&&nested.ready&&after.arrowSeesReceiver&&before.early&&escapedThrows&&repeated&&directRepeated&&calls===8;}",
         |result| {
             let value = result.expect("derived constructor arrow super execution");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+}
+
+#[test]
+fn arrow_super_calls_run_instance_initializers_once_after_binding_this() {
+    run_with(
+        "function run(){let baseCalls=0;let fieldCalls=0;class Base{constructor(){baseCalls++;}}class First extends Base{field=++fieldCalls;constructor(){let call=()=>super();let receiver=call();this.same=receiver===this;}}class Twice extends Base{field=++fieldCalls;constructor(){super();let call=()=>super();let repeated=false;try{call();}catch(error){repeated=error.name==='ReferenceError';}this.repeated=repeated;}}let first=new First;let twice=new Twice;return first.same&&first.field===1&&twice.repeated&&twice.field===2&&baseCalls===3&&fieldCalls===2;}",
+        |result| {
+            let value = result.expect("arrow super instance initialization");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+}
+
+#[test]
+fn private_destructuring_target_checks_this_before_invoking_the_source_getter() {
+    run_with(
+        "function run(){let getterCalls=0;let baseCalls=0;class Base{constructor(){baseCalls++;}}class Box extends Base{#field;constructor(){let initialize=()=>super();let source={get value(){getterCalls++;initialize();}};({value:this.#field}=source);}}let reference=false;try{new Box;}catch(error){reference=error.name==='ReferenceError';}return reference&&getterCalls===0&&baseCalls===0;}",
+        |result| {
+            let value = result.expect("private assignment target evaluation order");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+}
+
+#[test]
+fn private_field_iteration_heads_write_and_enforce_the_receiver_brand() {
+    run_with(
+        "function run(){class Box{#value;write(){for(this.#value of [1,2]){}let ofValue=this.#value;for(this.#value in {key:0}){}return ofValue===2&&this.#value==='key';}writeOf(){for(this.#value of [1]){}}writeIn(){for(this.#value in {key:0}){}}}let box=new Box;let values=box.write();let ofError=false;try{Box.prototype.writeOf.call({});}catch(error){ofError=error.name==='TypeError';}let inError=false;try{Box.prototype.writeIn.call({});}catch(error){inError=error.name==='TypeError';}return values&&ofError&&inError;}",
+        |result| {
+            let value = result.expect("private field iteration-head execution");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+}
+
+#[test]
+fn super_assignment_targets_write_through_the_actual_receiver() {
+    run_with(
+        "function run(){class Base{set value(next){this._value=next;this.writes.push(next);}set rest(next){this._rest=next;}}class Derived extends Base{check(){this.writes=[];[super.value,super['value'],...super.rest]=[1,2,3,4];let array=this._value===2&&this._rest.join(',')==='3,4'&&this.writes.join(',')==='1,2';this.writes=[];({first:super.value,second:super['value'],...super.rest}={first:5,second:6,extra:7});let object=this._value===6&&this._rest.extra===7&&this.writes.join(',')==='5,6';for(super.value in {first:0,second:0}){}let forIn=this._value==='second';for(super['value'] of [8,9]){}let forOf=this._value===9;return array&&object&&forIn&&forOf;}}return new Derived().check();}",
+        |result| {
+            let value = result.expect("super assignment targets");
             assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
         },
     );
@@ -400,6 +488,17 @@ fn class_super_property_compound_and_logical_assignments_keep_the_reference_once
         "function run(){class Base{get value(){return this._value;}set value(next){this._value=next;}static get answer(){return this._answer;}static set answer(next){this._answer=next;}}class Derived extends Base{constructor(value){super();this._value=value;this.keyReads=0;}key(){this.keyReads=this.keyReads+1;return 'value';}add(next){return super.value+=next;}addComputed(next){return super[this.key()]+=next;}or(next){return super.value||=next;}orComputed(next){return super[this.key()]||=next;}and(next){return super.value&&=next;}nullish(next){return super.value??=next;}pre(){return ++super.value;}post(){return super.value++;}preComputed(){return ++super[this.key()];}postComputed(){return super[this.key()]++;}static key(){this.keyReads=this.keyReads+1;return 'answer';}static add(next){return super.answer+=next;}static addComputed(next){return super[this.key()]+=next;}static or(next){return super.answer||=next;}static orComputed(next){return super[this.key()]||=next;}static and(next){return super.answer&&=next;}static nullish(next){return super.answer??=next;}static pre(){return ++super.answer;}static post(){return super.answer++;}static preComputed(){return ++super[this.key()];}static postComputed(){return super[this.key()]++;}}let value=new Derived(2);let instance=value.add(3)===5&&value._value===5;value.keyReads=0;instance=instance&&value.addComputed(4)===9&&value._value===9&&value.keyReads===1;value._value=0;instance=instance&&value.or(7)===7&&value._value===7;value._value=0;value.keyReads=0;instance=instance&&value.orComputed(8)===8&&value._value===8&&value.keyReads===1;value._value=2;instance=instance&&value.and(9)===9&&value._value===9;value._value=null;instance=instance&&value.nullish(10)===10&&value._value===10;value._value=1;instance=instance&&value.or(11)===1&&value._value===1;value._value=0;instance=instance&&value.and(12)===0&&value._value===0;value._value=2;instance=instance&&value.nullish(13)===2&&value._value===2;value._value=2;instance=instance&&value.pre()===3&&value._value===3;value._value=3;instance=instance&&value.post()===3&&value._value===4;value._value=4;value.keyReads=0;instance=instance&&value.preComputed()===5&&value._value===5&&value.keyReads===1;value._value=5;value.keyReads=0;instance=instance&&value.postComputed()===5&&value._value===6&&value.keyReads===1;Derived._answer=2;Derived.keyReads=0;let statics=Derived.add(3)===5&&Derived._answer===5&&Derived.addComputed(4)===9&&Derived._answer===9&&Derived.keyReads===1;Derived._answer=0;statics=statics&&Derived.or(7)===7&&Derived._answer===7;Derived._answer=0;Derived.keyReads=0;statics=statics&&Derived.orComputed(8)===8&&Derived._answer===8&&Derived.keyReads===1;Derived._answer=2;statics=statics&&Derived.and(9)===9&&Derived._answer===9;Derived._answer=null;statics=statics&&Derived.nullish(10)===10&&Derived._answer===10;Derived._answer=1;statics=statics&&Derived.or(11)===1&&Derived._answer===1;Derived._answer=0;statics=statics&&Derived.and(12)===0&&Derived._answer===0;Derived._answer=2;statics=statics&&Derived.nullish(13)===2&&Derived._answer===2;Derived._answer=2;statics=statics&&Derived.pre()===3&&Derived._answer===3;Derived._answer=3;statics=statics&&Derived.post()===3&&Derived._answer===4;Derived._answer=4;Derived.keyReads=0;statics=statics&&Derived.preComputed()===5&&Derived._answer===5&&Derived.keyReads===1;Derived._answer=5;Derived.keyReads=0;return instance&&statics&&Derived.postComputed()===5&&Derived._answer===6&&Derived.keyReads===1;}",
         |result| {
             let value = result.expect("super compound and logical assignment execution");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+}
+
+#[test]
+fn deleting_super_properties_throws_before_key_conversion_and_after_this_binding() {
+    run_with(
+        "function run(){let state={evaluations:0,conversions:0};let key={toString(){state.conversions++;return 'value';}};class Base{}class Derived extends Base{static plain(){try{delete super.value;}catch(error){return error.name==='ReferenceError';}}static computed(){try{delete super[key];}catch(error){return error.name==='ReferenceError';}}constructor(){try{delete super[(state.evaluations++,'value')];}catch(error){state.beforeSuper=error.name;}super();}}let value=new Derived;return Derived.plain()&&Derived.computed()&&value instanceof Derived&&state.evaluations===0&&state.conversions===0&&state.beforeSuper==='ReferenceError';}",
+        |result| {
+            let value = result.expect("delete super execution");
             assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
         },
     );
@@ -644,6 +743,40 @@ fn anonymous_class_static_field_receivers_use_the_created_constructor() {
         "function run(){let Box=class{static receiver=this;static captured=()=>this;};return Box.receiver===Box&&Box.captured()===Box;}",
         |result| {
             let value = result.expect("anonymous static class receiver execution");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+}
+
+#[test]
+fn static_block_throw_abandons_or_retains_the_class_stack_at_the_right_handler() {
+    run_with(
+        "function run(){let subsequent=false;try{class Failed{static{throw 7;}static x=subsequent=true;}}catch(error){if(error!==7)return false;}class Recovered{static{try{throw 3;}catch(error){this.x=error;}}static y=4;}return !subsequent&&Recovered.x===3&&Recovered.y===4;}",
+        |result| {
+            let value = result.expect("static block abrupt execution");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+    run_with(
+        "function run(){class Failed{static{throw 11;}static x=2;}}",
+        |result| {
+            let ExecutionError::Exception(exception) = result.expect_err("uncaught static throw")
+            else {
+                panic!("expected JavaScript exception");
+            };
+            let thrown = exception.thrown_value().expect("explicit throw");
+            let number = thrown.as_number().expect("live Number").expect("number");
+            assert!(number.strict_equals(JsNumber::from_i32(11)));
+        },
+    );
+}
+
+#[test]
+fn class_setters_with_default_parameters_retain_formal_arity_and_zero_length() {
+    run_with(
+        "function run(){class Box{set value(next=42){this.seen=next;}static set fixed(next=7){this.staticSeen=next;}}let box=new Box;let getOwnPropertyDescriptor=({}).constructor.getOwnPropertyDescriptor;let instance=getOwnPropertyDescriptor(Box.prototype,'value').set;let staticSetter=getOwnPropertyDescriptor(Box,'fixed').set;box.value=void 0;Box.fixed=void 0;return instance.length===0&&staticSetter.length===0&&box.seen===42&&Box.staticSeen===7;}",
+        |result| {
+            let value = result.expect("defaulted class setters");
             assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
         },
     );

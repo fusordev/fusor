@@ -30,7 +30,7 @@ use std::fmt;
 const FUNCTION_KIND_SHIFT: u32 = 4;
 const FUNCTION_KIND_MASK: u16 = 0b11 << FUNCTION_KIND_SHIFT;
 
-pub(crate) const SERIALIZED_FUNCTION_FLAGS_MASK: u16 = 0x0fff;
+pub(crate) const SERIALIZED_FUNCTION_FLAGS_MASK: u16 = 0x1fff;
 pub(crate) const JS_MODE_MASK: u8 = 0x01;
 
 /// The four function execution kinds encoded by `QuickJS`.
@@ -160,6 +160,7 @@ impl DirectEvalFunctionCapabilities {
     const NEW_TARGET: u8 = 1 << 0;
     const SUPER_PROPERTY: u8 = 1 << 1;
     const SUPER_CALL: u8 = 1 << 2;
+    const INSTANCE_ELEMENTS: u8 = 1 << 3;
 
     /// Creates the exact capability set inherited from the caller's verified
     /// `GetThisEnvironment` result.
@@ -187,6 +188,22 @@ impl DirectEvalFunctionCapabilities {
     const fn allows_super_call(self) -> bool {
         self.0 & Self::SUPER_CALL != 0
     }
+
+    /// Records whether contextual `super()` must initialize the inherited
+    /// derived constructor's instance elements.
+    #[must_use]
+    pub const fn with_instance_elements(mut self, yes: bool) -> Self {
+        if yes {
+            self.0 |= Self::INSTANCE_ELEMENTS;
+        } else {
+            self.0 &= !Self::INSTANCE_ELEMENTS;
+        }
+        self
+    }
+
+    const fn has_instance_elements(self) -> bool {
+        self.0 & Self::INSTANCE_ELEMENTS != 0
+    }
 }
 
 /// Raw serialized function metadata that has not crossed the verifier.
@@ -202,6 +219,7 @@ impl UnverifiedFunctionHeader {
     const STRIPPED_ORDINARY_SOURCE_FLAGS: u16 = (1 << 0) | (1 << 1) | (1 << 6) | (1 << 9);
     const ORDINARY_SOURCE_FLAGS: u16 = Self::STRIPPED_ORDINARY_SOURCE_FLAGS | (1 << 10);
     const ORDINARY_ARROW_FLAGS: u16 = (1 << 1) | (1 << 6) | (1 << 10);
+    const ASYNC_ARROW_FLAGS: u16 = Self::ORDINARY_ARROW_FLAGS | (2 << FUNCTION_KIND_SHIFT);
     const ORDINARY_METHOD_FLAGS: u16 = (1 << 1) | (1 << 6) | (1 << 8) | (1 << 9) | (1 << 10);
     // Class constructors receive their observable `prototype` property from
     // `define_class`, not from closure materialization. They are still
@@ -318,6 +336,25 @@ impl UnverifiedFunctionHeader {
     ) -> Self {
         Self::new(
             Self::ORDINARY_ARROW_FLAGS,
+            if strict { 1 } else { 0 },
+            defined_argument_count,
+            variable_reference_count,
+        )
+    }
+
+    /// Creates an asynchronous lexical-this arrow-function header with
+    /// retained debug source and a typed capture layout.
+    ///
+    /// Async arrows use the async suspension protocol while retaining the
+    /// ordinary arrow's nonconstructable lexical environment profile.
+    #[must_use]
+    pub const fn async_arrow_with_variable_references(
+        strict: bool,
+        defined_argument_count: u32,
+        variable_reference_count: u32,
+    ) -> Self {
+        Self::new(
+            Self::ASYNC_ARROW_FLAGS,
             if strict { 1 } else { 0 },
             defined_argument_count,
             variable_reference_count,
@@ -539,6 +576,9 @@ impl UnverifiedFunctionHeader {
         if capabilities.allows_super_property() {
             flags |= 1 << 8;
         }
+        if capabilities.has_instance_elements() {
+            flags |= 1 << 12;
+        }
         Self::new(
             flags,
             if strict { 1 } else { 0 },
@@ -659,6 +699,13 @@ impl FunctionHeaderFlags {
     #[must_use]
     pub const fn is_eval(self) -> bool {
         self.has_bit(11)
+    }
+
+    /// Returns whether this direct-eval Script inherited a derived
+    /// constructor whose `super()` must initialize instance elements.
+    #[must_use]
+    pub const fn direct_eval_has_instance_elements(self) -> bool {
+        self.has_bit(12)
     }
 
     const fn has_bit(self, bit: u32) -> bool {

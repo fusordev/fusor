@@ -512,6 +512,7 @@ pub struct UnverifiedCompilerFunction {
     constants: Arc<[CompilerConstant]>,
     closure_sources: Arc<[CompilerClosureSource]>,
     parameter_initialization_end: Option<u32>,
+    function_initializer_prefix_start: u32,
     eval_reference_call_instructions: Arc<[u32]>,
     has_direct_eval: bool,
 }
@@ -530,6 +531,7 @@ impl UnverifiedCompilerFunction {
             constants,
             closure_sources,
             parameter_initialization_end: None,
+            function_initializer_prefix_start: 0,
             eval_reference_call_instructions: Arc::from([]),
             has_direct_eval: false,
         }
@@ -558,6 +560,14 @@ impl UnverifiedCompilerFunction {
     #[must_use]
     pub const fn with_parameter_initialization_end(mut self, boundary: Option<u32>) -> Self {
         self.parameter_initialization_end = boundary;
+        self
+    }
+
+    /// Attaches the first instruction in the isolated lexical/function
+    /// instantiation prefix after parameter and `arguments` initialization.
+    #[must_use]
+    pub const fn with_function_initializer_prefix_start(mut self, start: u32) -> Self {
+        self.function_initializer_prefix_start = start;
         self
     }
 
@@ -603,6 +613,12 @@ impl UnverifiedCompilerFunction {
     #[must_use]
     pub const fn parameter_initialization_end(&self) -> Option<u32> {
         self.parameter_initialization_end
+    }
+
+    /// Returns the proposed lexical/function initializer prefix start.
+    #[must_use]
+    pub const fn function_initializer_prefix_start(&self) -> u32 {
+        self.function_initializer_prefix_start
     }
 
     /// Returns the proposed receiver-carrying eval instruction indices.
@@ -974,6 +990,7 @@ pub struct VerifiedCompilerFunction {
     constants: Arc<[CompilerConstant]>,
     closure_sources: Arc<[CompilerClosureSource]>,
     parameter_initialization_end: Option<u32>,
+    function_initializer_prefix_start: u32,
     eval_reference_call_instructions: Arc<[u32]>,
     has_direct_eval: bool,
 }
@@ -1015,6 +1032,12 @@ impl VerifiedCompilerFunction {
     #[must_use]
     pub const fn parameter_initialization_end(&self) -> Option<u32> {
         self.parameter_initialization_end
+    }
+
+    /// Returns the verified lexical/function initializer prefix start.
+    #[must_use]
+    pub const fn function_initializer_prefix_start(&self) -> u32 {
+        self.function_initializer_prefix_start
     }
 
     /// Returns the verified ordered instruction indices at which an eval
@@ -1176,6 +1199,13 @@ pub enum FunctionGraphVerificationErrorKind {
     MissingCompilerCaptureLayout,
     /// A body did not retain explicit compiler constant metadata.
     MissingCompilerConstantLayout,
+    /// The lexical/function initializer prefix starts outside the body.
+    FunctionInitializerPrefixStartOutOfBounds {
+        /// Proposed prefix start instruction.
+        start: u32,
+        /// Verified instruction count.
+        instructions: u32,
+    },
     /// The compiler's direct-eval marker disagrees with the encoded callsite
     /// family.
     DirectEvalMarkerMismatch {
@@ -1434,6 +1464,13 @@ impl fmt::Display for FunctionGraphVerificationErrorKind {
             Self::MissingCompilerConstantLayout => {
                 formatter.write_str("body has no explicit compiler constant layout")
             }
+            Self::FunctionInitializerPrefixStartOutOfBounds {
+                start,
+                instructions,
+            } => write!(
+                formatter,
+                "function initializer prefix starts at instruction {start} outside instruction count {instructions}"
+            ),
             Self::DirectEvalMarkerMismatch { declared, encoded } => write!(
                 formatter,
                 "direct-eval marker {declared} disagrees with encoded callsite presence {encoded}"
@@ -1670,6 +1707,7 @@ pub fn verify_compiler_function_graph(
             constants: Arc::clone(&function.constants),
             closure_sources: Arc::clone(&function.closure_sources),
             parameter_initialization_end: function.parameter_initialization_end,
+            function_initializer_prefix_start: function.function_initializer_prefix_start,
             eval_reference_call_instructions: Arc::clone(
                 &function.eval_reference_call_instructions,
             ),
@@ -1692,6 +1730,16 @@ fn validate_function_records(
     for (index, function) in functions.iter().enumerate() {
         let id = function_id(index)?;
         let flow = &function.control_flow;
+        let instruction_count = usize_to_u32(flow.instructions().len());
+        if function.function_initializer_prefix_start > instruction_count {
+            return Err(FunctionGraphVerificationError::at_function(
+                id,
+                FunctionGraphVerificationErrorKind::FunctionInitializerPrefixStartOutOfBounds {
+                    start: function.function_initializer_prefix_start,
+                    instructions: instruction_count,
+                },
+            ));
+        }
         validate_direct_eval_record(id, function)?;
         if flow.compiler_capture_layout().is_none() {
             return Err(FunctionGraphVerificationError::at_function(
@@ -2170,15 +2218,21 @@ fn validate_atoms(
         else {
             continue;
         };
-        if atom.is_static_property_only()
-            && !matches!(
-                decoded.instruction().opcode(),
-                FinalOpcode::DefineField
-                    | FinalOpcode::DefineMethod
-                    | FinalOpcode::DefineClass
-                    | FinalOpcode::SetName
+        let instruction = decoded.instruction();
+        let static_property_operand = matches!(
+            instruction.opcode(),
+            FinalOpcode::DefineField
+                | FinalOpcode::DefineMethod
+                | FinalOpcode::DefineClass
+                | FinalOpcode::SetName
+        ) || matches!(
+            (instruction.opcode(), instruction.operands()),
+            (
+                FinalOpcode::ThrowError,
+                crate::Operands::AtomU8 { value: 3, .. }
             )
-        {
+        );
+        if atom.is_static_property_only() && !static_property_operand {
             return Err(FunctionGraphVerificationError::at_function(
                 function,
                 FunctionGraphVerificationErrorKind::StaticPropertyOnlyAtomOperand {

@@ -468,9 +468,10 @@ fn inactive_for_of_record_cannot_be_stepped_again_but_can_be_closed() {
     let (_, _, mut frame) = ordinary_test_frame();
     push(&mut frame, StoredValue::Number(JsNumber::from_i32(1)));
     push(&mut frame, StoredValue::Number(JsNumber::from_i32(2)));
-    frame
-        .stack
-        .push(OperandStackEntry::ForOfCatch { active: false });
+    frame.stack.push(OperandStackEntry::ForOfCatch {
+        active: false,
+        asynchronous: false,
+    });
 
     assert!(matches!(
         deactivate_for_of_record(&mut frame, false, 0),
@@ -480,10 +481,10 @@ fn inactive_for_of_record_cannot_be_stepped_again_but_can_be_closed() {
     ));
     assert!(matches!(
         frame.stack.last(),
-        Some(OperandStackEntry::ForOfCatch { active: false })
+        Some(OperandStackEntry::ForOfCatch { active: false, .. })
     ));
 
-    let (iterator, next) =
+    let (iterator, next, asynchronous) =
         deactivate_for_of_record(&mut frame, true, 0).expect("inactive record remains closable");
     assert!(
         matches!(iterator, StoredValue::Number(value) if value.strict_equals(JsNumber::from_i32(1)))
@@ -491,6 +492,7 @@ fn inactive_for_of_record_cannot_be_stepped_again_but_can_be_closed() {
     assert!(
         matches!(next, StoredValue::Number(value) if value.strict_equals(JsNumber::from_i32(2)))
     );
+    assert!(!asynchronous);
 }
 
 #[test]
@@ -540,9 +542,10 @@ fn exceptional_for_of_close_keeps_the_iterator_rooted_through_pending_collection
     let thrown = source_object(&mut runtime, realm);
     push(&mut frame, StoredValue::Object(iterator));
     push(&mut frame, StoredValue::Undefined);
-    frame
-        .stack
-        .push(OperandStackEntry::ForOfCatch { active: true });
+    frame.stack.push(OperandStackEntry::ForOfCatch {
+        active: true,
+        asynchronous: false,
+    });
     frame.transient_cleanup_pending = true;
     runtime.collection_pending = true;
 
@@ -6218,6 +6221,86 @@ fn foreign_nonconstructor_type_errors_use_the_constructing_frame_realm() {
     }
 }
 
+#[test]
+fn foreign_class_constructor_call_errors_use_the_class_realm() {
+    let invoke_authority = compile_test_function(
+        "function invoke(candidate,viaNative){\
+             try{if(viaNative){candidate.call(null);}else{candidate();}}\
+             catch(error){return error;}\
+         }",
+        "invoke",
+    );
+    let maker_authority = compile_test_function(
+        "function make(){return class Foreign{constructor(){throw 1;}};}",
+        "make",
+    );
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let target_realm = runtime.create_realm().expect("target realm");
+    let caller_realm = runtime.create_realm().expect("caller realm");
+    let target_realm_id = runtime
+        .context(&target_realm)
+        .expect("target context")
+        .realm;
+    let caller_realm_id = runtime
+        .context(&caller_realm)
+        .expect("caller context")
+        .realm;
+    let maker = runtime
+        .context(&target_realm)
+        .expect("target context")
+        .instantiate(maker_authority)
+        .expect("class maker");
+    let candidate = runtime
+        .context(&target_realm)
+        .expect("target context")
+        .call(&maker, &[], ExecutionLimits::default())
+        .expect("foreign class")
+        .into_function()
+        .expect("class constructor");
+    let invoke = runtime
+        .context(&caller_realm)
+        .expect("caller context")
+        .instantiate(invoke_authority)
+        .expect("class invoker");
+    let caller_type_error = runtime
+        .realm_error_prototype(caller_realm_id, ExceptionKind::TypeError)
+        .expect("caller TypeError.prototype");
+    let target_type_error = runtime
+        .realm_error_prototype(target_realm_id, ExceptionKind::TypeError)
+        .expect("target TypeError.prototype");
+
+    for (kind, via_native) in [("direct", false), ("Function.prototype.call", true)] {
+        let via_native = runtime
+            .public_value(StoredValue::Boolean(via_native))
+            .expect("call mode root");
+        let error = runtime
+            .context(&caller_realm)
+            .expect("caller context")
+            .call(
+                &invoke,
+                &[candidate.as_value(), via_native],
+                ExecutionLimits::default(),
+            )
+            .expect("caught class constructor TypeError");
+        let error = error.object_id().expect("materialized TypeError object");
+        let prototype = runtime
+            .object_record(HeapReference::Object(error))
+            .expect("TypeError object")
+            .prototype();
+
+        assert_eq!(
+            prototype,
+            Some(HeapReference::Object(target_type_error)),
+            "{kind} class-call error must belong to the class constructor realm"
+        );
+        assert_ne!(
+            prototype,
+            Some(HeapReference::Object(caller_type_error)),
+            "{kind} caller realm must not own the class-call error"
+        );
+    }
+}
+
 fn runtime_with_apply_invoker() -> (Runtime, crate::Realm, Function, Function) {
     let invoke_authority = compile_test_function(
         "function invoke(apply,target,receiver,list){\
@@ -6784,6 +6867,209 @@ fn compile_test_function(source: &str, name: &str) -> Arc<quickjs_bytecode::Veri
         },
     )
     .expect("frontend")
+}
+
+#[test]
+fn dynamic_import_returns_a_fresh_rejected_promise_when_loading_is_unavailable() {
+    let authority = compile_test_function(
+        "function load(specifier){return import(specifier);}",
+        "load",
+    );
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let load = runtime
+        .context(&realm)
+        .expect("context")
+        .instantiate(authority)
+        .expect("load function");
+    let specifier = runtime
+        .public_value(StoredValue::String(
+            JsString::from_utf8("./missing.js").expect("specifier"),
+        ))
+        .expect("specifier root");
+
+    let first = runtime
+        .context(&realm)
+        .expect("context")
+        .call(
+            &load,
+            std::slice::from_ref(&specifier),
+            ExecutionLimits::default(),
+        )
+        .expect("dynamic import promise");
+    let second = runtime
+        .context(&realm)
+        .expect("context")
+        .call(&load, &[specifier], ExecutionLimits::default())
+        .expect("second dynamic import promise");
+    let first_id = first.object_id().expect("first promise id");
+    let second_id = second.object_id().expect("second promise id");
+
+    assert_ne!(
+        first_id, second_id,
+        "every import call creates a new Promise"
+    );
+    for promise in [first_id, second_id] {
+        assert!(matches!(
+            runtime
+                .objects
+                .get(promise)
+                .and_then(crate::object::HeapObject::promise_state),
+            Some(crate::object::PromiseState::Rejected { .. })
+        ));
+    }
+}
+
+#[test]
+fn dynamic_import_converts_a_tostring_throw_into_a_promise_rejection() {
+    let load_authority = compile_test_function(
+        "function load(specifier){return import(specifier);}",
+        "load",
+    );
+    let maker_authority =
+        compile_test_function("function make(){return {toString(){throw 53;}};}", "make");
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let (load, maker) = {
+        let mut context = runtime.context(&realm).expect("context");
+        (
+            context.instantiate(load_authority).expect("load function"),
+            context
+                .instantiate(maker_authority)
+                .expect("maker function"),
+        )
+    };
+    let specifier = runtime
+        .context(&realm)
+        .expect("context")
+        .call(&maker, &[], ExecutionLimits::default())
+        .expect("specifier object");
+
+    let promise = runtime
+        .context(&realm)
+        .expect("context")
+        .call(&load, &[specifier], ExecutionLimits::default())
+        .expect("ToString failure must reject instead of escaping synchronously");
+    let promise = promise.object_id().expect("promise id");
+    let Some(crate::object::PromiseState::Rejected { reason, .. }) = runtime
+        .objects
+        .get(promise)
+        .and_then(crate::object::HeapObject::promise_state)
+    else {
+        panic!("dynamic import Promise must be rejected");
+    };
+    let StoredValue::Number(reason) = reason else {
+        panic!("the exact thrown value must become the rejection reason");
+    };
+    assert!(reason.strict_equals(JsNumber::from_i32(53)));
+}
+
+#[test]
+fn dynamic_import_runs_specifier_conversion_before_options_with_get() {
+    let authority = compile_test_function(
+        "function load(){\
+             return import(\
+                 {toString(){throw 53;}},\
+                 {get with(){throw 61;}}\
+             );\
+         }",
+        "load",
+    );
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let load = runtime
+        .context(&realm)
+        .expect("context")
+        .instantiate(authority)
+        .expect("load function");
+
+    let promise = runtime
+        .context(&realm)
+        .expect("context")
+        .call(&load, &[], ExecutionLimits::default())
+        .expect("specifier failure must reject");
+    let promise = promise.object_id().expect("promise id");
+    let Some(crate::object::PromiseState::Rejected { reason, .. }) = runtime
+        .objects
+        .get(promise)
+        .and_then(crate::object::HeapObject::promise_state)
+    else {
+        panic!("dynamic import Promise must be rejected");
+    };
+    assert!(matches!(
+        reason,
+        StoredValue::Number(value) if value.strict_equals(JsNumber::from_i32(53))
+    ));
+}
+
+#[test]
+fn dynamic_import_converts_options_with_getter_throw_into_rejection() {
+    let load_authority = compile_test_function(
+        "function load(){\
+             return import('./missing.js',{get with(){throw 61;}});\
+         }",
+        "load",
+    );
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let load = runtime
+        .context(&realm)
+        .expect("context")
+        .instantiate(load_authority)
+        .expect("load function");
+
+    let promise = runtime
+        .context(&realm)
+        .expect("context")
+        .call(&load, &[], ExecutionLimits::default())
+        .expect("with getter throw must reject");
+    let promise = promise.object_id().expect("promise id");
+    let Some(crate::object::PromiseState::Rejected { reason, .. }) = runtime
+        .objects
+        .get(promise)
+        .and_then(crate::object::HeapObject::promise_state)
+    else {
+        panic!("dynamic import Promise must be rejected");
+    };
+    assert!(matches!(
+        reason,
+        StoredValue::Number(value) if value.strict_equals(JsNumber::from_i32(61))
+    ));
+}
+
+#[test]
+fn dynamic_import_converts_attribute_getter_throw_into_rejection() {
+    let load_authority = compile_test_function(
+        "function load(){\
+             return import('./missing.js',{with:{get type(){throw 71;}}});\
+         }",
+        "load",
+    );
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let load = runtime
+        .context(&realm)
+        .expect("context")
+        .instantiate(load_authority)
+        .expect("load function");
+
+    let promise = runtime
+        .context(&realm)
+        .expect("context")
+        .call(&load, &[], ExecutionLimits::default())
+        .expect("attribute getter throw must reject");
+    let promise = promise.object_id().expect("promise id");
+    let Some(crate::object::PromiseState::Rejected { reason, .. }) = runtime
+        .objects
+        .get(promise)
+        .and_then(crate::object::HeapObject::promise_state)
+    else {
+        panic!("dynamic import Promise must be rejected");
+    };
+    assert!(matches!(
+        reason,
+        StoredValue::Number(value) if value.strict_equals(JsNumber::from_i32(71))
+    ));
 }
 
 fn runtime_with_function_constructor() -> (Runtime, RealmId, FunctionId, NativeFunction) {

@@ -1,11 +1,12 @@
 use super::super::{
     ArgumentSlot, AssignmentExpression, AssignmentOperator, AssignmentTarget, BindingId,
     BindingIdentifier, BindingPattern, BranchKind, CompilationContext, CompiledConstantPool,
-    CompilerClosureBinding, DeclarationKind, DestructuringBindingInitialization, ExecutableId,
-    Expression, FinalOpcode, ForStatementLeft, FrameLayout, FrameSlot, FunctionTreeLayout, GetSpan,
-    IdentifierReference, LeafCompilationError, LocalSlot, NativeReferenceId, NodeId, Operands,
-    PlannedControlFlow, PlannedInstruction, RealmGlobalId, ReferenceAccess, ReferenceId, ScopeId,
-    Span, StoragePlacement, SymbolId, UnresolvedGlobalId, UnsupportedLeafFeature,
+    CompilerClosureBinding, ComputedMemberExpression, DestructuringBindingInitialization,
+    ExecutableId, Expression, FinalOpcode, ForStatementLeft, FrameLayout, FrameSlot,
+    FunctionTreeLayout, GetSpan, IdentifierReference, LeafCompilationError, LocalSlot,
+    NativeReferenceId, NodeId, Operands, PlannedControlFlow, PlannedInstruction,
+    PrivateFieldExpression, RealmGlobalId, ReferenceAccess, ReferenceId, ScopeId, Span,
+    StaticMemberExpression, StoragePlacement, SymbolId, UnresolvedGlobalId, UnsupportedLeafFeature,
     VariableDeclaration, VariableDeclarationKind, VariableDeclarator, WritePolicy,
     anonymous_named_evaluation_span, binary_opcode, unsupported,
 };
@@ -589,9 +590,7 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
                     invariant: "written compiler binding exists",
                     span: Some(span),
                 })?;
-        if storage.policy().writes() != WritePolicy::Mutable
-            && storage.policy().kind() != DeclarationKind::ClassName
-        {
+        if storage.policy().writes() == WritePolicy::Internal {
             return unsupported(UnsupportedLeafFeature::UnsupportedReference, span);
         }
 
@@ -956,9 +955,15 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             }
             return Ok(());
         };
-        let (identifier, initializer) = self.validate_for_in_declaration(declaration, layout)?;
+        let (pattern, initializer) = Self::validate_for_in_declaration(declaration)?;
         let Some(initializer) = initializer else {
             return Ok(());
+        };
+        let BindingPattern::BindingIdentifier(identifier) = pattern else {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "Oxc permits a for-in declaration initializer only on an identifier",
+                span: Some(declaration.span),
+            });
         };
         let executable = self.planned.plan.executable(layout.executable).ok_or(
             LeafCompilationError::InvalidExecutable {
@@ -1066,14 +1071,28 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         flow: &mut PlannedControlFlow,
     ) -> Result<(), LeafCompilationError> {
         if let ForStatementLeft::VariableDeclaration(declaration) = left {
-            let (identifier, _) = self.validate_for_in_declaration(declaration, layout)?;
-            return self.emit_for_in_declaration_write(
-                declaration.kind,
-                identifier,
-                layout,
-                tree_layout,
-                flow,
-            );
+            let (pattern, _) = Self::validate_for_in_declaration(declaration)?;
+            return match pattern {
+                BindingPattern::BindingIdentifier(identifier) => self
+                    .emit_for_in_declaration_write(
+                        declaration.kind,
+                        identifier,
+                        layout,
+                        tree_layout,
+                        flow,
+                    ),
+                BindingPattern::ArrayPattern(_)
+                | BindingPattern::ObjectPattern(_)
+                | BindingPattern::AssignmentPattern(_) => self.plan_destructuring_pattern_value(
+                    pattern,
+                    DestructuringBindingInitialization::IterationDeclaration(declaration.kind),
+                    layout,
+                    tree_layout,
+                    constants,
+                    abrupt_markers,
+                    flow,
+                ),
+            };
         }
 
         let target =
@@ -1092,59 +1111,206 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                     flow,
                 )?;
             }
-            AssignmentTarget::StaticMemberExpression(member) if !member.optional => {
-                self.plan_expression_with_abrupt_markers(
-                    &member.object,
+            AssignmentTarget::StaticMemberExpression(member) if !member.optional => self
+                .plan_for_in_static_member_assignment(
+                    member,
                     layout,
                     tree_layout,
                     constants,
                     abrupt_markers,
                     flow,
-                )?;
-                flow.emit(PlannedInstruction::new(
-                    FinalOpcode::Swap,
-                    Operands::None,
-                    member.span,
-                ))?;
-                flow.emit(PlannedInstruction::new(
-                    FinalOpcode::PutField,
-                    Operands::Atom(constants.property_atom_index(member.property.span)?),
-                    member.span,
-                ))?;
-            }
-            AssignmentTarget::ComputedMemberExpression(member) if !member.optional => {
-                self.plan_expression_with_abrupt_markers(
-                    &member.object,
+                )?,
+            AssignmentTarget::ComputedMemberExpression(member) if !member.optional => self
+                .plan_for_in_computed_member_assignment(
+                    member,
                     layout,
                     tree_layout,
                     constants,
                     abrupt_markers,
                     flow,
-                )?;
-                self.plan_expression_with_abrupt_markers(
-                    &member.expression,
+                )?,
+            AssignmentTarget::PrivateFieldExpression(member) if !member.optional => self
+                .plan_for_in_private_member_assignment(
+                    member,
                     layout,
                     tree_layout,
                     constants,
                     abrupt_markers,
                     flow,
-                )?;
-                flow.emit(PlannedInstruction::new(
-                    FinalOpcode::Rot3l,
-                    Operands::None,
-                    member.span,
-                ))?;
-                flow.emit(PlannedInstruction::new(
-                    FinalOpcode::PutArrayEl,
-                    Operands::None,
-                    member.span,
-                ))?;
-            }
+                )?,
+            AssignmentTarget::ArrayAssignmentTarget(_)
+            | AssignmentTarget::ObjectAssignmentTarget(_) => self.plan_for_of_assignment_pattern(
+                target,
+                layout,
+                tree_layout,
+                constants,
+                abrupt_markers,
+                flow,
+            )?,
             _ => {
                 return unsupported(UnsupportedLeafFeature::UnsupportedExpression, target.span());
             }
         }
         Ok(())
+    }
+
+    fn plan_for_in_static_member_assignment(
+        &self,
+        member: &StaticMemberExpression<'arena>,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
+        constants: &CompiledConstantPool,
+        abrupt_markers: &[super::abrupt::AbruptMarker],
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        if matches!(&member.object, Expression::Super(_)) {
+            ExpressionPlanner::new(self).plan_super_property_base(
+                member.object.span(),
+                false,
+                layout,
+                flow,
+            )?;
+            flow.emit(PlannedInstruction::new(
+                FinalOpcode::PushAtomValue,
+                Operands::Atom(constants.property_atom_index(member.property.span)?),
+                member.property.span,
+            ))?;
+            flow.emit(PlannedInstruction::new(
+                FinalOpcode::Rot4l,
+                Operands::None,
+                member.span,
+            ))?;
+            return flow.emit(PlannedInstruction::new(
+                FinalOpcode::PutSuperValue,
+                Operands::None,
+                member.span,
+            ));
+        }
+
+        self.plan_expression_with_abrupt_markers(
+            &member.object,
+            layout,
+            tree_layout,
+            constants,
+            abrupt_markers,
+            flow,
+        )?;
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::Swap,
+            Operands::None,
+            member.span,
+        ))?;
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::PutField,
+            Operands::Atom(constants.property_atom_index(member.property.span)?),
+            member.span,
+        ))
+    }
+
+    fn plan_for_in_computed_member_assignment(
+        &self,
+        member: &ComputedMemberExpression<'arena>,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
+        constants: &CompiledConstantPool,
+        abrupt_markers: &[super::abrupt::AbruptMarker],
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        if matches!(&member.object, Expression::Super(_)) {
+            let planner = ExpressionPlanner::new(self);
+            planner.plan_super_property_receiver(member.object.span(), false, layout, flow)?;
+            self.plan_expression_with_abrupt_markers(
+                &member.expression,
+                layout,
+                tree_layout,
+                constants,
+                abrupt_markers,
+                flow,
+            )?;
+            planner.plan_super_property_base_after_key(member.object.span(), layout, flow)?;
+            flow.emit(PlannedInstruction::new(
+                FinalOpcode::ToPropKey,
+                Operands::None,
+                member.expression.span(),
+            ))?;
+            flow.emit(PlannedInstruction::new(
+                FinalOpcode::Rot4l,
+                Operands::None,
+                member.span,
+            ))?;
+            return flow.emit(PlannedInstruction::new(
+                FinalOpcode::PutSuperValue,
+                Operands::None,
+                member.span,
+            ));
+        }
+
+        self.plan_expression_with_abrupt_markers(
+            &member.object,
+            layout,
+            tree_layout,
+            constants,
+            abrupt_markers,
+            flow,
+        )?;
+        self.plan_expression_with_abrupt_markers(
+            &member.expression,
+            layout,
+            tree_layout,
+            constants,
+            abrupt_markers,
+            flow,
+        )?;
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::Rot3l,
+            Operands::None,
+            member.span,
+        ))?;
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::PutArrayEl,
+            Operands::None,
+            member.span,
+        ))
+    }
+
+    fn plan_for_in_private_member_assignment(
+        &self,
+        member: &PrivateFieldExpression<'arena>,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
+        constants: &CompiledConstantPool,
+        abrupt_markers: &[super::abrupt::AbruptMarker],
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        let planner = ExpressionPlanner::new(self);
+        let reference = planner.private_name_reference_for_access(
+            member.node_id.get(),
+            member.field.name.as_str(),
+            member.span,
+            layout,
+            tree_layout,
+        )?;
+        self.plan_expression_with_abrupt_markers(
+            &member.object,
+            layout,
+            tree_layout,
+            constants,
+            abrupt_markers,
+            flow,
+        )?;
+        flow.emit(planner.plan_private_name_read(reference, member.field.span)?)?;
+        // The iteration value was produced before reference evaluation.
+        // `[value, receiver, privateName] -> [receiver, privateName, value]`.
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::Rot3l,
+            Operands::None,
+            member.span,
+        ))?;
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::PutPrivateField,
+            Operands::None,
+            member.span,
+        ))
     }
 
     /// Stores the per-iteration for-of value into the loop head. Identifier
@@ -1191,60 +1357,18 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 })?;
         match target {
             AssignmentTarget::ArrayAssignmentTarget(_)
-            | AssignmentTarget::ObjectAssignmentTarget(_) => {
-                let mut work = Vec::new();
-                self.plan_assignment_target_value(
-                    target,
-                    &mut work,
-                    flow,
-                    layout,
-                    tree_layout,
-                    constants,
-                )?;
-                while let Some(task) = work.pop() {
-                    match task {
-                        ExpressionWork::Emit(instruction) => flow.emit(instruction)?,
-                        ExpressionWork::Branch { kind, target, span } => {
-                            flow.branch(kind, &target, span)?;
-                        }
-                        ExpressionWork::Bind(label) => flow.bind(&label)?,
-                        ExpressionWork::Visit(expression) => {
-                            self.plan_expression_with_abrupt_markers(
-                                expression,
-                                layout,
-                                tree_layout,
-                                constants,
-                                abrupt_markers,
-                                flow,
-                            )?;
-                        }
-                        ExpressionWork::IdentifierValueStore(identifier) => {
-                            ExpressionPlanner::new(self).plan_identifier_value_store(
-                                identifier,
-                                layout,
-                                tree_layout,
-                                constants,
-                                flow,
-                            )?;
-                        }
-                        ExpressionWork::VisitOptionalChain { .. }
-                        | ExpressionWork::IdentifierCallReference(_)
-                        | ExpressionWork::IdentifierDelete { .. }
-                        | ExpressionWork::CallAfterCallee { .. }
-                        | ExpressionWork::SuperPropertyBase { .. }
-                        | ExpressionWork::InitializeInstanceFields => {
-                            return Err(LeafCompilationError::SemanticInvariant {
-                                invariant: "assignment-target scheduling delegates complete expressions",
-                                span: Some(target.span()),
-                            });
-                        }
-                    }
-                }
-                Ok(())
-            }
+            | AssignmentTarget::ObjectAssignmentTarget(_) => self.plan_for_of_assignment_pattern(
+                target,
+                layout,
+                tree_layout,
+                constants,
+                abrupt_markers,
+                flow,
+            ),
             AssignmentTarget::AssignmentTargetIdentifier(_)
             | AssignmentTarget::StaticMemberExpression(_)
-            | AssignmentTarget::ComputedMemberExpression(_) => self.plan_for_in_assignment(
+            | AssignmentTarget::ComputedMemberExpression(_)
+            | AssignmentTarget::PrivateFieldExpression(_) => self.plan_for_in_assignment(
                 left,
                 layout,
                 tree_layout,
@@ -1255,20 +1379,74 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             AssignmentTarget::TSAsExpression(_)
             | AssignmentTarget::TSSatisfiesExpression(_)
             | AssignmentTarget::TSNonNullExpression(_)
-            | AssignmentTarget::TSTypeAssertion(_)
-            | AssignmentTarget::PrivateFieldExpression(_) => {
+            | AssignmentTarget::TSTypeAssertion(_) => {
                 unsupported(UnsupportedLeafFeature::UnsupportedExpression, target.span())
             }
         }
     }
 
-    fn validate_for_in_declaration<'declaration>(
+    fn plan_for_of_assignment_pattern(
         &self,
-        declaration: &'declaration VariableDeclaration<'arena>,
+        target: &AssignmentTarget<'arena>,
         layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
+        constants: &CompiledConstantPool,
+        abrupt_markers: &[super::abrupt::AbruptMarker],
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        let mut work = Vec::new();
+        self.plan_assignment_target_value(target, &mut work, flow, layout, tree_layout, constants)?;
+        while let Some(task) = work.pop() {
+            match task {
+                ExpressionWork::Emit(instruction) => flow.emit(instruction)?,
+                ExpressionWork::Branch { kind, target, span } => {
+                    flow.branch(kind, &target, span)?;
+                }
+                ExpressionWork::Bind(label) => flow.bind(&label)?,
+                ExpressionWork::Visit(expression) => {
+                    self.plan_expression_with_abrupt_markers(
+                        expression,
+                        layout,
+                        tree_layout,
+                        constants,
+                        abrupt_markers,
+                        flow,
+                    )?;
+                }
+                ExpressionWork::IdentifierValueStore(identifier) => {
+                    ExpressionPlanner::new(self).plan_identifier_value_store(
+                        identifier,
+                        layout,
+                        tree_layout,
+                        constants,
+                        flow,
+                    )?;
+                }
+                ExpressionWork::VisitCallExpression(_)
+                | ExpressionWork::VisitOptionalChain { .. }
+                | ExpressionWork::IdentifierCallReference(_)
+                | ExpressionWork::IdentifierDelete { .. }
+                | ExpressionWork::CallAfterCallee { .. }
+                | ExpressionWork::SuperPropertyBase { .. }
+                | ExpressionWork::SuperPropertyReceiver { .. }
+                | ExpressionWork::SuperPropertyBaseAfterKey { .. }
+                | ExpressionWork::InitializeInstanceFields { .. }
+                | ExpressionWork::InitializeContextualInstanceFields { .. } => {
+                    return Err(LeafCompilationError::SemanticInvariant {
+                        invariant: "assignment-target scheduling delegates complete expressions",
+                        span: Some(target.span()),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_for_in_declaration<'declaration>(
+        declaration: &'declaration VariableDeclaration<'arena>,
     ) -> Result<
         (
-            &'declaration BindingIdentifier<'arena>,
+            &'declaration BindingPattern<'arena>,
             Option<&'declaration Expression<'arena>>,
         ),
         LeafCompilationError,
@@ -1288,33 +1466,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             );
         }
         let declarator = &declaration.declarations[0];
-        let BindingPattern::BindingIdentifier(identifier) = &declarator.id else {
-            return unsupported(
-                UnsupportedLeafFeature::UnsupportedDeclaration,
-                declarator.id.span(),
-            );
-        };
-        let binding = self.binding_for_identifier(identifier.symbol_id.get(), identifier.span)?;
-        let storage =
-            self.planned
-                .plan
-                .binding(binding)
-                .ok_or(LeafCompilationError::SemanticInvariant {
-                    invariant: "for-in declared compiler binding exists",
-                    span: Some(identifier.span),
-                })?;
-        if storage.placement() == StoragePlacement::GlobalObject {
-            self.validate_realm_global_declaration(declaration.kind, storage, identifier.span)?;
-        } else {
-            let slot = layout
-                .slot(binding)
-                .ok_or(LeafCompilationError::Unsupported {
-                    feature: UnsupportedLeafFeature::UnsupportedBinding,
-                    span: identifier.span,
-                })?;
-            self.validate_declaration_storage(declaration.kind, binding, slot, identifier.span)?;
-        }
-        Ok((identifier, declarator.init.as_ref()))
+        Ok((&declarator.id, declarator.init.as_ref()))
     }
 
     fn emit_for_in_declaration_write(
@@ -1363,6 +1515,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 feature: UnsupportedLeafFeature::UnsupportedBinding,
                 span: identifier.span,
             })?;
+        self.validate_declaration_storage(declaration_kind, binding, slot, identifier.span)?;
         flow.emit(plan_put_slot(slot, identifier.span))
     }
 
@@ -1985,9 +2138,7 @@ impl CompilationContext<'_, '_, '_> {
                         span: Some(span),
                     },
                 )?;
-                if storage.policy().writes() != WritePolicy::Mutable
-                    && storage.policy().kind() != DeclarationKind::ClassName
-                {
+                if storage.policy().writes() == WritePolicy::Internal {
                     return unsupported(UnsupportedLeafFeature::UnsupportedReference, span);
                 }
             }

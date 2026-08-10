@@ -21,6 +21,7 @@ use super::abrupt::{AbruptMarker, AbruptMarkerKind};
 use super::bindings::WithObjectSource;
 use super::calls::MemberCallee;
 use oxc_ast::ast::{SpreadElement, StaticBlock};
+use quickjs_bytecode::CompilerBindingKind;
 use std::collections::HashSet;
 
 pub(in crate::lowering) fn anonymous_named_evaluation_span(
@@ -224,6 +225,7 @@ const fn super_member_update_permutation(prefix: bool) -> FinalOpcode {
 
 pub(in crate::lowering) enum ExpressionWork<'expression, 'arena> {
     Visit(&'expression Expression<'arena>),
+    VisitCallExpression(&'expression CallExpression<'arena>),
     VisitOptionalChain {
         chain: &'expression ChainExpression<'arena>,
         preserve_final_reference: bool,
@@ -242,7 +244,20 @@ pub(in crate::lowering) enum ExpressionWork<'expression, 'arena> {
         span: Span,
         call_receiver: bool,
     },
-    InitializeInstanceFields,
+    SuperPropertyReceiver {
+        span: Span,
+        call_receiver: bool,
+    },
+    SuperPropertyBaseAfterKey {
+        span: Span,
+    },
+    InitializeInstanceFields {
+        constructor: ExecutableId,
+        span: Span,
+    },
+    InitializeContextualInstanceFields {
+        span: Span,
+    },
     Emit(PlannedInstruction),
     Branch {
         kind: BranchKind,
@@ -257,6 +272,18 @@ pub(in crate::lowering) enum ObjectMethodKind {
     Method,
     Getter,
     Setter,
+}
+
+#[derive(Clone, Copy)]
+pub(in crate::lowering) enum PrivateNameReference {
+    Frame {
+        binding: BindingId,
+        slot: FrameSlot,
+    },
+    RealmGlobal {
+        binding: CompilerClosureBinding,
+        slot: u16,
+    },
 }
 
 impl ObjectMethodKind {
@@ -332,6 +359,9 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         while let Some(task) = work.pop() {
             match task {
                 ExpressionWork::Emit(instruction) => flow.emit(instruction)?,
+                ExpressionWork::VisitCallExpression(call) => {
+                    self.plan_call_expression(call, layout, tree_layout, constants, &mut work)?;
+                }
                 ExpressionWork::VisitOptionalChain {
                     chain,
                     preserve_final_reference,
@@ -339,6 +369,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                     chain,
                     preserve_final_reference,
                     layout,
+                    tree_layout,
                     constants,
                     flow,
                     &mut work,
@@ -381,14 +412,18 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                     span,
                     call_receiver,
                 } => self.plan_super_property_base(span, call_receiver, layout, flow)?,
-                ExpressionWork::InitializeInstanceFields => {
-                    self.plan_instance_field_initializations(
-                        layout.executable,
-                        layout,
-                        tree_layout,
-                        constants,
-                        flow,
-                    )?;
+                ExpressionWork::SuperPropertyReceiver {
+                    span,
+                    call_receiver,
+                } => self.plan_super_property_receiver(span, call_receiver, layout, flow)?,
+                ExpressionWork::SuperPropertyBaseAfterKey { span } => {
+                    self.plan_super_property_base_after_key(span, layout, flow)?;
+                }
+                ExpressionWork::InitializeInstanceFields { constructor, span } => {
+                    self.plan_call_instance_initializer(constructor, layout, span, flow)?;
+                }
+                ExpressionWork::InitializeContextualInstanceFields { span } => {
+                    Self::plan_call_contextual_instance_initializer(span, flow)?;
                 }
                 ExpressionWork::Branch { kind, target, span } => {
                     flow.branch(kind, &target, span)?;
@@ -469,14 +504,25 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                             Self::plan_computed_member_read(member, &mut work)?;
                         }
                         Expression::PrivateFieldExpression(member) => {
-                            self.plan_private_member_read(member, layout, &mut work)?;
+                            self.plan_private_member_read(member, layout, tree_layout, &mut work)?;
                         }
                         Expression::PrivateInExpression(private_in) => {
-                            self.plan_private_in_expression(private_in, layout, &mut work)?;
+                            self.plan_private_in_expression(
+                                private_in,
+                                layout,
+                                tree_layout,
+                                &mut work,
+                            )?;
                         }
                         Expression::ChainExpression(chain) => {
                             self.plan_optional_chain(
-                                chain, false, layout, constants, flow, &mut work,
+                                chain,
+                                false,
+                                layout,
+                                tree_layout,
+                                constants,
+                                flow,
+                                &mut work,
                             )?;
                         }
                         Expression::AssignmentExpression(assignment) => {
@@ -617,6 +663,26 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                             )));
                             work.push(ExpressionWork::Visit(&await_expression.argument));
                         }
+                        Expression::ImportExpression(import_expression) => {
+                            // EvaluateImportCall evaluates the specifier before the optional
+                            // options expression. The opcode owns every subsequent observable
+                            // operation, beginning with NewPromiseCapability and ToString.
+                            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                                FinalOpcode::Import,
+                                Operands::None,
+                                import_expression.span,
+                            )));
+                            if let Some(options) = &import_expression.options {
+                                work.push(ExpressionWork::Visit(options));
+                            } else {
+                                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                                    FinalOpcode::Undefined,
+                                    Operands::None,
+                                    import_expression.span,
+                                )));
+                            }
+                            work.push(ExpressionWork::Visit(&import_expression.source));
+                        }
                         Expression::ThisExpression(this) => {
                             flow.emit(self.plan_this_expression(this.span, layout)?)?;
                         }
@@ -744,27 +810,27 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         &self,
         member: &'expression PrivateFieldExpression<'arena>,
         layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
         work: &mut Vec<ExpressionWork<'expression, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
         if member.optional {
             return unsupported(UnsupportedLeafFeature::UnsupportedExpression, member.span);
         }
-        let (binding, slot) = self.private_name_binding_for_access(
+        let reference = self.private_name_reference_for_access(
             member.node_id.get(),
             member.field.name.as_str(),
             member.span,
             layout,
+            tree_layout,
         )?;
         work.push(ExpressionWork::Emit(PlannedInstruction::new(
             FinalOpcode::GetPrivateField,
             Operands::None,
             member.span,
         )));
-        work.push(ExpressionWork::Emit(self.plan_read_slot(
-            binding,
-            slot,
-            member.field.span,
-        )?));
+        work.push(ExpressionWork::Emit(
+            self.plan_private_name_read(reference, member.field.span)?,
+        ));
         work.push(ExpressionWork::Visit(&member.object));
         Ok(())
     }
@@ -775,27 +841,27 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         &self,
         member: &'expression PrivateFieldExpression<'arena>,
         layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
         work: &mut Vec<ExpressionWork<'expression, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
         if member.optional {
             return unsupported(UnsupportedLeafFeature::UnsupportedExpression, member.span);
         }
-        let (binding, slot) = self.private_name_binding_for_access(
+        let reference = self.private_name_reference_for_access(
             member.node_id.get(),
             member.field.name.as_str(),
             member.span,
             layout,
+            tree_layout,
         )?;
         work.push(ExpressionWork::Emit(PlannedInstruction::new(
             FinalOpcode::GetPrivateField,
             Operands::None,
             member.span,
         )));
-        work.push(ExpressionWork::Emit(self.plan_read_slot(
-            binding,
-            slot,
-            member.field.span,
-        )?));
+        work.push(ExpressionWork::Emit(
+            self.plan_private_name_read(reference, member.field.span)?,
+        ));
         work.push(ExpressionWork::Emit(PlannedInstruction::new(
             FinalOpcode::Dup,
             Operands::None,
@@ -805,13 +871,14 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         Ok(())
     }
 
-    fn private_name_binding_for_access(
+    pub(in crate::lowering) fn private_name_reference_for_access(
         &self,
         access_node: NodeId,
         name: &str,
         span: Span,
         layout: &FrameLayout,
-    ) -> Result<(BindingId, FrameSlot), LeafCompilationError> {
+        tree_layout: &FunctionTreeLayout,
+    ) -> Result<PrivateNameReference, LeafCompilationError> {
         let nodes = self.unit.semantic().nodes();
         for ancestor in nodes.ancestor_ids(access_node) {
             let AstKind::Class(class) = nodes.kind(ancestor) else {
@@ -866,23 +933,69 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                         invariant: "private field access binding has a frame slot",
                         span: Some(span),
                     })?;
-                return Ok((binding, slot));
+                return Ok(PrivateNameReference::Frame { binding, slot });
             }
         }
-        unsupported(UnsupportedLeafFeature::UnsupportedExpression, span)
+        let global = tree_layout
+            .realm_globals
+            .direct_private_for_name(name)
+            .ok_or(LeafCompilationError::Unsupported {
+                feature: UnsupportedLeafFeature::UnsupportedExpression,
+                span,
+            })?;
+        let descriptor = tree_layout.realm_globals.binding(global).ok_or(
+            LeafCompilationError::SemanticInvariant {
+                invariant: "direct-eval private name has a Realm-global descriptor",
+                span: Some(span),
+            },
+        )?;
+        if descriptor.policy.kind() != CompilerBindingKind::ClassPrivateName
+            || !matches!(descriptor.binding, CompilerClosureBinding::Captured(_))
+        {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "direct-eval private name imports an immutable caller cell",
+                span: Some(span),
+            });
+        }
+        let slot = tree_layout.realm_globals.closure_slot(
+            &self.planned.plan,
+            layout.executable,
+            global,
+        )?;
+        Ok(PrivateNameReference::RealmGlobal {
+            binding: descriptor.binding,
+            slot,
+        })
+    }
+
+    pub(in crate::lowering) fn plan_private_name_read(
+        &self,
+        reference: PrivateNameReference,
+        span: Span,
+    ) -> Result<PlannedInstruction, LeafCompilationError> {
+        match reference {
+            PrivateNameReference::Frame { binding, slot } => {
+                self.plan_read_slot(binding, slot, span)
+            }
+            PrivateNameReference::RealmGlobal { binding, slot } => {
+                Ok(plan_external_read(binding, slot, false, span))
+            }
+        }
     }
 
     fn plan_private_in_expression<'expression>(
         &self,
         private_in: &'expression PrivateInExpression<'arena>,
         layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
         work: &mut Vec<ExpressionWork<'expression, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
-        let (binding, slot) = self.private_name_binding_for_access(
+        let reference = self.private_name_reference_for_access(
             private_in.node_id.get(),
             private_in.left.name.as_str(),
             private_in.span,
             layout,
+            tree_layout,
         )?;
         work.push(ExpressionWork::Emit(PlannedInstruction::new(
             FinalOpcode::PrivateIn,
@@ -890,11 +1003,9 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             private_in.span,
         )));
         work.push(ExpressionWork::Visit(&private_in.right));
-        work.push(ExpressionWork::Emit(self.plan_read_slot(
-            binding,
-            slot,
-            private_in.left.span,
-        )?));
+        work.push(ExpressionWork::Emit(
+            self.plan_private_name_read(reference, private_in.left.span)?,
+        ));
         Ok(())
     }
 
@@ -903,6 +1014,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         assignment: &'expression AssignmentExpression<'arena>,
         member: &'expression PrivateFieldExpression<'arena>,
         layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
         flow: &mut PlannedControlFlow,
         work: &mut Vec<ExpressionWork<'expression, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
@@ -912,26 +1024,25 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 assignment.left.span(),
             );
         }
-        let (binding, slot) = self.private_name_binding_for_access(
+        let reference = self.private_name_reference_for_access(
             member.node_id.get(),
             member.field.name.as_str(),
             member.span,
             layout,
+            tree_layout,
         )?;
         match assignment.operator {
             AssignmentOperator::Assign => {
-                self.plan_private_simple_assignment(assignment, member, binding, slot, work)?;
+                self.plan_private_simple_assignment(assignment, member, reference, work)?;
             }
             AssignmentOperator::LogicalOr
             | AssignmentOperator::LogicalAnd
             | AssignmentOperator::LogicalNullish => {
-                self.plan_private_logical_assignment(
-                    assignment, member, binding, slot, flow, work,
-                )?;
+                self.plan_private_logical_assignment(assignment, member, reference, flow, work)?;
             }
             operator => {
                 self.plan_private_compound_assignment(
-                    assignment, member, binding, slot, operator, work,
+                    assignment, member, reference, operator, work,
                 )?;
             }
         }
@@ -942,8 +1053,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         &self,
         assignment: &'expression AssignmentExpression<'arena>,
         member: &'expression PrivateFieldExpression<'arena>,
-        binding: BindingId,
-        slot: FrameSlot,
+        reference: PrivateNameReference,
         work: &mut Vec<ExpressionWork<'expression, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
         // Preserve the RHS as the assignment completion below the
@@ -959,11 +1069,9 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             assignment.span,
         )));
         work.push(ExpressionWork::Visit(&assignment.right));
-        work.push(ExpressionWork::Emit(self.plan_read_slot(
-            binding,
-            slot,
-            member.field.span,
-        )?));
+        work.push(ExpressionWork::Emit(
+            self.plan_private_name_read(reference, member.field.span)?,
+        ));
         work.push(ExpressionWork::Visit(&member.object));
         Ok(())
     }
@@ -972,8 +1080,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         &self,
         assignment: &'expression AssignmentExpression<'arena>,
         member: &'expression PrivateFieldExpression<'arena>,
-        binding: BindingId,
-        slot: FrameSlot,
+        reference: PrivateNameReference,
         flow: &mut PlannedControlFlow,
         work: &mut Vec<ExpressionWork<'expression, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
@@ -1030,7 +1137,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             Operands::None,
             member.span,
         )));
-        self.plan_private_read_reference(member, binding, slot, work)?;
+        self.plan_private_read_reference(member, reference, work)?;
         Ok(())
     }
 
@@ -1038,8 +1145,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         &self,
         assignment: &'expression AssignmentExpression<'arena>,
         member: &'expression PrivateFieldExpression<'arena>,
-        binding: BindingId,
-        slot: FrameSlot,
+        reference: PrivateNameReference,
         operator: AssignmentOperator,
         work: &mut Vec<ExpressionWork<'expression, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
@@ -1056,7 +1162,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             binary_opcode(binary),
             work,
         );
-        self.plan_private_read_reference(member, binding, slot, work)
+        self.plan_private_read_reference(member, reference, work)
     }
 
     fn plan_private_compound_write_after_value<'expression>(
@@ -1104,8 +1210,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
     fn plan_private_read_reference<'expression>(
         &self,
         member: &'expression PrivateFieldExpression<'arena>,
-        binding: BindingId,
-        slot: FrameSlot,
+        reference: PrivateNameReference,
         work: &mut Vec<ExpressionWork<'expression, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
         work.push(ExpressionWork::Emit(PlannedInstruction::new(
@@ -1118,11 +1223,9 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             Operands::None,
             member.span,
         )));
-        work.push(ExpressionWork::Emit(self.plan_read_slot(
-            binding,
-            slot,
-            member.field.span,
-        )?));
+        work.push(ExpressionWork::Emit(
+            self.plan_private_name_read(reference, member.field.span)?,
+        ));
         work.push(ExpressionWork::Visit(&member.object));
         Ok(())
     }
@@ -1132,6 +1235,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         update: &'expression UpdateExpression<'arena>,
         member: &'expression PrivateFieldExpression<'arena>,
         layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
         work: &mut Vec<ExpressionWork<'expression, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
         if member.optional {
@@ -1140,11 +1244,12 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 update.argument.span(),
             );
         }
-        let (binding, slot) = self.private_name_binding_for_access(
+        let reference = self.private_name_reference_for_access(
             member.node_id.get(),
             member.field.name.as_str(),
             member.span,
             layout,
+            tree_layout,
         )?;
         // `dup2; get_private_field` preserves `[receiver, name]`. A prefix
         // update duplicates the new value before the private store; a postfix
@@ -1179,11 +1284,9 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             Operands::None,
             member.span,
         )));
-        work.push(ExpressionWork::Emit(self.plan_read_slot(
-            binding,
-            slot,
-            member.field.span,
-        )?));
+        work.push(ExpressionWork::Emit(
+            self.plan_private_name_read(reference, member.field.span)?,
+        ));
         work.push(ExpressionWork::Visit(&member.object));
         Ok(())
     }
@@ -1262,6 +1365,9 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             },
             class.span,
         ))?;
+        if Self::class_has_instance_elements(class) {
+            self.plan_class_instance_initializer(class, layout, tree_layout, constants, flow)?;
+        }
         if self.class_uses_computed_name_context(class) {
             // Before elements install methods or fields, the evaluated key is
             // immediately below the fresh constructor/prototype pair:
@@ -1277,9 +1383,6 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             ] {
                 flow.emit(PlannedInstruction::new(opcode, Operands::None, class.span))?;
             }
-        }
-        if class.id.is_some() {
-            self.plan_base_class_name_initialization(class, layout, flow)?;
         }
         self.plan_base_class_private_name_initializations(class, layout, constants, flow)?;
         self.plan_base_class_static_receiver_initialization(class, layout, flow)?;
@@ -1308,6 +1411,9 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                     });
                 }
             }
+        }
+        if class.id.is_some() {
+            self.plan_base_class_name_initialization(class, layout, flow)?;
         }
         for element in &class.body.body {
             match element {
@@ -1395,6 +1501,89 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 span: method.key.span(),
             });
         }
+        Ok(())
+    }
+
+    fn plan_class_instance_initializer(
+        &self,
+        class: &Class<'arena>,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
+        constants: &CompiledConstantPool,
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        let class_node = class.node_id.get();
+        let child = self
+            .planned
+            .identities
+            .class_instance_initializers
+            .get(&class_node)
+            .copied()
+            .ok_or(LeafCompilationError::SemanticInvariant {
+                invariant: "class with instance elements has a hidden initializer template",
+                span: Some(class.span),
+            })?;
+        let binding = self
+            .planned
+            .identities
+            .class_instance_initializer_bindings
+            .get(&class_node)
+            .copied()
+            .ok_or(LeafCompilationError::SemanticInvariant {
+                invariant: "class with instance elements has an initializer cell",
+                span: Some(class.span),
+            })?;
+        let storage =
+            self.planned
+                .plan
+                .binding(binding)
+                .ok_or(LeafCompilationError::SemanticInvariant {
+                    invariant: "class instance initializer binding exists",
+                    span: Some(class.span),
+                })?;
+        if storage.policy().kind() != DeclarationKind::ClassInstanceInitializer
+            || storage.placement() != StoragePlacement::Local
+        {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "class definition owns one immutable local initializer cell",
+                span: Some(class.span),
+            });
+        }
+        let slot = layout
+            .slot(binding)
+            .ok_or(LeafCompilationError::SemanticInvariant {
+                invariant: "class instance initializer binding has a local slot",
+                span: Some(class.span),
+            })?;
+        if !matches!(slot, FrameSlot::Local(_)) {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "class definition stores its initializer locally",
+                span: Some(class.span),
+            });
+        }
+        flow.emit(self.plan_child_function_closure(
+            child,
+            layout.executable,
+            class.body.span,
+            tree_layout,
+            constants,
+        )?)?;
+        // `[constructor, prototype, initializer]` becomes
+        // `[constructor, initializer, prototype]` for `set_home_object`, then
+        // returns to the canonical class-definition stack before storing the
+        // hidden method in its immutable cell.
+        for opcode in [
+            FinalOpcode::Swap,
+            FinalOpcode::SetHomeObject,
+            FinalOpcode::Swap,
+        ] {
+            flow.emit(PlannedInstruction::new(
+                opcode,
+                Operands::None,
+                class.body.span,
+            ))?;
+        }
+        flow.emit(plan_put_slot(slot, class.body.span))?;
         Ok(())
     }
 
@@ -1893,10 +2082,14 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         let mut state = StatementPlanningState {
             work: vec![
                 StatementWork::PopScope(scope),
+                StatementWork::PopStatementStackBase { span: block.span },
+                StatementWork::PopStatementStackBase { span: block.span },
                 StatementWork::VisitList {
                     statements: &block.body,
                     next: 0,
                 },
+                StatementWork::PushStatementStackBase { span: block.span },
+                StatementWork::PushStatementStackBase { span: block.span },
                 StatementWork::PushScope {
                     scope,
                     creator: block.node_id.get(),
@@ -1905,7 +2098,10 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             ],
             // The class scope is already active for the surrounding class
             // definition. It provides the synthetic lexical class receiver
-            // used by `this` and `super` in the block.
+            // used by `this` and `super` in the block. The constructor and
+            // prototype pair below the block's statement operands is tracked
+            // as part of the statement stack base so nested handlers and
+            // control-flow labels retain their exact physical depth.
             active_scopes: vec![class.scope_id()],
             controls: StatementControlStack::default(),
             abrupt_markers: Vec::new(),
@@ -2068,6 +2264,159 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             }
         }
         Ok(())
+    }
+
+    pub(in crate::lowering) fn plan_call_instance_initializer(
+        &self,
+        constructor: ExecutableId,
+        layout: &FrameLayout,
+        span: Span,
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        let class = self.instance_initializer_class_for_constructor(constructor)?;
+        let binding = self
+            .planned
+            .identities
+            .class_instance_initializer_bindings
+            .get(&class.node_id.get())
+            .copied()
+            .ok_or(LeafCompilationError::SemanticInvariant {
+                invariant: "constructor class has an initializer cell",
+                span: Some(class.span),
+            })?;
+        let storage =
+            self.planned
+                .plan
+                .binding(binding)
+                .ok_or(LeafCompilationError::SemanticInvariant {
+                    invariant: "constructor initializer binding exists",
+                    span: Some(class.span),
+                })?;
+        if storage.policy().kind() != DeclarationKind::ClassInstanceInitializer {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "constructor captures the immutable initializer cell",
+                span: Some(class.span),
+            });
+        }
+        let slot = layout
+            .slot(binding)
+            .ok_or(LeafCompilationError::SemanticInvariant {
+                invariant: "initializer caller has the initializer capture",
+                span: Some(class.span),
+            })?;
+        if !matches!(slot, FrameSlot::Capture(_)) {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "constructor and arrow initializer calls use captured storage",
+                span: Some(class.span),
+            });
+        }
+        flow.emit(self.plan_read_slot(binding, slot, span)?)?;
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::PushThis,
+            Operands::None,
+            span,
+        ))?;
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::Swap,
+            Operands::None,
+            span,
+        ))?;
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::CallMethod,
+            Operands::NPop { argument_count: 0 },
+            span,
+        ))?;
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::Drop,
+            Operands::None,
+            span,
+        ))?;
+        Ok(())
+    }
+
+    fn plan_call_contextual_instance_initializer(
+        span: Span,
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        // Direct eval cannot name the constructor's compiler-only initializer
+        // capture. Selector six resolves that already-verified capture through
+        // the inherited derived Function Environment Record. `PushThis` runs
+        // only after `check_ctor_return` has bound the shared `this` cell.
+        for (opcode, operands) in [
+            (FinalOpcode::SpecialObject, Operands::U8(6)),
+            (FinalOpcode::PushThis, Operands::None),
+            (FinalOpcode::Swap, Operands::None),
+            (
+                FinalOpcode::CallMethod,
+                Operands::NPop { argument_count: 0 },
+            ),
+            (FinalOpcode::Drop, Operands::None),
+        ] {
+            flow.emit(PlannedInstruction::new(opcode, operands, span))?;
+        }
+        Ok(())
+    }
+
+    fn instance_initializer_class_for_constructor(
+        &self,
+        constructor: ExecutableId,
+    ) -> Result<&Class<'arena>, LeafCompilationError> {
+        let node_id = self
+            .planned
+            .identities
+            .node_by_executable
+            .get(constructor.index())
+            .copied()
+            .ok_or(LeafCompilationError::InvalidExecutable {
+                executable: constructor,
+            })?;
+        let nodes = self.unit.semantic().nodes();
+        let class = match nodes.kind(node_id) {
+            AstKind::Function(function) => {
+                let AstKind::MethodDefinition(method) = nodes.parent_kind(function.node_id.get())
+                else {
+                    return Err(LeafCompilationError::SemanticInvariant {
+                        invariant: "instance-initializing constructor belongs to a class method",
+                        span: Some(function.span),
+                    });
+                };
+                let AstKind::ClassBody(body) = nodes.parent_kind(method.node_id.get()) else {
+                    return Err(LeafCompilationError::SemanticInvariant {
+                        invariant: "instance-initializing constructor belongs to a class body",
+                        span: Some(method.span),
+                    });
+                };
+                let AstKind::Class(class) = nodes.parent_kind(body.node_id.get()) else {
+                    return Err(LeafCompilationError::SemanticInvariant {
+                        invariant: "instance-initializing constructor belongs to a class",
+                        span: Some(body.span),
+                    });
+                };
+                class
+            }
+            AstKind::Class(class)
+                if self
+                    .planned
+                    .identities
+                    .default_class_constructors
+                    .get(&node_id)
+                    .copied()
+                    == Some(constructor) =>
+            {
+                class
+            }
+            _ => {
+                return Err(LeafCompilationError::SemanticInvariant {
+                    invariant: "instance initializer call names a class constructor",
+                    span: self
+                        .planned
+                        .plan
+                        .executable(constructor)
+                        .map(crate::storage::Executable::span),
+                });
+            }
+        };
+        Ok(class)
     }
 
     fn plan_instance_field_initialization(
@@ -2782,14 +3131,16 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
     }
 
     #[expect(
+        clippy::too_many_arguments,
         clippy::too_many_lines,
-        reason = "the complete chain-level short-circuit schedule stays visible in execution order"
+        reason = "the chain planner needs its immutable frame/tree/constants context beside the complete short-circuit schedule"
     )]
     fn plan_optional_chain<'expression>(
         &self,
         chain: &'expression ChainExpression<'arena>,
         preserve_final_reference: bool,
         layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
         constants: &CompiledConstantPool,
         flow: &mut PlannedControlFlow,
         work: &mut Vec<ExpressionWork<'expression, 'arena>>,
@@ -2882,61 +3233,171 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         } else {
             None
         };
+        let super_member_root =
+            matches!(root, Expression::Super(_)) && steps.first().is_some_and(Step::is_member);
+        let super_call_root =
+            matches!(root, Expression::Super(_)) && steps.first().is_some_and(Step::is_call);
 
         let end = flow.new_label(chain.span)?;
         let mut planned = Vec::new();
-        match root_member {
-            Some(MemberCallee::Static(member)) => {
-                planned.push(ExpressionWork::Visit(&member.object));
-                planned.push(ExpressionWork::Emit(PlannedInstruction::new(
-                    FinalOpcode::GetField2,
-                    Operands::Atom(constants.property_atom_index(member.property.span)?),
-                    member.span,
-                )));
+        if super_member_root {
+            let first = steps
+                .first()
+                .ok_or(LeafCompilationError::SemanticInvariant {
+                    invariant: "optional super chain has an initial member step",
+                    span: Some(chain.span),
+                })?;
+            let preserve_receiver = steps.get(1).is_some_and(Step::is_call)
+                || (steps.len() == 1 && preserve_final_reference);
+            match first {
+                Step::Static(member) => {
+                    planned.push(ExpressionWork::SuperPropertyBase {
+                        span: member.object.span(),
+                        call_receiver: preserve_receiver,
+                    });
+                    planned.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::PushAtomValue,
+                        Operands::Atom(constants.property_atom_index(member.property.span)?),
+                        member.property.span,
+                    )));
+                    planned.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::GetSuperValue,
+                        Operands::None,
+                        member.span,
+                    )));
+                }
+                Step::Computed(member) => {
+                    planned.push(ExpressionWork::SuperPropertyReceiver {
+                        span: member.object.span(),
+                        call_receiver: preserve_receiver,
+                    });
+                    planned.push(ExpressionWork::Visit(&member.expression));
+                    planned.push(ExpressionWork::SuperPropertyBaseAfterKey {
+                        span: member.object.span(),
+                    });
+                    planned.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::ToPropKey,
+                        Operands::None,
+                        member.expression.span(),
+                    )));
+                    planned.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::GetSuperValue,
+                        Operands::None,
+                        member.span,
+                    )));
+                }
+                Step::Private(_) | Step::Call(_) => {
+                    return Err(LeafCompilationError::SemanticInvariant {
+                        invariant: "optional super chain begins with a public member",
+                        span: Some(first.span()),
+                    });
+                }
             }
-            Some(MemberCallee::Computed(member)) => {
-                planned.push(ExpressionWork::Visit(&member.object));
-                planned.push(ExpressionWork::Visit(&member.expression));
-                planned.push(ExpressionWork::Emit(PlannedInstruction::new(
-                    FinalOpcode::GetArrayEl2,
-                    Operands::None,
-                    member.span,
-                )));
-            }
-            Some(MemberCallee::Chain(chain)) => {
-                planned.push(ExpressionWork::VisitOptionalChain {
-                    chain,
-                    preserve_final_reference: true,
+        } else if super_call_root {
+            let Some(Step::Call(call)) = steps.first() else {
+                return Err(LeafCompilationError::SemanticInvariant {
+                    invariant: "optional super-call chain has an initial call step",
+                    span: Some(chain.span),
                 });
+            };
+            planned.push(ExpressionWork::VisitCallExpression(call));
+        } else {
+            match root_member {
+                Some(MemberCallee::Static(member))
+                    if matches!(&member.object, Expression::Super(_)) =>
+                {
+                    planned.push(ExpressionWork::SuperPropertyBase {
+                        span: member.object.span(),
+                        call_receiver: true,
+                    });
+                    planned.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::PushAtomValue,
+                        Operands::Atom(constants.property_atom_index(member.property.span)?),
+                        member.property.span,
+                    )));
+                    planned.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::GetSuperValue,
+                        Operands::None,
+                        member.span,
+                    )));
+                }
+                Some(MemberCallee::Static(member)) => {
+                    planned.push(ExpressionWork::Visit(&member.object));
+                    planned.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::GetField2,
+                        Operands::Atom(constants.property_atom_index(member.property.span)?),
+                        member.span,
+                    )));
+                }
+                Some(MemberCallee::Computed(member))
+                    if matches!(&member.object, Expression::Super(_)) =>
+                {
+                    planned.push(ExpressionWork::SuperPropertyReceiver {
+                        span: member.object.span(),
+                        call_receiver: true,
+                    });
+                    planned.push(ExpressionWork::Visit(&member.expression));
+                    planned.push(ExpressionWork::SuperPropertyBaseAfterKey {
+                        span: member.object.span(),
+                    });
+                    planned.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::ToPropKey,
+                        Operands::None,
+                        member.expression.span(),
+                    )));
+                    planned.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::GetSuperValue,
+                        Operands::None,
+                        member.span,
+                    )));
+                }
+                Some(MemberCallee::Computed(member)) => {
+                    planned.push(ExpressionWork::Visit(&member.object));
+                    planned.push(ExpressionWork::Visit(&member.expression));
+                    planned.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::GetArrayEl2,
+                        Operands::None,
+                        member.span,
+                    )));
+                }
+                Some(MemberCallee::Chain(chain)) => {
+                    planned.push(ExpressionWork::VisitOptionalChain {
+                        chain,
+                        preserve_final_reference: true,
+                    });
+                }
+                Some(MemberCallee::Private(member)) => {
+                    let reference = self.private_name_reference_for_access(
+                        member.node_id.get(),
+                        member.field.name.as_str(),
+                        member.span,
+                        layout,
+                        tree_layout,
+                    )?;
+                    planned.push(ExpressionWork::Visit(&member.object));
+                    planned.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::Dup,
+                        Operands::None,
+                        member.object.span(),
+                    )));
+                    planned.push(ExpressionWork::Emit(
+                        self.plan_private_name_read(reference, member.field.span)?,
+                    ));
+                    planned.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::GetPrivateField,
+                        Operands::None,
+                        member.span,
+                    )));
+                }
+                None => planned.push(ExpressionWork::Visit(root)),
             }
-            Some(MemberCallee::Private(member)) => {
-                let (binding, slot) = self.private_name_binding_for_access(
-                    member.node_id.get(),
-                    member.field.name.as_str(),
-                    member.span,
-                    layout,
-                )?;
-                planned.push(ExpressionWork::Visit(&member.object));
-                planned.push(ExpressionWork::Emit(PlannedInstruction::new(
-                    FinalOpcode::Dup,
-                    Operands::None,
-                    member.object.span(),
-                )));
-                planned.push(ExpressionWork::Emit(self.plan_read_slot(
-                    binding,
-                    slot,
-                    member.field.span,
-                )?));
-                planned.push(ExpressionWork::Emit(PlannedInstruction::new(
-                    FinalOpcode::GetPrivateField,
-                    Operands::None,
-                    member.span,
-                )));
-            }
-            None => planned.push(ExpressionWork::Visit(root)),
         }
 
-        for (index, step) in steps.iter().enumerate() {
+        for (index, step) in steps
+            .iter()
+            .enumerate()
+            .skip(usize::from(super_member_root || super_call_root))
+        {
             let method = step.is_call()
                 && if index == 0 {
                     root_member.is_some()
@@ -2985,11 +3446,12 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 Step::Private(member) => {
                     let preserve_receiver = steps.get(index + 1).is_some_and(Step::is_call)
                         || (final_step && preserve_final_reference);
-                    let (binding, slot) = self.private_name_binding_for_access(
+                    let reference = self.private_name_reference_for_access(
                         member.node_id.get(),
                         member.field.name.as_str(),
                         member.span,
                         layout,
+                        tree_layout,
                     )?;
                     if preserve_receiver {
                         planned.push(ExpressionWork::Emit(PlannedInstruction::new(
@@ -2998,11 +3460,9 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                             member.object.span(),
                         )));
                     }
-                    planned.push(ExpressionWork::Emit(self.plan_read_slot(
-                        binding,
-                        slot,
-                        member.field.span,
-                    )?));
+                    planned.push(ExpressionWork::Emit(
+                        self.plan_private_name_read(reference, member.field.span)?,
+                    ));
                     planned.push(ExpressionWork::Emit(PlannedInstruction::new(
                         FinalOpcode::GetPrivateField,
                         Operands::None,
@@ -3488,7 +3948,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         Ok(Some(self.plan_read_slot(binding, slot, span)?))
     }
 
-    fn plan_super_property_base(
+    pub(in crate::lowering) fn plan_super_property_base(
         &self,
         span: Span,
         call_receiver: bool,
@@ -3530,6 +3990,70 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         }
         flow.emit(PlannedInstruction::new(
             FinalOpcode::GetSuper,
+            Operands::None,
+            span,
+        ))?;
+        Ok(())
+    }
+
+    pub(in crate::lowering) fn plan_super_property_receiver(
+        &self,
+        span: Span,
+        call_receiver: bool,
+        layout: &FrameLayout,
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        if let Some(receiver) = self.static_class_receiver_read(span, layout)? {
+            flow.emit(receiver)?;
+        } else {
+            flow.emit(PlannedInstruction::new(
+                FinalOpcode::PushThis,
+                Operands::None,
+                span,
+            ))?;
+        }
+        if call_receiver {
+            flow.emit(PlannedInstruction::new(
+                FinalOpcode::Dup,
+                Operands::None,
+                span,
+            ))?;
+        }
+        Ok(())
+    }
+
+    fn plan_super_property_home_base(
+        &self,
+        span: Span,
+        layout: &FrameLayout,
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        if let Some(home_object) = self.static_class_receiver_read(span, layout)? {
+            flow.emit(home_object)?;
+        } else {
+            flow.emit(PlannedInstruction::new(
+                FinalOpcode::SpecialObject,
+                Operands::U8(5),
+                span,
+            ))?;
+        }
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::GetSuper,
+            Operands::None,
+            span,
+        ))?;
+        Ok(())
+    }
+
+    pub(in crate::lowering) fn plan_super_property_base_after_key(
+        &self,
+        span: Span,
+        layout: &FrameLayout,
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        self.plan_super_property_home_base(span, layout, flow)?;
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::Swap,
             Operands::None,
             span,
         ))?;
@@ -4271,7 +4795,14 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         work: &mut Vec<ExpressionWork<'expression, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
         if let AssignmentTarget::PrivateFieldExpression(member) = &assignment.left {
-            return self.plan_private_member_assignment(assignment, member, layout, flow, work);
+            return self.plan_private_member_assignment(
+                assignment,
+                member,
+                layout,
+                tree_layout,
+                flow,
+                work,
+            );
         }
         if let AssignmentTarget::StaticMemberExpression(member) = &assignment.left {
             if matches!(
@@ -4364,13 +4895,14 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             tree_layout,
         )?;
         self.validate_lowered_mutation_reference(reference, needs_read, identifier.span)?;
-        let inferred_name = if matches!(
-            assignment.operator,
-            AssignmentOperator::Assign
-                | AssignmentOperator::LogicalOr
-                | AssignmentOperator::LogicalAnd
-                | AssignmentOperator::LogicalNullish
-        ) {
+        let inferred_name = if assignment.span.start == identifier.span.start
+            && matches!(
+                assignment.operator,
+                AssignmentOperator::Assign
+                    | AssignmentOperator::LogicalOr
+                    | AssignmentOperator::LogicalAnd
+                    | AssignmentOperator::LogicalNullish
+            ) {
             Self::plan_inferred_reference_name_for_initializer(
                 reference,
                 &assignment.right,
@@ -4928,8 +5460,11 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             Operands::None,
             member.expression.span(),
         )));
+        work.push(ExpressionWork::SuperPropertyBaseAfterKey {
+            span: member.object.span(),
+        });
         work.push(ExpressionWork::Visit(&member.expression));
-        work.push(ExpressionWork::SuperPropertyBase {
+        work.push(ExpressionWork::SuperPropertyReceiver {
             span: member.object.span(),
             call_receiver: false,
         });
@@ -5067,8 +5602,11 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             Operands::None,
             member.expression.span(),
         )));
+        work.push(ExpressionWork::SuperPropertyBaseAfterKey {
+            span: member.object.span(),
+        });
         work.push(ExpressionWork::Visit(&member.expression));
-        work.push(ExpressionWork::SuperPropertyBase {
+        work.push(ExpressionWork::SuperPropertyReceiver {
             span: member.object.span(),
             call_receiver: false,
         });
@@ -5165,8 +5703,11 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             Operands::None,
             member.expression.span(),
         )));
+        work.push(ExpressionWork::SuperPropertyBaseAfterKey {
+            span: member.object.span(),
+        });
         work.push(ExpressionWork::Visit(&member.expression));
-        work.push(ExpressionWork::SuperPropertyBase {
+        work.push(ExpressionWork::SuperPropertyReceiver {
             span: member.object.span(),
             call_receiver: false,
         });
@@ -5747,7 +6288,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         work: &mut Vec<ExpressionWork<'expression, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
         if let SimpleAssignmentTarget::PrivateFieldExpression(member) = &update.argument {
-            return self.plan_private_member_update(update, member, layout, work);
+            return self.plan_private_member_update(update, member, layout, tree_layout, work);
         }
         let identifier = match &update.argument {
             SimpleAssignmentTarget::StaticMemberExpression(member) => {
@@ -6050,6 +6591,36 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             argument = &parenthesized.expression;
         }
         match argument {
+            Expression::StaticMemberExpression(member)
+                if matches!(&member.object, Expression::Super(_)) =>
+            {
+                if member.optional {
+                    return unsupported(UnsupportedLeafFeature::UnsupportedExpression, member.span);
+                }
+                Self::plan_delete_super_reference(
+                    unary,
+                    Some(constants.property_atom_index(member.property.span)?),
+                    None,
+                    member.object.span(),
+                    constants,
+                    work,
+                )
+            }
+            Expression::ComputedMemberExpression(member)
+                if matches!(&member.object, Expression::Super(_)) =>
+            {
+                if member.optional {
+                    return unsupported(UnsupportedLeafFeature::UnsupportedExpression, member.span);
+                }
+                Self::plan_delete_super_reference(
+                    unary,
+                    None,
+                    Some(&member.expression),
+                    member.object.span(),
+                    constants,
+                    work,
+                )
+            }
             Expression::StaticMemberExpression(member) => {
                 if member.optional {
                     return unsupported(UnsupportedLeafFeature::UnsupportedExpression, member.span);
@@ -6105,6 +6676,55 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 Ok(())
             }
         }
+    }
+
+    /// Evaluates a complete `super` property Reference, then throws before
+    /// `ToPropertyKey`, as required by the delete operator. The raw key is
+    /// retained only long enough to preserve evaluation and abrupt-completion
+    /// order; the fixed `ReferenceError` terminal consumes no values.
+    fn plan_delete_super_reference<'expression>(
+        unary: &'expression UnaryExpression<'arena>,
+        static_key: Option<AtomPoolIndex>,
+        computed_key: Option<&'expression Expression<'arena>>,
+        super_span: Span,
+        constants: &CompiledConstantPool,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        if static_key.is_some() == computed_key.is_some() {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "delete-super reference has exactly one key form",
+                span: Some(unary.span),
+            });
+        }
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::ThrowError,
+            Operands::AtomU8 {
+                atom: constants.property_atom_index(unary.span)?,
+                value: 3,
+            },
+            unary.span,
+        )));
+        for _ in 0..3 {
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::Drop,
+                Operands::None,
+                unary.span,
+            )));
+        }
+        if let Some(key) = computed_key {
+            work.push(ExpressionWork::Visit(key));
+        } else if let Some(atom) = static_key {
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::PushAtomValue,
+                Operands::Atom(atom),
+                unary.argument.span(),
+            )));
+        }
+        work.push(ExpressionWork::SuperPropertyBase {
+            span: super_span,
+            call_receiver: false,
+        });
+        Ok(())
     }
 
     fn plan_identifier_delete(
@@ -6178,8 +6798,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             ),
             CompilerClosureBinding::RealmGlobal(_) => !matches!(
                 descriptor.policy.kind(),
-                quickjs_bytecode::CompilerBindingKind::Let
-                    | quickjs_bytecode::CompilerBindingKind::Const
+                CompilerBindingKind::Let | CompilerBindingKind::Const
             ),
         };
         if !deletable {

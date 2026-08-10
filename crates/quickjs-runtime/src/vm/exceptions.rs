@@ -31,6 +31,14 @@
 )]
 use super::*;
 
+#[derive(Clone, Copy)]
+enum PendingExceptionHandler {
+    Catch { frame: usize, marker: usize },
+    ForOf { frame: usize, marker: usize },
+    Native(usize),
+    AsyncGenerator(usize),
+}
+
 pub(super) fn tdz_exception(
     runtime: &Runtime,
     frame: &Frame,
@@ -43,6 +51,28 @@ pub(super) fn tdz_exception(
         name.concat(&JsString::from_utf8(" is not initialized")?)?
     } else {
         JsString::from_utf8("lexical variable is not initialized")?
+    };
+    Ok(PendingException {
+        realm: code.realm,
+        payload: PendingExceptionPayload::EngineError {
+            kind: ExceptionKind::ReferenceError,
+            message,
+        },
+        origin: instruction_location(runtime, frame, pc)?,
+    })
+}
+
+pub(super) fn lexical_reinitialization_exception(
+    runtime: &Runtime,
+    frame: &Frame,
+    binding: BindingName,
+    pc: BytecodePc,
+) -> Result<PendingException, ExecutionError> {
+    let code = code(runtime, frame.code)?;
+    let message = if let Some(name) = binding_name(runtime, frame, binding)? {
+        name.concat(&JsString::from_utf8(" is already initialized")?)?
+    } else {
+        JsString::from_utf8("lexical variable is already initialized")?
     };
     Ok(PendingException {
         realm: code.realm,
@@ -336,9 +366,10 @@ pub(super) fn property_exception_at(
             "' of undefined",
         )?,
         PropertyFailure::NotObject => JsString::from_utf8("not an object")?,
-        PropertyFailure::ReadOnly => {
-            named_property_message("'", required_property_name(name)?, "' is read-only")?
-        }
+        PropertyFailure::ReadOnly => match name {
+            Some(name) => named_property_message("'", name, "' is read-only")?,
+            None => JsString::from_utf8("property is read-only")?,
+        },
         PropertyFailure::NoSetter => JsString::from_utf8("no setter for property")?,
         PropertyFailure::NotConfigurable => JsString::from_utf8("property is not configurable")?,
         PropertyFailure::NonExtensible => JsString::from_utf8("object is not extensible")?,
@@ -441,6 +472,7 @@ fn exception_caller_frames(
                 | FinalOpcode::CallMethod
                 | FinalOpcode::CallConstructor
                 | FinalOpcode::Eval
+                | FinalOpcode::ApplyEval
                 | FinalOpcode::GetField
                 | FinalOpcode::GetField2
                 | FinalOpcode::PutField
@@ -452,6 +484,8 @@ fn exception_caller_frames(
                 | FinalOpcode::ForOfStart
                 | FinalOpcode::ForAwaitOfStart
                 | FinalOpcode::ForOfNext
+                | FinalOpcode::ForAwaitOfNext
+                | FinalOpcode::IteratorGetValueDone
                 | FinalOpcode::IteratorClose
                 | FinalOpcode::IteratorNext
                 | FinalOpcode::IteratorCall
@@ -509,15 +543,17 @@ pub(super) fn dispatch_pending_exception(
     compiler: Option<&Arc<dyn OrdinaryDynamicFunctionCompiler>>,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<(), ExecutionError> {
-    freeze_pending_engine_stack(runtime, frames, &mut pending)?;
     loop {
-        #[derive(Clone, Copy)]
-        enum Handler {
-            Catch { frame: usize, marker: usize },
-            ForOf { frame: usize, marker: usize },
-            Native(usize),
-            AsyncGenerator(usize),
+        if let Some(frame) = frames
+            .iter_mut()
+            .rev()
+            .find(|frame| frame.pending_async_iterator_close.is_some())
+            && let Some(close) = frame.pending_async_iterator_close.take()
+            && let PendingAsyncIteratorClose::Abrupt(original) = close
+        {
+            pending = original;
         }
+        freeze_pending_engine_stack(runtime, frames, &mut pending)?;
         let mut handler = None;
         for (index, frame) in frames.iter().enumerate().rev() {
             if let Some(marker) = frame.stack.iter().rposition(|entry| {
@@ -527,11 +563,11 @@ pub(super) fn dispatch_pending_exception(
                 )
             }) {
                 handler = Some(match frame.stack.get(marker) {
-                    Some(OperandStackEntry::Catch { .. }) => Handler::Catch {
+                    Some(OperandStackEntry::Catch { .. }) => PendingExceptionHandler::Catch {
                         frame: index,
                         marker,
                     },
-                    Some(OperandStackEntry::ForOfCatch { .. }) => Handler::ForOf {
+                    Some(OperandStackEntry::ForOfCatch { .. }) => PendingExceptionHandler::ForOf {
                         frame: index,
                         marker,
                     },
@@ -552,14 +588,14 @@ pub(super) fn dispatch_pending_exception(
                 .iter()
                 .any(NativeContinuation::handles_abrupt)
             {
-                handler = Some(Handler::Native(index));
+                handler = Some(PendingExceptionHandler::Native(index));
                 break;
             }
             if frame
                 .generator_resume
                 .is_some_and(|generator| runtime.async_generator_states.contains_key(&generator))
             {
-                handler = Some(Handler::AsyncGenerator(index));
+                handler = Some(PendingExceptionHandler::AsyncGenerator(index));
                 break;
             }
         }
@@ -569,7 +605,7 @@ pub(super) fn dispatch_pending_exception(
             return Err(ExecutionError::Exception(exception));
         };
 
-        if let Handler::AsyncGenerator(handler_frame) = handler {
+        if let PendingExceptionHandler::AsyncGenerator(handler_frame) = handler {
             while frames.len() > handler_frame.saturating_add(1) {
                 let mut frame = frames.pop().ok_or(EngineFault::RuntimeInvariant {
                     message: "exception unwinder lost a frame above its async-generator boundary",
@@ -675,7 +711,7 @@ pub(super) fn dispatch_pending_exception(
             return Ok(());
         }
 
-        if let Handler::ForOf {
+        if let PendingExceptionHandler::ForOf {
             frame: handler_frame,
             marker,
         } = handler
@@ -711,9 +747,26 @@ pub(super) fn dispatch_pending_exception(
                 .ok_or(EngineFault::RuntimeInvariant {
                     message: "exception unwinder lost its for-of handler frame",
                 })?;
-            let (iterator, _next, active) = take_for_of_record_at(frame, marker)?;
+            let (iterator, _next, active, asynchronous) = take_for_of_record_at(frame, marker)?;
             if !active || matches!(iterator, StoredValue::Undefined) {
+                if matches!(
+                    frame.pending_async_iterator_close,
+                    Some(PendingAsyncIteratorClose::Normal)
+                ) {
+                    frame.pending_async_iterator_close = None;
+                }
                 continue;
+            }
+
+            if asynchronous {
+                if frame.pending_async_iterator_close.is_some() {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "exceptional async iterator close overlapped another close",
+                    }
+                    .into());
+                }
+                frame.pending_async_iterator_close =
+                    Some(PendingAsyncIteratorClose::Abrupt(pending.duplicate()));
             }
 
             let active_frames = active_execution_frames(frames);
@@ -723,9 +776,10 @@ pub(super) fn dispatch_pending_exception(
                     resource: RuntimeResource::Frames,
                     additional: 1,
                 })?;
-            let dispatch = begin_exceptional_iterator_close(
+            let dispatch = begin_exceptional_iterator_close_with_kind(
                 runtime,
                 iterator,
+                asynchronous,
                 pending,
                 None,
                 execution_budget,
@@ -755,14 +809,30 @@ pub(super) fn dispatch_pending_exception(
                     }
                     .into());
                 }
+                Ok(NativeDispatch::AsyncAwait { promise, origin }) => {
+                    match finish_async_suspension(
+                        runtime,
+                        frames,
+                        active_frame_values,
+                        promise,
+                        origin,
+                        compiler,
+                        execution_budget,
+                    )? {
+                        AsyncSuspension::Continued => {}
+                        AsyncSuspension::Root(value) => {
+                            execution_budget.native_root_completion = Some(value);
+                        }
+                    }
+                    return Ok(());
+                }
                 Ok(
                     NativeDispatch::Immediate(_)
                     | NativeDispatch::Pair(_, _)
                     | NativeDispatch::ForOfRecord { .. }
                     | NativeDispatch::ForOfStep { .. }
                     | NativeDispatch::ForOfClosed
-                    | NativeDispatch::CopyDataPropertiesDone
-                    | NativeDispatch::AsyncAwait { .. },
+                    | NativeDispatch::CopyDataPropertiesDone,
                 ) => {
                     return Err(EngineFault::RuntimeInvariant {
                         message: "exceptional IteratorClose completed without rethrowing",
@@ -786,12 +856,12 @@ pub(super) fn dispatch_pending_exception(
             }
         }
 
-        let Handler::Catch {
+        let PendingExceptionHandler::Catch {
             frame: handler_frame,
             marker: catch_marker,
         } = handler
         else {
-            let Handler::Native(handler_frame) = handler else {
+            let PendingExceptionHandler::Native(handler_frame) = handler else {
                 unreachable!("exception handler classification is exhaustive")
             };
             let cleanup_temporary_receivers =

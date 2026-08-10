@@ -2196,6 +2196,14 @@ pub(super) fn begin_internal_delete(
             .into());
         }
     };
+    if !result && strict && !boolean_result {
+        return Err(NativeFailure::Abrupt(property_exception_at(
+            realm,
+            origin,
+            None,
+            PropertyFailure::NotDeletable,
+        )?));
+    }
     finish_proxy_boolean(
         ProxyBooleanContinuation {
             proxy: reference,

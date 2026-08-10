@@ -52,6 +52,9 @@ pub enum CompilerBindingKind {
     /// The compiler-created immutable class-scope cell for one evaluated
     /// computed public field key.
     ClassFieldKey,
+    /// The compiler-created immutable class-scope cell holding the hidden
+    /// instance-element initializer method.
+    ClassInstanceInitializer,
     /// The compiler-created immutable class-scope cell for one fresh private
     /// instance-field name.
     ClassPrivateName,
@@ -167,6 +170,7 @@ impl CompilerBindingPolicy {
                 | CompilerBindingKind::Const
                 | CompilerBindingKind::ClassName
                 | CompilerBindingKind::ClassFieldKey
+                | CompilerBindingKind::ClassInstanceInitializer
                 | CompilerBindingKind::ClassPrivateName
                 | CompilerBindingKind::ClassStaticReceiver
                 | CompilerBindingKind::WithObject
@@ -200,6 +204,7 @@ impl CompilerBindingPolicy {
             CompilerBindingKind::Const
             | CompilerBindingKind::ClassName
             | CompilerBindingKind::ClassFieldKey
+            | CompilerBindingKind::ClassInstanceInitializer
             | CompilerBindingKind::ClassPrivateName
             | CompilerBindingKind::ClassStaticReceiver
             | CompilerBindingKind::WithObject => {
@@ -572,6 +577,7 @@ pub struct CompilerSource {
     function_span: SourceByteSpan,
     name_span: Option<SourceByteSpan>,
     mappings: Arc<[PcSourceSpan]>,
+    strict_mode_pcs: Option<Arc<[BytecodePc]>>,
 }
 
 impl CompilerSource {
@@ -590,7 +596,16 @@ impl CompilerSource {
             function_span,
             name_span,
             mappings,
+            strict_mode_pcs: None,
         }
+    }
+
+    /// Attaches the sorted instruction PCs whose source regions are strict
+    /// even though their surrounding executable is not.
+    #[must_use]
+    pub fn with_strict_mode_pcs(mut self, strict_mode_pcs: Arc<[BytecodePc]>) -> Self {
+        self.strict_mode_pcs = (!strict_mode_pcs.is_empty()).then_some(strict_mode_pcs);
+        self
     }
 }
 
@@ -608,8 +623,13 @@ pub enum CompilerExecutableKind {
     OrdinaryFunction,
     /// A synchronous lexical-this arrow function.
     OrdinaryArrow,
+    /// An asynchronous lexical-this arrow function.
+    AsyncArrow,
     /// A nonconstructable ordinary object-literal method, getter, or setter.
     OrdinaryMethod,
+    /// The hidden strict method that initializes one class's instance
+    /// elements. It is retained only in a compiler-owned class-scope cell.
+    ClassInstanceInitializer,
     /// A strict constructable base-class constructor. Its public prototype
     /// object is installed by the paired `define_class` instruction.
     ClassConstructor,
@@ -697,6 +717,7 @@ pub struct VerifiedCompilerSource {
     function_span: SourceByteSpan,
     name_span: Option<SourceByteSpan>,
     mappings: Arc<[PcSourceSpan]>,
+    strict_mode_pcs: Option<Arc<[BytecodePc]>>,
 }
 
 impl VerifiedCompilerSource {
@@ -748,6 +769,15 @@ impl VerifiedCompilerSource {
     #[must_use]
     pub fn mappings(&self) -> &[PcSourceSpan] {
         &self.mappings
+    }
+
+    /// Returns whether this instruction belongs to a nested strict source
+    /// region inside an otherwise non-strict executable.
+    #[must_use]
+    pub fn is_strict_mode_pc(&self, pc: BytecodePc) -> bool {
+        self.strict_mode_pcs
+            .as_deref()
+            .is_some_and(|strict_mode_pcs| strict_mode_pcs.binary_search(&pc).is_ok())
     }
 }
 
@@ -1622,6 +1652,29 @@ pub enum BytecodeVerificationErrorKind {
         /// Supplied mappings.
         mappings: u64,
     },
+    /// More strict-source PCs were supplied than verified instructions.
+    StrictModeInstructionCountOutOfBounds {
+        /// Supplied strict-source PCs.
+        strict_instructions: u64,
+        /// Verified instructions.
+        instructions: u64,
+    },
+    /// Strict-source PCs are not strictly increasing.
+    StrictModePcNotIncreasing {
+        /// Position of the rejected PC.
+        index: u32,
+        /// Previous PC.
+        previous: BytecodePc,
+        /// Rejected PC.
+        current: BytecodePc,
+    },
+    /// A strict-source PC is not a verified instruction boundary.
+    StrictModePcNotInstruction {
+        /// Position of the rejected PC.
+        index: u32,
+        /// Rejected PC.
+        pc: BytecodePc,
+    },
     /// A mapping PC differs from the corresponding verified instruction.
     SourcePcMismatch {
         /// Mapping position.
@@ -2066,6 +2119,25 @@ impl fmt::Display for BytecodeVerificationErrorKind {
             } => write!(
                 formatter,
                 "source mapping count {mappings} does not equal instruction count {instructions}"
+            ),
+            Self::StrictModeInstructionCountOutOfBounds {
+                strict_instructions,
+                instructions,
+            } => write!(
+                formatter,
+                "strict-source instruction count {strict_instructions} exceeds instruction count {instructions}"
+            ),
+            Self::StrictModePcNotIncreasing {
+                index,
+                previous,
+                current,
+            } => write!(
+                formatter,
+                "strict-source PC {index} uses {current}, which does not follow {previous}"
+            ),
+            Self::StrictModePcNotInstruction { index, pc } => write!(
+                formatter,
+                "strict-source PC {index} uses {pc}, which is not an instruction boundary"
             ),
             Self::SourcePcMismatch {
                 mapping,
@@ -2567,11 +2639,8 @@ fn verify_function_metadata(
         &metadata.closures,
         &internal_stack,
     )?;
-    let function_initializer_prefix = function
-        .parameter_initialization_end()
-        .map_or(realm_global_initializer_prefix, |boundary| {
-            realm_global_initializer_prefix.max(boundary as usize)
-        });
+    let function_initializer_prefix =
+        realm_global_initializer_prefix.max(function.function_initializer_prefix_start() as usize);
     let initializer_sites = verify_function_initializers(
         id,
         function,
@@ -2622,6 +2691,7 @@ fn verify_function_metadata(
             function_span: metadata.source.function_span,
             name_span: metadata.source.name_span,
             mappings: Arc::clone(&metadata.source.mappings),
+            strict_mode_pcs: metadata.source.strict_mode_pcs.as_ref().map(Arc::clone),
         },
         internal_stack,
     })
@@ -2682,7 +2752,7 @@ fn verify_executable_kind(
         | CompilerExecutableKind::GeneratorFunction
         | CompilerExecutableKind::AsyncFunction
         | CompilerExecutableKind::AsyncGeneratorFunction => Ok(()),
-        CompilerExecutableKind::OrdinaryArrow => {
+        CompilerExecutableKind::OrdinaryArrow | CompilerExecutableKind::AsyncArrow => {
             if metadata_has_local_function_name(metadata) {
                 return Err(BytecodeVerificationError::function(
                     id,
@@ -2692,6 +2762,7 @@ fn verify_executable_kind(
             Ok(())
         }
         CompilerExecutableKind::OrdinaryMethod
+        | CompilerExecutableKind::ClassInstanceInitializer
         | CompilerExecutableKind::GeneratorMethod
         | CompilerExecutableKind::AsyncMethod
         | CompilerExecutableKind::AsyncGeneratorMethod
@@ -2793,8 +2864,9 @@ fn verify_header(
         CompilerExecutableKind::DirectEvalScript => {
             let flags = header.flags().bits();
             if header.kind() != FunctionKind::Normal
-                || flags & !0x05c0 != 0
+                || flags & !0x15c0 != 0
                 || flags & 0x0400 == 0
+                || (flags & 0x1000 != 0 && flags & 0x0080 == 0)
                 || header.mode().bits() & !1 != 0
             {
                 return Err(BytecodeVerificationError::function(
@@ -2858,6 +2930,29 @@ fn verify_header(
                 ));
             }
         }
+        CompilerExecutableKind::AsyncArrow => {
+            if header.kind() != FunctionKind::Async
+                || !matches!(header.flags().bits(), 0x0460 | 0x0462)
+                || header.mode().bits() & !1 != 0
+            {
+                return Err(BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::UnsupportedFunctionHeader,
+                ));
+            }
+            if header.defined_argument_count() > arguments
+                || (header.flags().has_simple_parameter_list()
+                    && header.defined_argument_count() != arguments)
+            {
+                return Err(BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::DefinedArgumentCountMismatch {
+                        defined: header.defined_argument_count(),
+                        arguments,
+                    },
+                ));
+            }
+        }
         CompilerExecutableKind::OrdinaryMethod => {
             if header.kind() != FunctionKind::Normal
                 || !matches!(header.flags().bits(), 0x0740 | 0x0742)
@@ -2878,6 +2973,19 @@ fn verify_header(
                         defined: header.defined_argument_count(),
                         arguments,
                     },
+                ));
+            }
+        }
+        CompilerExecutableKind::ClassInstanceInitializer => {
+            if header.kind() != FunctionKind::Normal
+                || header.flags().bits() != 0x0742
+                || !header.mode().is_strict()
+                || header.defined_argument_count() != 0
+                || arguments != 0
+            {
+                return Err(BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::UnsupportedFunctionHeader,
                 ));
             }
         }
@@ -4258,6 +4366,7 @@ const fn realm_global_policy_supported(policy: CompilerBindingPolicy) -> bool {
         | CompilerBindingKind::FunctionName
         | CompilerBindingKind::ClassName
         | CompilerBindingKind::ClassFieldKey
+        | CompilerBindingKind::ClassInstanceInitializer
         | CompilerBindingKind::ClassPrivateName
         | CompilerBindingKind::ClassStaticReceiver
         | CompilerBindingKind::WithObject
@@ -4371,6 +4480,42 @@ fn verify_source(
                 mappings: usize_to_u64(source.mappings.len()),
             },
         ));
+    }
+    let strict_mode_pcs = source.strict_mode_pcs.as_deref().unwrap_or_default();
+    if strict_mode_pcs.len() > flow.instructions().len() {
+        return Err(BytecodeVerificationError::function(
+            id,
+            BytecodeVerificationErrorKind::StrictModeInstructionCountOutOfBounds {
+                strict_instructions: usize_to_u64(strict_mode_pcs.len()),
+                instructions: usize_to_u64(flow.instructions().len()),
+            },
+        ));
+    }
+    for (index, window) in strict_mode_pcs.windows(2).enumerate() {
+        let [previous, current] = window else {
+            unreachable!("two-entry strict-source window")
+        };
+        if previous >= current {
+            return Err(BytecodeVerificationError::function(
+                id,
+                BytecodeVerificationErrorKind::StrictModePcNotIncreasing {
+                    index: usize_to_u32(index + 1),
+                    previous: *previous,
+                    current: *current,
+                },
+            ));
+        }
+    }
+    for (index, pc) in strict_mode_pcs.iter().copied().enumerate() {
+        if !flow.is_instruction_start(pc) {
+            return Err(BytecodeVerificationError::function(
+                id,
+                BytecodeVerificationErrorKind::StrictModePcNotInstruction {
+                    index: usize_to_u32(index),
+                    pc,
+                },
+            ));
+        }
     }
     for (index, (mapping, instruction)) in
         source.mappings.iter().zip(flow.instructions()).enumerate()
@@ -4757,7 +4902,9 @@ fn verify_class_field_key_bindings(
                         },
                     ));
                 };
-                if child_metadata.executable_kind != CompilerExecutableKind::ClassConstructor {
+                if child_metadata.executable_kind
+                    != CompilerExecutableKind::ClassInstanceInitializer
+                {
                     return Err(BytecodeVerificationError::function(
                         *child_id,
                         BytecodeVerificationErrorKind::ClosureMetadataMismatch {
@@ -4820,6 +4967,12 @@ fn verify_method_definitions(
         BytecodeGraphResource::VerifiedMetadata,
     )?;
     let mut class_definition_counts = try_filled_vec(
+        graph.root_id(),
+        graph.functions().len(),
+        0_u32,
+        BytecodeGraphResource::VerifiedMetadata,
+    )?;
+    let mut instance_initializer_counts = try_filled_vec(
         graph.root_id(),
         graph.functions().len(),
         0_u32,
@@ -4893,6 +5046,7 @@ fn verify_method_definitions(
                     && index == 0
                     && derived_default_constructor_pair(
                         parent,
+                        &metadata[parent_index],
                         &predecessor_counts,
                         internal_stack,
                     );
@@ -4937,6 +5091,7 @@ fn verify_method_definitions(
                         .is_derived_class_constructor()
                     && derived_default_constructor_pair(
                         parent,
+                        &metadata[parent_index],
                         &predecessor_counts,
                         internal_stack,
                     ))
@@ -4965,6 +5120,38 @@ fn verify_method_definitions(
             else {
                 continue;
             };
+            if child_metadata.executable_kind == CompilerExecutableKind::ClassInstanceInitializer {
+                if class_instance_initializer_pair(
+                    parent,
+                    &metadata[parent_index],
+                    metadata,
+                    instructions,
+                    &predecessor_counts,
+                    internal_stack,
+                    index,
+                ) != Some(*child)
+                {
+                    return Err(BytecodeVerificationError::function(
+                        parent_id,
+                        BytecodeVerificationErrorKind::OrdinaryMethodTemplatePlacementMismatch {
+                            pc: decoded.pc(),
+                            child: *child,
+                        },
+                    ));
+                }
+                let child_index = usize::try_from(child.get()).map_err(|_| {
+                    BytecodeVerificationError::function(
+                        *child,
+                        BytecodeVerificationErrorKind::OrdinaryMethodTemplatePlacementMismatch {
+                            pc: decoded.pc(),
+                            child: *child,
+                        },
+                    )
+                })?;
+                instance_initializer_counts[child_index] =
+                    instance_initializer_counts[child_index].saturating_add(1);
+                continue;
+            }
             if child_metadata.executable_kind == CompilerExecutableKind::ClassConstructor {
                 let pair = index.checked_add(1).and_then(|definition_index| {
                     class_definition_pair(
@@ -5114,6 +5301,25 @@ fn verify_method_definitions(
             ));
         }
     }
+    for (index, (metadata, &definitions)) in metadata
+        .iter()
+        .zip(&instance_initializer_counts)
+        .enumerate()
+    {
+        if metadata.executable_kind != CompilerExecutableKind::ClassInstanceInitializer {
+            continue;
+        }
+        let child = function_id(index)?;
+        if definitions != 1 {
+            return Err(BytecodeVerificationError::function(
+                child,
+                BytecodeVerificationErrorKind::OrdinaryMethodTemplateOwnershipMismatch {
+                    child,
+                    definitions,
+                },
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -5197,6 +5403,7 @@ fn verify_inferred_function_names(
             if opcode == FinalOpcode::SetHomeObject
                 && !private_method_home_object_pair(
                     parent,
+                    &metadata[parent_index],
                     metadata,
                     instructions,
                     &predecessor_counts,
@@ -5424,8 +5631,90 @@ fn private_method_name_pair(
     })
 }
 
+/// Certifies the hidden instance-element initializer closure created
+/// immediately after its class definition. The fresh class prototype becomes
+/// the method's home object, and the closure is then published only into the
+/// compiler-owned immutable initializer cell.
+fn class_instance_initializer_pair(
+    parent: &VerifiedCompilerFunction,
+    parent_metadata: &VerifiedFunctionMetadata,
+    metadata: &[VerifiedFunctionMetadata],
+    instructions: &[VerifiedInstruction],
+    predecessor_counts: &[u32],
+    internal_stack: &InternalStackCertificate,
+    closure_index: usize,
+) -> Option<FunctionTemplateId> {
+    let class_index = closure_index.checked_sub(1)?;
+    let class_instruction = instructions.get(class_index)?.decoded().instruction();
+    if !matches!(
+        (class_instruction.opcode(), class_instruction.operands()),
+        (FinalOpcode::DefineClass, Operands::AtomU8 { value, .. }) if value & 2 != 0
+    ) {
+        return None;
+    }
+    let closure = instructions.get(closure_index)?.decoded().instruction();
+    if !matches!(
+        closure.opcode(),
+        FinalOpcode::FClosure | FinalOpcode::FClosure8
+    ) {
+        return None;
+    }
+    let swap_home_index = closure_index.checked_add(1)?;
+    let home_index = closure_index.checked_add(2)?;
+    let swap_store_index = closure_index.checked_add(3)?;
+    let store_index = closure_index.checked_add(4)?;
+    for (index, opcode) in [
+        (swap_home_index, FinalOpcode::Swap),
+        (home_index, FinalOpcode::SetHomeObject),
+        (swap_store_index, FinalOpcode::Swap),
+    ] {
+        if instructions.get(index)?.decoded().instruction().opcode() != opcode
+            || predecessor_counts.get(index) != Some(&1)
+        {
+            return None;
+        }
+    }
+    let store = instructions.get(store_index)?.decoded().instruction();
+    if !is_unchecked_local_put(store.opcode()) {
+        return None;
+    }
+    let local = local_operand(store.opcode(), store.operands())?;
+    let arguments = parent.control_flow().domains().argument_count() as usize;
+    if parent_metadata
+        .variables
+        .get(arguments.checked_add(local as usize)?)?
+        .policy()
+        .kind()
+        != CompilerBindingKind::ClassInstanceInitializer
+        || predecessor_counts.get(store_index) != Some(&1)
+    {
+        return None;
+    }
+    for from in class_index..store_index {
+        if !internal_stack.has_effective_successor(
+            instructions,
+            from,
+            usize_to_u32(from.checked_add(1)?),
+        ) {
+            return None;
+        }
+    }
+    let constant = closure_constant(closure.opcode(), closure.operands())?;
+    let crate::CompilerConstant::Function(child) = parent.constants().get(constant as usize)?
+    else {
+        return None;
+    };
+    let child_metadata = usize::try_from(child.get())
+        .ok()
+        .and_then(|index| metadata.get(index))?;
+    (child_metadata.executable_kind == CompilerExecutableKind::ClassInstanceInitializer
+        && child_metadata.function_name.is_none())
+    .then_some(*child)
+}
+
 fn private_method_home_object_pair(
     parent: &VerifiedCompilerFunction,
+    parent_metadata: &VerifiedFunctionMetadata,
     metadata: &[VerifiedFunctionMetadata],
     instructions: &[VerifiedInstruction],
     predecessor_counts: &[u32],
@@ -5458,7 +5747,21 @@ fn private_method_home_object_pair(
             )
         })
         .is_some();
-    instance || r#static
+    let initializer = home_object_index
+        .checked_sub(2)
+        .is_some_and(|closure_index| {
+            class_instance_initializer_pair(
+                parent,
+                parent_metadata,
+                metadata,
+                instructions,
+                predecessor_counts,
+                internal_stack,
+                closure_index,
+            )
+            .is_some()
+        });
+    instance || r#static || initializer
 }
 
 fn inferred_function_name_pair(
@@ -5519,6 +5822,7 @@ fn inferred_function_name_pair(
         child_metadata.executable_kind,
         CompilerExecutableKind::OrdinaryFunction
             | CompilerExecutableKind::OrdinaryArrow
+            | CompilerExecutableKind::AsyncArrow
             | CompilerExecutableKind::GeneratorFunction
             | CompilerExecutableKind::AsyncFunction
             | CompilerExecutableKind::AsyncGeneratorFunction
@@ -5747,11 +6051,14 @@ fn method_definition_pair(
     ) {
         return None;
     }
+    // Accessor grammar constrains the complete formal-parameter list, not
+    // the observable `length`. A setter with one defaulted parameter has one
+    // argument slot while its ExpectedArgumentCount is zero.
     let arguments = graph
         .function(*child)?
         .control_flow()
-        .function_header()
-        .defined_argument_count();
+        .domains()
+        .argument_count();
     let kind = flags & 0b11;
     if (kind == 1 && arguments != 0) || (kind == 2 && arguments != 1) {
         return None;
@@ -5939,223 +6246,69 @@ fn derived_class_heritage_pair(
         && predecessor_counts.get(closure_index) == Some(&2)
 }
 
-/// The synthesized derived constructor body is intentionally restricted to
-/// `super(...args)`, followed by zero or more no-op-delimited public field
-/// initialization regions, then the final result drop. The delimiter exists
-/// only in source-less default constructors and keeps accepted field
-/// expressions from being confused with surrounding constructor code. Source
-/// derived constructors are separately certified through the typed
-/// `special_object(4); get_super; special_object(3); call_constructor;
-/// check_ctor_return; drop` provenance transfer above.
-#[allow(
-    clippy::too_many_lines,
-    reason = "the paired default-constructor certificate keeps its complete control-flow boundary audit together"
-)]
+/// Certifies the complete source-less derived-constructor body. Instance
+/// elements are delegated to one compiler-owned hidden method; they are never
+/// inlined into the constructor or duplicated at an arrow `super()` site.
 fn derived_default_constructor_pair(
     function: &VerifiedCompilerFunction,
+    metadata: &VerifiedFunctionMetadata,
     predecessor_counts: &[u32],
     internal_stack: &InternalStackCertificate,
 ) -> bool {
     let instructions = function.control_flow().instructions();
-    let Some((check_constructor, tail)) = instructions.split_first() else {
-        return false;
+    let has_opcodes = |expected: &[FinalOpcode]| {
+        instructions.len() == expected.len()
+            && instructions
+                .iter()
+                .zip(expected)
+                .all(|(actual, expected)| actual.decoded().instruction().opcode() == *expected)
     };
-    let Some((initialize_constructor, tail)) = tail.split_first() else {
-        return false;
-    };
-    let Some((return_undefined, tail)) = tail.split_last() else {
-        return false;
-    };
-    let Some((drop_result, fields)) = tail.split_last() else {
-        return false;
-    };
-    if check_constructor.decoded().instruction().opcode() != FinalOpcode::CheckCtor
-        || initialize_constructor.decoded().instruction().opcode() != FinalOpcode::InitCtor
-        || drop_result.decoded().instruction().opcode() != FinalOpcode::Drop
-        || return_undefined.decoded().instruction().opcode() != FinalOpcode::ReturnUndef
-    {
-        return false;
-    }
-    if predecessor_counts.len() != instructions.len()
-        || predecessor_counts.first() != Some(&0)
-        || predecessor_counts.get(1) != Some(&1)
-        || !has_only_effective_successor(internal_stack, instructions, 0, 1)
-    {
-        return false;
-    }
-
-    let final_drop_index = instructions.len().saturating_sub(2);
-    let return_index = instructions.len().saturating_sub(1);
-    let fields_start = 2;
-    let fields_end = final_drop_index.saturating_sub(1);
-    let first_after_init = if fields.is_empty() {
-        final_drop_index
-    } else {
-        fields_start
-    };
-    if predecessor_counts.get(final_drop_index) != Some(&1)
-        || predecessor_counts.get(return_index) != Some(&1)
-        || !has_only_effective_successor(
-            internal_stack,
-            instructions,
-            1,
-            usize_to_u32(first_after_init),
-        )
-        || !has_only_effective_successor(
-            internal_stack,
-            instructions,
-            final_drop_index,
-            usize_to_u32(return_index),
-        )
-    {
-        return false;
-    }
-    if fields.is_empty() {
-        return true;
-    }
-
-    for source in 0..instructions.len() {
-        for edge in internal_stack.effective_successors(instructions, source) {
-            let target = edge.target.get() as usize;
-            let source_is_field = (fields_start..=fields_end).contains(&source);
-            let target_is_field = (fields_start..=fields_end).contains(&target);
-            if target_is_field && !source_is_field && (source != 1 || target != fields_start) {
-                return false;
-            }
-            if source_is_field
-                && !target_is_field
-                && (source != fields_end || target != final_drop_index)
-            {
-                return false;
-            }
-        }
-    }
-
-    let mut next = 0;
-    while next < fields.len() {
-        if fields[next].decoded().instruction().opcode() != FinalOpcode::Nop {
-            return false;
-        }
-        let Some(close) = fields
-            .get(next.saturating_add(1)..)
-            .and_then(|tail| {
-                tail.iter().position(|instruction| {
-                    instruction.decoded().instruction().opcode() == FinalOpcode::Nop
+    let no_initializer = has_opcodes(&[
+        FinalOpcode::CheckCtor,
+        FinalOpcode::InitCtor,
+        FinalOpcode::Drop,
+        FinalOpcode::ReturnUndef,
+    ]);
+    let initializer = has_opcodes(&[
+        FinalOpcode::CheckCtor,
+        FinalOpcode::InitCtor,
+        FinalOpcode::GetVarRefCheck,
+        FinalOpcode::PushThis,
+        FinalOpcode::Swap,
+        FinalOpcode::CallMethod,
+        FinalOpcode::Drop,
+        FinalOpcode::Drop,
+        FinalOpcode::ReturnUndef,
+    ]) && matches!(
+        instructions
+            .get(5)
+            .map(|instruction| instruction.decoded().instruction().operands()),
+        Some(Operands::NPop { argument_count: 0 })
+    ) && instructions.get(2).is_some_and(|instruction| {
+        let instruction = instruction.decoded().instruction();
+        closure_operand(instruction.opcode(), instruction.operands()).is_some_and(|slot| {
+            metadata
+                .closures()
+                .get(slot as usize)
+                .is_some_and(|definition| {
+                    definition.policy().kind() == CompilerBindingKind::ClassInstanceInitializer
                 })
-            })
-            .and_then(|offset| next.checked_add(offset.saturating_add(1)))
-        else {
-            return false;
-        };
-        let Some(region) = fields.get(next.saturating_add(1)..close) else {
-            return false;
-        };
-        let static_field_region = matches!(
-            region,
-            [push_this, .., define, drop]
-                if push_this.decoded().instruction().opcode() == FinalOpcode::PushThis
-                    && matches!(
-                        (define.decoded().instruction().opcode(), define.decoded().instruction().operands()),
-                        (FinalOpcode::DefineField, Operands::Atom(_))
-                    )
-                    && drop.decoded().instruction().opcode() == FinalOpcode::Drop
-        );
-        let computed_field_region = matches!(
-            region,
-            [push_this, key, .., define, first_drop, second_drop]
-                if push_this.decoded().instruction().opcode() == FinalOpcode::PushThis
-                    && key.decoded().instruction().opcode() == FinalOpcode::GetVarRefCheck
-                    && matches!(
-                        (define.decoded().instruction().opcode(), define.decoded().instruction().operands()),
-                        (FinalOpcode::DefineArrayEl, Operands::None)
-                    )
-                    && first_drop.decoded().instruction().opcode() == FinalOpcode::Drop
-                    && second_drop.decoded().instruction().opcode() == FinalOpcode::Drop
-        );
-        let private_field_region = matches!(
-            region,
-            [push_this, private_name, .., define, drop]
-                if push_this.decoded().instruction().opcode() == FinalOpcode::PushThis
-                    && private_name.decoded().instruction().opcode() == FinalOpcode::GetVarRefCheck
-                    && matches!(
-                        (define.decoded().instruction().opcode(), define.decoded().instruction().operands()),
-                        (FinalOpcode::DefinePrivateField, Operands::U8(0..=3))
-                    )
-                    && drop.decoded().instruction().opcode() == FinalOpcode::Drop
-        );
-        if !static_field_region && !computed_field_region && !private_field_region {
-            return false;
-        }
-        let open_index = fields_start.saturating_add(next);
-        let push_this_index = open_index.saturating_add(1);
-        let close_index = fields_start.saturating_add(close);
-        let define_index = if computed_field_region {
-            close_index.saturating_sub(3)
-        } else {
-            close_index.saturating_sub(2)
-        };
-        let first_drop_index = computed_field_region.then(|| close_index.saturating_sub(2));
-        let drop_index = close_index.saturating_sub(1);
-        let next_after_close = if close_index == fields_end {
-            final_drop_index
-        } else {
-            close_index.saturating_add(1)
-        };
-        if predecessor_counts.get(open_index) != Some(&1)
-            || predecessor_counts.get(push_this_index) != Some(&1)
-            || first_drop_index.is_some_and(|index| predecessor_counts.get(index) != Some(&1))
-            || predecessor_counts.get(drop_index) != Some(&1)
-            || predecessor_counts.get(close_index) != Some(&1)
-            || !has_only_effective_successor(
-                internal_stack,
-                instructions,
-                open_index,
-                usize_to_u32(push_this_index),
-            )
-            || !has_only_effective_successor(
-                internal_stack,
-                instructions,
-                define_index,
-                usize_to_u32(first_drop_index.unwrap_or(drop_index)),
-            )
-            || first_drop_index.is_some_and(|index| {
-                !has_only_effective_successor(
-                    internal_stack,
-                    instructions,
-                    index,
-                    usize_to_u32(drop_index),
-                )
-            })
-            || !has_only_effective_successor(
-                internal_stack,
-                instructions,
-                drop_index,
-                usize_to_u32(close_index),
-            )
-            || !has_only_effective_successor(
-                internal_stack,
-                instructions,
-                close_index,
-                usize_to_u32(next_after_close),
-            )
-        {
-            return false;
-        }
-        for source in push_this_index..=drop_index {
-            for edge in internal_stack.effective_successors(instructions, source) {
-                let target = edge.target.get() as usize;
-                if source == drop_index {
-                    if target != close_index {
-                        return false;
-                    }
-                } else if !(push_this_index..=drop_index).contains(&target) {
-                    return false;
-                }
-            }
-        }
-        next = close.saturating_add(1);
+        })
+    });
+    if !no_initializer && !initializer {
+        return false;
     }
-    true
+    predecessor_counts.len() == instructions.len()
+        && predecessor_counts.first() == Some(&0)
+        && predecessor_counts.iter().skip(1).all(|count| *count == 1)
+        && (0..instructions.len().saturating_sub(1)).all(|source| {
+            has_only_effective_successor(
+                internal_stack,
+                instructions,
+                source,
+                usize_to_u32(source.saturating_add(1)),
+            )
+        })
 }
 
 fn has_only_effective_successor(
@@ -6214,6 +6367,65 @@ fn atom_contents(
     atoms.get(index).map(crate::CompilerAtom::string)
 }
 
+pub(super) fn contextual_instance_initializer_sequence(
+    flow: &VerifiedControlFlow,
+    check_index: usize,
+) -> bool {
+    let instructions = flow.instructions();
+    let expected = [
+        (FinalOpcode::CheckCtorReturn, Operands::None),
+        (FinalOpcode::SpecialObject, Operands::U8(6)),
+        (FinalOpcode::PushThis, Operands::None),
+        (FinalOpcode::Swap, Operands::None),
+        (
+            FinalOpcode::CallMethod,
+            Operands::NPop { argument_count: 0 },
+        ),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+    ];
+    for (offset, (opcode, operands)) in expected.into_iter().enumerate() {
+        let Some(index) = check_index.checked_add(offset) else {
+            return false;
+        };
+        let Some(instruction) = instructions.get(index) else {
+            return false;
+        };
+        let instruction = instruction.decoded().instruction();
+        if instruction.opcode() != opcode || instruction.operands() != operands {
+            return false;
+        }
+        if offset == 0 {
+            continue;
+        }
+        let predecessor_count = instructions
+            .iter()
+            .filter(|candidate| {
+                let successors = candidate.successors();
+                successors.fallthrough().map(InstructionIndex::get) == Some(usize_to_u32(index))
+                    || successors.branch_target().map(InstructionIndex::get)
+                        == Some(usize_to_u32(index))
+                    || successors.jump_target().map(InstructionIndex::get)
+                        == Some(usize_to_u32(index))
+            })
+            .count();
+        let Some(previous) = instructions.get(index - 1) else {
+            return false;
+        };
+        if predecessor_count != 1
+            || previous.successors().kind() != crate::VerifiedSuccessorKind::Fallthrough
+            || previous
+                .successors()
+                .fallthrough()
+                .map(InstructionIndex::get)
+                != Some(usize_to_u32(index))
+        {
+            return false;
+        }
+    }
+    true
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "opcode admission and function-kind restrictions share one auditable pass"
@@ -6236,7 +6448,8 @@ fn verify_supported_opcodes(
     );
     let asynchronous = matches!(
         executable_kind,
-        CompilerExecutableKind::AsyncFunction
+        CompilerExecutableKind::AsyncArrow
+            | CompilerExecutableKind::AsyncFunction
             | CompilerExecutableKind::AsyncMethod
             | CompilerExecutableKind::AsyncGeneratorFunction
             | CompilerExecutableKind::AsyncGeneratorMethod
@@ -6257,6 +6470,21 @@ fn verify_supported_opcodes(
                 .map(ClosureVariableDefinition::policy),
         )
         .any(|policy| policy.kind() == CompilerBindingKind::ClassStaticReceiver);
+    let super_property_authorized = (executable_kind == CompilerExecutableKind::DirectEvalScript
+        && (flow.function_header().flags().super_allowed()
+            || flow.function_header().flags().super_call_allowed()))
+        || matches!(
+            executable_kind,
+            CompilerExecutableKind::OrdinaryArrow
+                | CompilerExecutableKind::AsyncArrow
+                | CompilerExecutableKind::OrdinaryMethod
+                | CompilerExecutableKind::ClassInstanceInitializer
+                | CompilerExecutableKind::GeneratorMethod
+                | CompilerExecutableKind::AsyncMethod
+                | CompilerExecutableKind::AsyncGeneratorMethod
+                | CompilerExecutableKind::ClassConstructor
+        )
+        || static_field_super;
     let mut initial_yield = None;
     let mapped_arguments_authority = flow
         .compiler_capture_layout()
@@ -6286,6 +6514,11 @@ fn verify_supported_opcodes(
                 },
             ));
         }
+        let throw_error_authorized = match instruction.operands() {
+            Operands::AtomU8 { value: 3, .. } => super_property_authorized,
+            Operands::AtomU8 { value: 4, .. } => generator,
+            _ => false,
+        };
         if !supported_compiler_opcode(opcode)
             || (matches!(
                 opcode,
@@ -6295,7 +6528,12 @@ fn verify_supported_opcodes(
                     | FinalOpcode::AsyncYieldStar
             ) && !generator)
             || (opcode == FinalOpcode::Await && !asynchronous)
-            || (opcode == FinalOpcode::ForAwaitOfStart && !async_generator)
+            || (matches!(
+                opcode,
+                FinalOpcode::ForAwaitOfStart
+                    | FinalOpcode::ForAwaitOfNext
+                    | FinalOpcode::IteratorGetValueDone
+            ) && !asynchronous)
             || (opcode == FinalOpcode::YieldStar && async_generator)
             || (opcode == FinalOpcode::AsyncYieldStar && !async_generator)
             || (opcode == FinalOpcode::Yield && async_generator && {
@@ -6325,35 +6563,31 @@ fn verify_supported_opcodes(
                 FinalOpcode::IteratorNext
                     | FinalOpcode::IteratorCall
                     | FinalOpcode::IteratorCheckObject
-                    | FinalOpcode::ThrowError
             ) && !generator)
             || (matches!(opcode, FinalOpcode::Return | FinalOpcode::ReturnUndef)
                 && (generator || asynchronous))
             || (opcode == FinalOpcode::CheckCtorReturn
-                && !(executable_kind == CompilerExecutableKind::OrdinaryArrow
-                    || (executable_kind == CompilerExecutableKind::DirectEvalScript
-                        && flow.function_header().flags().super_call_allowed())
+                && !(matches!(
+                    executable_kind,
+                    CompilerExecutableKind::OrdinaryArrow | CompilerExecutableKind::AsyncArrow
+                ) || (executable_kind == CompilerExecutableKind::DirectEvalScript
+                    && flow.function_header().flags().super_call_allowed())
                     || (executable_kind == CompilerExecutableKind::ClassConstructor
                         && flow
                             .function_header()
                             .flags()
                             .is_derived_class_constructor())))
+            || (opcode == FinalOpcode::CheckCtorReturn
+                && executable_kind == CompilerExecutableKind::DirectEvalScript
+                && flow
+                    .function_header()
+                    .flags()
+                    .direct_eval_has_instance_elements()
+                && !contextual_instance_initializer_sequence(flow, instruction_index))
             || (matches!(
                 opcode,
                 FinalOpcode::GetSuper | FinalOpcode::GetSuperValue | FinalOpcode::PutSuperValue
-            ) && !(executable_kind == CompilerExecutableKind::DirectEvalScript
-                && (flow.function_header().flags().super_allowed()
-                    || flow.function_header().flags().super_call_allowed()))
-                && !matches!(
-                    executable_kind,
-                    CompilerExecutableKind::OrdinaryArrow
-                        | CompilerExecutableKind::OrdinaryMethod
-                        | CompilerExecutableKind::GeneratorMethod
-                        | CompilerExecutableKind::AsyncMethod
-                        | CompilerExecutableKind::AsyncGeneratorMethod
-                        | CompilerExecutableKind::ClassConstructor
-                )
-                && !static_field_super)
+            ) && !super_property_authorized)
             || matches!(
                 (opcode, instruction.operands()),
                 (FinalOpcode::SpecialObject, operands)
@@ -6367,6 +6601,11 @@ fn verify_supported_opcodes(
                         simple_parameter_list,
                     )
             )
+            || (matches!(instruction.operands(), Operands::U8(6))
+                && opcode == FinalOpcode::SpecialObject
+                && !instruction_index.checked_sub(1).is_some_and(|check_index| {
+                    contextual_instance_initializer_sequence(flow, check_index)
+                }))
             || matches!(
                 (opcode, instruction.operands()),
                 (FinalOpcode::Rest, Operands::U16(first_argument))
@@ -6376,6 +6615,7 @@ fn verify_supported_opcodes(
                             executable_kind,
                             CompilerExecutableKind::OrdinaryFunction
                                 | CompilerExecutableKind::OrdinaryArrow
+                                | CompilerExecutableKind::AsyncArrow
                                 | CompilerExecutableKind::OrdinaryMethod
                                 | CompilerExecutableKind::ClassConstructor
                                 | CompilerExecutableKind::GeneratorFunction
@@ -6393,12 +6633,7 @@ fn verify_supported_opcodes(
                     | (FinalOpcode::DefineMethodComputed, Operands::U8(value))
                     if !matches!(value, 0..=2 | 4..=6)
             )
-            || matches!(
-                (opcode, instruction.operands()),
-                (FinalOpcode::ThrowError, Operands::AtomU8 { value: 4, .. }) if !generator
-            )
-            || matches!(opcode, FinalOpcode::ThrowError)
-                && !matches!(instruction.operands(), Operands::AtomU8 { value: 4, .. })
+            || (opcode == FinalOpcode::ThrowError && !throw_error_authorized)
         {
             return Err(BytecodeVerificationError::function(
                 id,
@@ -6471,7 +6706,9 @@ fn compiler_special_object_is_authorized(
         CompilerExecutableKind::DirectEvalScript
             | CompilerExecutableKind::OrdinaryFunction
             | CompilerExecutableKind::OrdinaryArrow
+            | CompilerExecutableKind::AsyncArrow
             | CompilerExecutableKind::OrdinaryMethod
+            | CompilerExecutableKind::ClassInstanceInitializer
             | CompilerExecutableKind::ClassConstructor
             | CompilerExecutableKind::GeneratorFunction
             | CompilerExecutableKind::GeneratorMethod
@@ -6484,15 +6721,19 @@ fn compiler_special_object_is_authorized(
     }
     match operands {
         Operands::U8(0) => {
-            executable_kind != CompilerExecutableKind::OrdinaryArrow
-                && (flow.function_header().mode().is_strict() || !simple_parameter_list)
+            !matches!(
+                executable_kind,
+                CompilerExecutableKind::OrdinaryArrow | CompilerExecutableKind::AsyncArrow
+            ) && (flow.function_header().mode().is_strict() || !simple_parameter_list)
                 && arguments_object_count == 1
                 && rest_parameter_count == 0
                 && !mapped_arguments_authority
         }
         Operands::U8(1) => {
-            executable_kind != CompilerExecutableKind::OrdinaryArrow
-                && !flow.function_header().mode().is_strict()
+            !matches!(
+                executable_kind,
+                CompilerExecutableKind::OrdinaryArrow | CompilerExecutableKind::AsyncArrow
+            ) && !flow.function_header().mode().is_strict()
                 && simple_parameter_list
                 && arguments_object_count == 1
                 && rest_parameter_count == 0
@@ -6500,9 +6741,11 @@ fn compiler_special_object_is_authorized(
         }
         Operands::U8(3) => flow.function_header().flags().new_target_allowed(),
         Operands::U8(4) => {
-            executable_kind == CompilerExecutableKind::OrdinaryArrow
-                || (executable_kind == CompilerExecutableKind::DirectEvalScript
-                    && flow.function_header().flags().super_call_allowed())
+            matches!(
+                executable_kind,
+                CompilerExecutableKind::OrdinaryArrow | CompilerExecutableKind::AsyncArrow
+            ) || (executable_kind == CompilerExecutableKind::DirectEvalScript
+                && flow.function_header().flags().super_call_allowed())
                 || (executable_kind == CompilerExecutableKind::ClassConstructor
                     && flow
                         .function_header()
@@ -6515,11 +6758,24 @@ fn compiler_special_object_is_authorized(
                 || matches!(
                     executable_kind,
                     CompilerExecutableKind::OrdinaryArrow
+                        | CompilerExecutableKind::AsyncArrow
                         | CompilerExecutableKind::OrdinaryMethod
+                        | CompilerExecutableKind::ClassInstanceInitializer
                         | CompilerExecutableKind::GeneratorMethod
                         | CompilerExecutableKind::AsyncMethod
                         | CompilerExecutableKind::AsyncGeneratorMethod
                         | CompilerExecutableKind::ClassConstructor
+                )
+        }
+        Operands::U8(6) => {
+            (executable_kind == CompilerExecutableKind::DirectEvalScript
+                && flow
+                    .function_header()
+                    .flags()
+                    .direct_eval_has_instance_elements())
+                || matches!(
+                    executable_kind,
+                    CompilerExecutableKind::OrdinaryArrow | CompilerExecutableKind::AsyncArrow
                 )
         }
         _ => false,
@@ -6558,12 +6814,14 @@ const fn supported_compiler_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::Swap
             | FinalOpcode::Rot3l
             | FinalOpcode::Rot3r
+            | FinalOpcode::Rot4l
             | FinalOpcode::CallConstructor
             | FinalOpcode::Call
             | FinalOpcode::CallMethod
             | FinalOpcode::Apply
             | FinalOpcode::Eval
             | FinalOpcode::ApplyEval
+            | FinalOpcode::Import
             | FinalOpcode::WithGetVar
             | FinalOpcode::WithDeleteVar
             | FinalOpcode::WithMakeRef
@@ -6612,6 +6870,7 @@ const fn supported_compiler_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::SetLocUninitialized
             | FinalOpcode::GetLocCheck
             | FinalOpcode::PutLocCheck
+            | FinalOpcode::PutLocCheckInit
             | FinalOpcode::SetLocCheck
             | FinalOpcode::GetVarRefCheck
             | FinalOpcode::PutVarRefCheck
@@ -6643,6 +6902,8 @@ const fn supported_compiler_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::ForOfStart
             | FinalOpcode::ForAwaitOfStart
             | FinalOpcode::ForOfNext
+            | FinalOpcode::ForAwaitOfNext
+            | FinalOpcode::IteratorGetValueDone
             | FinalOpcode::IteratorClose
             | FinalOpcode::IfFalse
             | FinalOpcode::IfTrue
@@ -6762,6 +7023,9 @@ enum InternalStackValue {
     ForOfIterator(BytecodePc),
     ForOfNextMethod(BytecodePc),
     ForOfCatch(BytecodePc),
+    ForOfDisabledCatch(BytecodePc),
+    ForOfAwaitResult(BytecodePc),
+    ForOfAwaitedResult(BytecodePc),
     ForOfExhaustedIterator(BytecodePc),
     ForOfExhaustedNextMethod(BytecodePc),
     ForOfExhaustedCatch(BytecodePc),
@@ -6842,6 +7106,7 @@ impl JavaScriptStackValue {
             | InternalStackValue::ForOfIterator(_)
             | InternalStackValue::ForOfNextMethod(_)
             | InternalStackValue::ForOfCatch(_)
+            | InternalStackValue::ForOfDisabledCatch(_)
             | InternalStackValue::ForOfExhaustedIterator(_)
             | InternalStackValue::ForOfExhaustedNextMethod(_)
             | InternalStackValue::ForOfExhaustedCatch(_)
@@ -6859,6 +7124,8 @@ impl JavaScriptStackValue {
             | InternalStackValue::FinallyReturn { .. } => None,
             InternalStackValue::Ordinary
             | InternalStackValue::DerivedSuperResult(_)
+            | InternalStackValue::ForOfAwaitResult(_)
+            | InternalStackValue::ForOfAwaitedResult(_)
             | InternalStackValue::YieldStarIteratorResult(_)
             | InternalStackValue::YieldStarDone(_)
             | InternalStackValue::YieldStarYieldResult(_)
@@ -6900,6 +7167,7 @@ impl InternalStackValue {
                 | Self::ForOfIterator(_)
                 | Self::ForOfNextMethod(_)
                 | Self::ForOfCatch(_)
+                | Self::ForOfDisabledCatch(_)
                 | Self::ForOfExhaustedIterator(_)
                 | Self::ForOfExhaustedNextMethod(_)
                 | Self::ForOfExhaustedCatch(_)
@@ -6935,6 +7203,9 @@ impl InternalStackValue {
             Self::ForOfIterator(_)
                 | Self::ForOfNextMethod(_)
                 | Self::ForOfCatch(_)
+                | Self::ForOfDisabledCatch(_)
+                | Self::ForOfAwaitResult(_)
+                | Self::ForOfAwaitedResult(_)
                 | Self::ForOfExhaustedIterator(_)
                 | Self::ForOfExhaustedNextMethod(_)
                 | Self::ForOfExhaustedCatch(_)
@@ -7207,6 +7478,8 @@ fn verify_internal_operand_stack(
                 | FinalOpcode::ForOfStart
                 | FinalOpcode::ForAwaitOfStart
                 | FinalOpcode::ForOfNext
+                | FinalOpcode::ForAwaitOfNext
+                | FinalOpcode::IteratorGetValueDone
                 | FinalOpcode::IteratorClose
                 | FinalOpcode::Rot3r
                 | FinalOpcode::Nip
@@ -7413,6 +7686,7 @@ fn verify_internal_operand_stack(
             decoded,
             effectively_reachable,
             instructions[index].successors().branch_target(),
+            instructions,
             &mut state,
             &mut iteration_local_puts,
             &mut catch_local_puts,
@@ -7891,6 +8165,7 @@ fn transfer_internal_operand_stack(
     decoded: crate::DecodedInstruction,
     effectively_reachable: bool,
     catch_handler: Option<InstructionIndex>,
+    instructions: &[VerifiedInstruction],
     state: &mut Vec<InternalStackValue>,
     iteration_local_puts: &mut [Option<CertifiedIterationLocalPut>],
     catch_local_puts: &mut [Option<CertifiedCatchLocalPut>],
@@ -8187,7 +8462,10 @@ fn transfer_internal_operand_stack(
             else {
                 return Err(for_of_stack_error(id, decoded.pc(), opcode));
             };
-            if iterator != next || next != catch {
+            if iterator != next
+                || next != catch
+                || for_of_start_is_async(instructions, iterator) != Some(false)
+            {
                 return Err(for_of_stack_error(id, decoded.pc(), opcode));
             }
             state.try_reserve(2).map_err(|_| {
@@ -8200,6 +8478,98 @@ fn transfer_internal_operand_stack(
                 )
             })?;
             state.push(InternalStackValue::ForOfValue(iterator));
+            state.push(InternalStackValue::ForOfDone(iterator));
+            return Ok(InternalStackTransfer {
+                normal_completion: true,
+                iteration_branch_value: None,
+                ret_finalizer: None,
+            });
+        }
+        FinalOpcode::ForAwaitOfNext => {
+            invalidate_internal_value_provenance(state);
+            let Some(base) = state.len().checked_sub(3) else {
+                return Err(for_of_stack_error(id, decoded.pc(), opcode));
+            };
+            let (
+                InternalStackValue::ForOfIterator(iterator),
+                InternalStackValue::ForOfNextMethod(next),
+                InternalStackValue::ForOfCatch(catch),
+            ) = (state[base], state[base + 1], state[base + 2])
+            else {
+                return Err(for_of_stack_error(id, decoded.pc(), opcode));
+            };
+            if iterator != next
+                || next != catch
+                || for_of_start_is_async(instructions, iterator) != Some(true)
+            {
+                return Err(for_of_stack_error(id, decoded.pc(), opcode));
+            }
+            state[base + 2] = InternalStackValue::ForOfDisabledCatch(iterator);
+            state.try_reserve(1).map_err(|_| {
+                BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::AllocationFailed {
+                        resource: BytecodeGraphResource::FrameStateEntries,
+                        requested: 1,
+                    },
+                )
+            })?;
+            state.push(InternalStackValue::ForOfAwaitResult(iterator));
+            return Ok(InternalStackTransfer {
+                normal_completion: true,
+                iteration_branch_value: None,
+                ret_finalizer: None,
+            });
+        }
+        FinalOpcode::Await
+            if matches!(state.last(), Some(InternalStackValue::ForOfAwaitResult(_))) =>
+        {
+            let Some(InternalStackValue::ForOfAwaitResult(site)) = state.pop() else {
+                unreachable!("the for-await result guard established the top value")
+            };
+            state.push(InternalStackValue::ForOfAwaitedResult(site));
+            return Ok(InternalStackTransfer {
+                normal_completion: true,
+                iteration_branch_value: None,
+                ret_finalizer: None,
+            });
+        }
+        FinalOpcode::IteratorGetValueDone => {
+            let Some(base) = state.len().checked_sub(4) else {
+                return Err(for_of_stack_error(id, decoded.pc(), opcode));
+            };
+            let (
+                InternalStackValue::ForOfIterator(iterator),
+                InternalStackValue::ForOfNextMethod(next),
+                InternalStackValue::ForOfDisabledCatch(catch),
+                InternalStackValue::ForOfAwaitedResult(result),
+            ) = (
+                state[base],
+                state[base + 1],
+                state[base + 2],
+                state[base + 3],
+            )
+            else {
+                return Err(for_of_stack_error(id, decoded.pc(), opcode));
+            };
+            if iterator != next
+                || next != catch
+                || catch != result
+                || for_of_start_is_async(instructions, iterator) != Some(true)
+            {
+                return Err(for_of_stack_error(id, decoded.pc(), opcode));
+            }
+            state[base + 2] = InternalStackValue::ForOfCatch(iterator);
+            state[base + 3] = InternalStackValue::ForOfValue(iterator);
+            state.try_reserve(1).map_err(|_| {
+                BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::AllocationFailed {
+                        resource: BytecodeGraphResource::FrameStateEntries,
+                        requested: 1,
+                    },
+                )
+            })?;
             state.push(InternalStackValue::ForOfDone(iterator));
             return Ok(InternalStackTransfer {
                 normal_completion: true,
@@ -9160,6 +9530,17 @@ fn transfer_internal_operand_stack(
     })
 }
 
+fn for_of_start_is_async(instructions: &[VerifiedInstruction], site: BytecodePc) -> Option<bool> {
+    let index = instructions
+        .binary_search_by_key(&site, |verified| verified.decoded().pc())
+        .ok()?;
+    match instructions[index].decoded().instruction().opcode() {
+        FinalOpcode::ForOfStart => Some(false),
+        FinalOpcode::ForAwaitOfStart => Some(true),
+        _ => None,
+    }
+}
+
 fn has_enclosing_for_of_record(state: &[InternalStackValue]) -> bool {
     state.windows(3).any(|record| {
         matches!(
@@ -9431,6 +9812,7 @@ fn verify_internal_stack_exit(
         let mut cursor = 0;
         while cursor < state.len() {
             match state[cursor] {
+                value if value.is_javascript_value() => cursor += 1,
                 InternalStackValue::CatchMarker { .. } => cursor += 1,
                 InternalStackValue::ForOfIterator(site) => {
                     if !matches!(
@@ -9457,11 +9839,21 @@ fn verify_internal_stack_exit(
                     ));
                 }
                 InternalStackValue::ForInIterator(_) => {
-                    return Err(for_in_stack_error(
-                        id,
-                        decoded.pc(),
-                        decoded.instruction().opcode(),
-                    ));
+                    // A catch nested inside the for-in region restores the
+                    // iterator marker beneath its handler value. An uncaught
+                    // throw, or a throw to an outer handler, must instead have
+                    // removed every crossed for-in marker before this terminal.
+                    let retained_by_inner_catch = state[cursor.saturating_add(1)..]
+                        .iter()
+                        .any(|value| matches!(value, InternalStackValue::CatchMarker { .. }));
+                    if !retained_by_inner_catch {
+                        return Err(for_in_stack_error(
+                            id,
+                            decoded.pc(),
+                            decoded.instruction().opcode(),
+                        ));
+                    }
+                    cursor += 1;
                 }
                 _ => {
                     return Err(catch_stack_error(
@@ -9524,6 +9916,8 @@ fn internal_stack_error(
         FinalOpcode::ForOfStart
             | FinalOpcode::ForAwaitOfStart
             | FinalOpcode::ForOfNext
+            | FinalOpcode::ForAwaitOfNext
+            | FinalOpcode::IteratorGetValueDone
             | FinalOpcode::IteratorClose
             | FinalOpcode::Rot3r
     ) || state.iter().any(|value| value.is_for_of_value())
@@ -9683,7 +10077,7 @@ fn verify_binding_opcodes(
     internal_stack: &InternalStackCertificate,
 ) -> Result<(), BytecodeVerificationError> {
     let argument_count = flow.domains().argument_count() as usize;
-    // The for-of loop rotation re-arms the head's non-captured TDZ cells at
+    // A for-in/of loop rotation re-arms the head's non-captured TDZ cells at
     // the loop back edge (the `rotate` label targets exactly that
     // instruction), so a second scope activation is admitted only at a
     // backward jump target; straight-line repeated initialization stays
@@ -9798,7 +10192,7 @@ fn verify_binding_opcodes(
             if matches!(opcode, FinalOpcode::SetLocUninitialized) {
                 let count = &mut scope_activations[local as usize];
                 *count = count.saturating_add(1);
-                // The for-of loop rotation is the single legitimate second
+                // The iteration rotation is the single legitimate second
                 // activation, and it must sit at the loop back-edge target.
                 if *count > 2 || (*count == 2 && !back_edge_targets[index]) {
                     return Err(policy_error(
@@ -9834,7 +10228,7 @@ fn verify_binding_opcodes(
         let requires_scope_activation = definition.policy.temporal_dead_zone
             || definition.policy.initialization
                 == CompilerInitializationPolicy::FunctionAtScopeEntry;
-        // A for-of loop rotation adds exactly one back-edge re-arm to the
+        // A for-in/of loop rotation adds exactly one back-edge re-arm to the
         // entry activation, so both one and two activations are admitted.
         if requires_scope_activation && !(activations == 1 || activations == 2) {
             return Err(policy_error(
@@ -9893,10 +10287,18 @@ fn verify_local_opcode(
             BindingPolicyViolationReason::UnexpectedCheckedAccess,
         ));
     }
+    let runtime_checked_immutable_write = definition.policy.writes != CompilerWritePolicy::Mutable
+        && ((tdz
+            && matches!(
+                opcode,
+                FinalOpcode::PutLocCheck | FinalOpcode::PutLocCheckInit | FinalOpcode::SetLocCheck
+            ))
+            || (!tdz && definition.policy.kind == CompilerBindingKind::FunctionName));
     if is_local_write(opcode)
         && !matches!(opcode, FinalOpcode::SetLocUninitialized)
         && definition.policy.writes != CompilerWritePolicy::Mutable
         && !(tdz && is_unchecked_local_put(opcode))
+        && !runtime_checked_immutable_write
     {
         return Err(policy_error(
             id,
@@ -10400,6 +10802,8 @@ fn transfer_local_state(
                     *state,
                     BindingState::UNINITIALIZED | BindingState::INITIALIZED_CLOSED,
                 )
+            } else if definition.policy.kind == CompilerBindingKind::FunctionName {
+                BindingState::only(*state, BindingState::INITIALIZED)
             } else if definition.policy.writes == CompilerWritePolicy::Mutable {
                 *state & BindingState::INACTIVE == 0
             } else {
@@ -10421,6 +10825,17 @@ fn transfer_local_state(
             } else {
                 BindingState::with_initialized_value(*state)
             };
+        }
+        FinalOpcode::PutLocCheckInit => {
+            if !BindingState::only(*state, BindingState::UNINITIALIZED) {
+                return Err(policy_error(
+                    id,
+                    slot,
+                    Some(pc),
+                    BindingPolicyViolationReason::InvalidLexicalInitialization,
+                ));
+            }
+            *state = BindingState::with_initialized_value(*state);
         }
         FinalOpcode::GetLocCheck | FinalOpcode::PutLocCheck | FinalOpcode::SetLocCheck => {
             if *state & BindingState::INACTIVE != 0 {
@@ -10545,7 +10960,10 @@ const fn implied_closure_index(opcode: FinalOpcode) -> Option<u32> {
 const fn is_checked_local(opcode: FinalOpcode) -> bool {
     matches!(
         opcode,
-        FinalOpcode::GetLocCheck | FinalOpcode::PutLocCheck | FinalOpcode::SetLocCheck
+        FinalOpcode::GetLocCheck
+            | FinalOpcode::PutLocCheck
+            | FinalOpcode::PutLocCheckInit
+            | FinalOpcode::SetLocCheck
     )
 }
 
@@ -10577,6 +10995,7 @@ const fn is_local_write(opcode: FinalOpcode) -> bool {
             | FinalOpcode::SetLoc2
             | FinalOpcode::SetLoc3
             | FinalOpcode::PutLocCheck
+            | FinalOpcode::PutLocCheckInit
             | FinalOpcode::SetLocCheck
             | FinalOpcode::SetLocUninitialized
     )
@@ -10751,7 +11170,7 @@ fn collect_requirements(
                 push_requirement(requirements, ExecutionRequirement::Calls);
             }
             FinalOpcode::SpecialObject => match instruction.operands() {
-                Operands::U8(3..=5) => {
+                Operands::U8(3..=6) => {
                     push_requirement(requirements, ExecutionRequirement::Calls);
                 }
                 Operands::U8(0 | 1) => {

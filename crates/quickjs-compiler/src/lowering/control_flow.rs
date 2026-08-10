@@ -31,6 +31,7 @@ pub(in crate::lowering) struct PlannedControlFlow {
     instruction_spans: Vec<Span>,
     eval_reference_call_instructions: Vec<u32>,
     parameter_initialization_end: Option<u32>,
+    function_initializer_prefix_start: Option<u32>,
     label_spans: Vec<Span>,
     stack_anchors: Vec<StackAnchor>,
     last_instruction_can_fall_through: Option<bool>,
@@ -44,6 +45,7 @@ pub(in crate::lowering) struct FinishedControlFlow {
     source_instructions: Vec<SourceInstruction>,
     eval_reference_call_instructions: Vec<u32>,
     parameter_initialization_end: Option<u32>,
+    function_initializer_prefix_start: u32,
     stack_anchors: Vec<ResolvedStackAnchor>,
 }
 
@@ -60,6 +62,7 @@ impl PlannedControlFlow {
             instruction_spans: Vec::new(),
             eval_reference_call_instructions: Vec::new(),
             parameter_initialization_end: None,
+            function_initializer_prefix_start: None,
             label_spans: Vec::new(),
             stack_anchors: Vec::new(),
             last_instruction_can_fall_through: None,
@@ -82,6 +85,25 @@ impl PlannedControlFlow {
             Some(u32::try_from(self.instruction_spans.len()).map_err(|_| {
                 LeafCompilationError::CapacityExceeded {
                     domain: "parameter initialization instruction boundary",
+                }
+            })?);
+        Ok(())
+    }
+
+    pub(in crate::lowering) fn mark_function_initializer_prefix_start(
+        &mut self,
+        span: Span,
+    ) -> Result<(), LeafCompilationError> {
+        if self.function_initializer_prefix_start.is_some() {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "function initializers have one entry-prefix boundary",
+                span: Some(span),
+            });
+        }
+        self.function_initializer_prefix_start =
+            Some(u32::try_from(self.instruction_spans.len()).map_err(|_| {
+                LeafCompilationError::CapacityExceeded {
+                    domain: "function initializer entry-prefix boundary",
                 }
             })?);
         Ok(())
@@ -366,6 +388,7 @@ impl PlannedControlFlow {
             instruction_spans: spans,
             eval_reference_call_instructions,
             parameter_initialization_end,
+            function_initializer_prefix_start,
             label_spans,
             stack_anchors,
             last_instruction_can_fall_through: _,
@@ -429,6 +452,7 @@ impl PlannedControlFlow {
             source_instructions,
             eval_reference_call_instructions,
             parameter_initialization_end,
+            function_initializer_prefix_start: function_initializer_prefix_start.unwrap_or(0),
             stack_anchors: resolved_stack_anchors,
         })
     }
@@ -437,6 +461,10 @@ impl PlannedControlFlow {
 impl FinishedControlFlow {
     pub(in crate::lowering) const fn parameter_initialization_end(&self) -> Option<u32> {
         self.parameter_initialization_end
+    }
+
+    pub(in crate::lowering) const fn function_initializer_prefix_start(&self) -> u32 {
+        self.function_initializer_prefix_start
     }
 
     pub(in crate::lowering) fn eval_reference_call_instructions(&self) -> &[u32] {
@@ -483,6 +511,7 @@ impl FinishedControlFlow {
             source_instructions,
             eval_reference_call_instructions: _,
             parameter_initialization_end: _,
+            function_initializer_prefix_start: _,
             stack_anchors,
         } = self;
         let control_flow = match verify_compiler_control_flow(

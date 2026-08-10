@@ -138,6 +138,12 @@ pub(crate) struct ArrayMutatorContinuation {
     copy_final: u64,
     copy_remaining: u64,
     copy_backward: bool,
+    /// `reverse` walks mirrored pairs through one reusable swap slot.
+    reverse_next: u64,
+    reverse_remaining: u64,
+    /// `unshift` walks existing elements from the end, then stores arguments.
+    unshift_remaining: u64,
+    unshift_next_argument: u64,
     /// The value this mutator returns.
     result: StoredValue,
     /// The length to write back once the moves finish.
@@ -219,6 +225,10 @@ pub(super) fn begin_array_mutator(
         copy_final: 0,
         copy_remaining: 0,
         copy_backward: false,
+        reverse_next: 0,
+        reverse_remaining: 0,
+        unshift_remaining: 0,
+        unshift_next_argument: 0,
         result: StoredValue::Undefined,
         final_length: 0,
         realm,
@@ -346,6 +356,11 @@ pub(super) fn advance_array_mutator(
                     continue;
                 }
                 match state.arguments.get(2) {
+                    Some(StoredValue::Undefined) | None => {
+                        state.fill_end = state.length;
+                        plan_moves(&mut state)?;
+                        state.stage = ArrayMutatorStage::NextStep;
+                    }
                     Some(value) if needs_conversion(value) => {
                         let value = value.duplicate();
                         let realm = state.realm;
@@ -363,12 +378,6 @@ pub(super) fn advance_array_mutator(
                     }
                     Some(value) => {
                         completion = Some(value.duplicate());
-                    }
-                    None => {
-                        // An absent end fills to the length.
-                        state.fill_end = state.length;
-                        plan_moves(&mut state)?;
-                        state.stage = ArrayMutatorStage::NextStep;
                     }
                 }
             }
@@ -466,6 +475,30 @@ pub(super) fn advance_array_mutator(
                     state.moves.clear();
                     state.next_move = 0;
                     let Some(step) = next_copy_within_step(&mut state) else {
+                        state.stage = ArrayMutatorStage::AwaitLengthWrite;
+                        continue;
+                    };
+                    state.moves.push(step);
+                } else if matches!(state.mutator, ArrayMutator::Unshift) {
+                    state.moves.clear();
+                    state.next_move = 0;
+                    let Some(step) = next_unshift_step(&mut state) else {
+                        state.stage = ArrayMutatorStage::AwaitLengthWrite;
+                        continue;
+                    };
+                    state.moves.push(step);
+                } else if matches!(state.mutator, ArrayMutator::Reverse) {
+                    state.moves.clear();
+                    state.next_move = 0;
+                    let Some(step) = next_reverse_step(&mut state) else {
+                        state.stage = ArrayMutatorStage::AwaitLengthWrite;
+                        continue;
+                    };
+                    state.moves.push(step);
+                } else if matches!(state.mutator, ArrayMutator::Fill) {
+                    state.moves.clear();
+                    state.next_move = 0;
+                    let Some(step) = next_fill_step(&mut state) else {
                         state.stage = ArrayMutatorStage::AwaitLengthWrite;
                         continue;
                     };
@@ -645,68 +678,41 @@ pub(super) fn advance_array_mutator(
                     continue;
                 }
                 let step = current_step(&state)?;
+                if matches!(step, ElementStep::Swap { .. })
+                    && state.first_absent
+                    && state.second_absent
+                {
+                    state.next_move = state.next_move.saturating_add(1);
+                    state.stage = ArrayMutatorStage::NextStep;
+                    continue;
+                }
                 let (index, value, absent) = match step {
                     ElementStep::Store { index } | ElementStep::Drop { index } => {
                         (index, state.first.take(), state.first_absent)
                     }
                     ElementStep::Take { index } => (index, None, true),
                     ElementStep::Move { to, .. } => (to, state.first.take(), state.first_absent),
-                    // The left value lands at the right index.
-                    ElementStep::Swap { right, .. } => {
-                        (right, state.first.take(), state.first_absent)
+                    // Reverse updates the lower index first with the upper
+                    // value, or deletes it when the upper side is absent.
+                    ElementStep::Swap { left, .. } => {
+                        (left, state.second.take(), state.second_absent)
                     }
                 };
-                if let Some(reference) = state.target.heap_reference()
-                    && runtime.proxy_state(reference)?.is_some()
-                {
-                    let key = element_key(runtime, index)?;
-                    charge_mutator_lookup(runtime, &state.target, execution_budget)?;
-                    let dispatch = if absent {
-                        begin_internal_delete(
-                            runtime,
-                            reference,
-                            key,
-                            true,
-                            false,
-                            state.realm,
-                            return_to,
-                            state.origin.clone(),
-                            execution_budget,
-                        )?
-                    } else {
-                        let value = value.ok_or(EngineFault::RuntimeInvariant {
-                            message: "an array mutator Proxy write lost its value",
-                        })?;
-                        let name =
-                            property_key_name(&key).ok_or(EngineFault::RuntimeInvariant {
-                                message: "an array mutator index has no diagnostic name",
-                            })?;
-                        begin_internal_set(
-                            runtime,
-                            reference,
-                            key,
-                            name,
-                            value,
-                            state.target.duplicate(),
-                            true,
-                            false,
-                            state.realm,
-                            return_to,
-                            state.origin.clone(),
-                            execution_budget,
-                        )?
-                    };
-                    await_get!(continue_get_state_after(
-                        dispatch,
-                        state,
-                        array_mutator_continuation,
-                        "Array mutator Proxy write produced a structured result",
-                    ));
-                }
-                match write_element(runtime, &mut state, index, value, absent, execution_budget)? {
-                    ElementWrite::Complete => state.stage = finish_first_write(&mut state)?,
-                    ElementWrite::Suspend(call) => return suspend(state, call, return_to),
-                }
+                let dispatch = begin_mutator_element_write(
+                    runtime,
+                    &state,
+                    index,
+                    value,
+                    absent,
+                    return_to,
+                    execution_budget,
+                )?;
+                await_get!(continue_get_state_after(
+                    dispatch,
+                    state,
+                    array_mutator_continuation,
+                    "Array mutator element write produced a structured result",
+                ));
             }
             ArrayMutatorStage::AwaitSecondWrite => {
                 if completion.take().is_some() {
@@ -714,68 +720,29 @@ pub(super) fn advance_array_mutator(
                     state.stage = ArrayMutatorStage::NextStep;
                     continue;
                 }
-                let ElementStep::Swap { left, .. } = current_step(&state)? else {
+                let ElementStep::Swap { right, .. } = current_step(&state)? else {
                     return Err(EngineFault::RuntimeInvariant {
                         message: "a non-swap step reached the second write stage",
                     }
                     .into());
                 };
-                let value = state.second.take();
-                let absent = state.second_absent;
-                if let Some(reference) = state.target.heap_reference()
-                    && runtime.proxy_state(reference)?.is_some()
-                {
-                    let key = element_key(runtime, left)?;
-                    charge_mutator_lookup(runtime, &state.target, execution_budget)?;
-                    let dispatch = if absent {
-                        begin_internal_delete(
-                            runtime,
-                            reference,
-                            key,
-                            true,
-                            false,
-                            state.realm,
-                            return_to,
-                            state.origin.clone(),
-                            execution_budget,
-                        )?
-                    } else {
-                        let value = value.ok_or(EngineFault::RuntimeInvariant {
-                            message: "an array reverse Proxy write lost its value",
-                        })?;
-                        let name =
-                            property_key_name(&key).ok_or(EngineFault::RuntimeInvariant {
-                                message: "an array reverse index has no diagnostic name",
-                            })?;
-                        begin_internal_set(
-                            runtime,
-                            reference,
-                            key,
-                            name,
-                            value,
-                            state.target.duplicate(),
-                            true,
-                            false,
-                            state.realm,
-                            return_to,
-                            state.origin.clone(),
-                            execution_budget,
-                        )?
-                    };
-                    await_get!(continue_get_state_after(
-                        dispatch,
-                        state,
-                        array_mutator_continuation,
-                        "Array reverse Proxy write produced a structured result",
-                    ));
-                }
-                match write_element(runtime, &mut state, left, value, absent, execution_budget)? {
-                    ElementWrite::Complete => {
-                        state.next_move = state.next_move.saturating_add(1);
-                        state.stage = ArrayMutatorStage::NextStep;
-                    }
-                    ElementWrite::Suspend(call) => return suspend(state, call, return_to),
-                }
+                let value = state.first.take();
+                let absent = state.first_absent;
+                let dispatch = begin_mutator_element_write(
+                    runtime,
+                    &state,
+                    right,
+                    value,
+                    absent,
+                    return_to,
+                    execution_budget,
+                )?;
+                await_get!(continue_get_state_after(
+                    dispatch,
+                    state,
+                    array_mutator_continuation,
+                    "Array reverse element write produced a structured result",
+                ));
             }
             ArrayMutatorStage::AwaitLengthWrite => {
                 if completion.take().is_some() {
@@ -799,8 +766,8 @@ pub(super) fn advance_array_mutator(
                 if let StoredValue::Object(object) = state.target
                     && runtime.is_array_object(object)?
                 {
-                    let requested =
-                        u32::try_from(state.final_length).map_err(|_| array_too_long(&state))?;
+                    let requested = u32::try_from(state.final_length)
+                        .map_err(|_| invalid_array_length(&state))?;
                     match runtime.set_array_length(object, requested)? {
                         ArrayLengthWriteOutcome::Complete
                         | ArrayLengthWriteOutcome::BlockedByNonConfigurable { .. } => {}
@@ -888,11 +855,12 @@ pub(super) fn advance_array_mutator(
 
 /// Plans the element moves each mutator performs.
 ///
-/// Planning up front lets one driver serve the finite mutators. `copyWithin`
-/// instead keeps a constant-space cursor because its `ToLength` input can be as
-/// large as `2^53 - 1`; each completed step prepares only its immediate
-/// successor, so instruction fuel bounds the scan without an attacker-sized
-/// allocation before the first observable element operation.
+/// Planning up front lets one driver serve the finite mutators. `unshift`,
+/// `unshift`, `reverse`, `fill`, and `copyWithin` instead keep constant-space
+/// cursors because their `ToLength` inputs can be as large as `2^53 - 1`; each
+/// completed step prepares only its immediate successor, so instruction fuel
+/// bounds the scan without an attacker-sized allocation before the first
+/// observable element operation.
 fn plan_moves(state: &mut ArrayMutatorContinuation) -> Result<(), NativeFailure> {
     let length = state.length;
     match state.mutator {
@@ -949,56 +917,23 @@ fn plan_moves(state: &mut ArrayMutatorContinuation) -> Result<(), NativeFailure>
                 .checked_add(extra)
                 .filter(|total| *total <= MAX_ARRAY_LENGTH)
                 .ok_or_else(|| array_too_long(state))?;
-            let count = usize::try_from(length).map_err(|_| EngineFault::RuntimeInvariant {
-                message: "array unshift length exceeded the addressable step plan",
-            })?;
-            reserve_moves(state, count.saturating_add(state.arguments.len()))?;
-            // Existing elements move up, highest first, so no destination is
-            // overwritten before its own source is read.
-            if extra > 0 {
-                for index in (0..length).rev() {
-                    state.moves.push(ElementStep::Move {
-                        from: index,
-                        to: index.saturating_add(extra),
-                    });
-                }
-            }
-            for offset in 0..extra {
-                state.moves.push(ElementStep::Store { index: offset });
-            }
+            state.unshift_remaining = if extra == 0 { 0 } else { length };
+            state.unshift_next_argument = 0;
+            reserve_moves(state, usize::from(extra > 0))?;
             state.final_length = total;
             state.result = StoredValue::Number(JsNumber::from_f64(length_as_f64(total)));
         }
         ArrayMutator::Reverse => {
-            // Each pair is swapped by reading both ends before either is
-            // written, so the middle element of an odd length is untouched.
-            let pairs = length / 2;
-            let count = usize::try_from(pairs.saturating_mul(2)).map_err(|_| {
-                EngineFault::RuntimeInvariant {
-                    message: "array reverse length exceeded the addressable step plan",
-                }
-            })?;
-            reserve_moves(state, count)?;
-            for index in 0..pairs {
-                let mirror = length - 1 - index;
-                state.moves.push(ElementStep::Swap {
-                    left: index,
-                    right: mirror,
-                });
-            }
+            state.reverse_next = 0;
+            state.reverse_remaining = length / 2;
+            reserve_moves(state, usize::from(state.reverse_remaining > 0))?;
             state.final_length = length;
         }
         ArrayMutator::Fill => {
             // Crossed bounds fill nothing, which is why `[1,2,3].fill(0,2,1)` is
             // unchanged.
             let span = state.fill_end.saturating_sub(state.fill_start);
-            let count = usize::try_from(span).map_err(|_| EngineFault::RuntimeInvariant {
-                message: "array fill span exceeded the addressable step plan",
-            })?;
-            reserve_moves(state, count)?;
-            for index in state.fill_start..state.fill_end {
-                state.moves.push(ElementStep::Store { index });
-            }
+            reserve_moves(state, usize::from(span > 0))?;
             state.final_length = length;
         }
         ArrayMutator::CopyWithin => plan_copy_within(state, length)?,
@@ -1049,6 +984,48 @@ fn next_copy_within_step(state: &mut ArrayMutatorContinuation) -> Option<Element
     Some(step)
 }
 
+/// Produces the next descending move or leading argument store for `unshift`.
+fn next_unshift_step(state: &mut ArrayMutatorContinuation) -> Option<ElementStep> {
+    let extra = usize_to_u64(state.arguments.len());
+    if state.unshift_remaining > 0 {
+        state.unshift_remaining -= 1;
+        let from = state.unshift_remaining;
+        return Some(ElementStep::Move {
+            from,
+            to: from.saturating_add(extra),
+        });
+    }
+    if state.unshift_next_argument < extra {
+        let index = state.unshift_next_argument;
+        state.unshift_next_argument += 1;
+        return Some(ElementStep::Store { index });
+    }
+    None
+}
+
+/// Produces the next mirrored pair for `reverse` without materializing a plan
+/// proportional to the receiver length.
+fn next_reverse_step(state: &mut ArrayMutatorContinuation) -> Option<ElementStep> {
+    if state.reverse_remaining == 0 {
+        return None;
+    }
+    let left = state.reverse_next;
+    let right = state.length.saturating_sub(1).saturating_sub(left);
+    state.reverse_next = state.reverse_next.saturating_add(1);
+    state.reverse_remaining -= 1;
+    Some(ElementStep::Swap { left, right })
+}
+
+/// Produces the next `fill` write without materializing the requested range.
+fn next_fill_step(state: &mut ArrayMutatorContinuation) -> Option<ElementStep> {
+    if state.fill_start >= state.fill_end {
+        return None;
+    }
+    let index = state.fill_start;
+    state.fill_start = state.fill_start.saturating_add(1);
+    Some(ElementStep::Store { index })
+}
+
 /// Reserves the move plan's storage fallibly.
 fn reserve_moves(
     state: &mut ArrayMutatorContinuation,
@@ -1091,13 +1068,22 @@ fn argument_for(state: &ArrayMutatorContinuation, index: u64) -> StoredValue {
 /// The misspelling is upstream's (`quickjs.c:41933`), and the message is
 /// observable, so it is reproduced rather than corrected.
 fn array_too_long(state: &ArrayMutatorContinuation) -> NativeFailure {
-    match JsString::from_utf8("Array loo long") {
+    array_mutator_error(state, ExceptionKind::TypeError, "Array loo long")
+}
+
+fn invalid_array_length(state: &ArrayMutatorContinuation) -> NativeFailure {
+    array_mutator_error(state, ExceptionKind::RangeError, "invalid array length")
+}
+
+fn array_mutator_error(
+    state: &ArrayMutatorContinuation,
+    kind: ExceptionKind,
+    message: &str,
+) -> NativeFailure {
+    match JsString::from_utf8(message) {
         Ok(message) => NativeFailure::Abrupt(PendingException {
             realm: state.realm,
-            payload: PendingExceptionPayload::EngineError {
-                kind: ExceptionKind::TypeError,
-                message,
-            },
+            payload: PendingExceptionPayload::EngineError { kind, message },
             origin: state.origin.clone(),
         }),
         Err(error) => error.into(),
@@ -1230,12 +1216,6 @@ fn take_completion(completion: &mut Option<StoredValue>) -> Result<StoredValue, 
     })
 }
 
-/// The outcome of one element write.
-enum ElementWrite {
-    Complete,
-    Suspend(SuspendedCall),
-}
-
 fn array_mutator_continuation(state: ArrayMutatorContinuation) -> NativeContinuation {
     NativeContinuation::ArrayMutator(Box::new(state))
 }
@@ -1297,69 +1277,62 @@ fn finish_first_write(
     Ok(ArrayMutatorStage::NextStep)
 }
 
-/// Writes or deletes one element.
-fn write_element(
+/// Performs one element `Set` or `DeletePropertyOrThrow` through the target's
+/// actual internal methods, including integer-indexed and Proxy exotics.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "an element write carries the retained mutator context plus standard internal-method execution authority"
+)]
+fn begin_mutator_element_write(
     runtime: &mut Runtime,
-    state: &mut ArrayMutatorContinuation,
+    state: &ArrayMutatorContinuation,
     index: u64,
     value: Option<StoredValue>,
     absent: bool,
+    return_to: Option<CallReturn>,
     execution_budget: &mut ExecutionBudget,
-) -> Result<ElementWrite, NativeFailure> {
+) -> Result<NativeDispatch, NativeFailure> {
+    let reference = state
+        .target
+        .heap_reference()
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "array mutator ToObject result is not an object",
+        })?;
     let key = element_key(runtime, index)?;
     charge_mutator_lookup(runtime, &state.target, execution_budget)?;
     if absent {
-        match delete_static_property(runtime, &state.target, &key)? {
-            PropertyDeleteOutcome::Deleted => return Ok(ElementWrite::Complete),
-            // These algorithms use `DeletePropertyOrThrow`, so a sparse move
-            // into a non-configurable destination is an abrupt completion.
-            PropertyDeleteOutcome::Refused => {
-                return Err(NativeFailure::Abrupt(property_exception_at(
-                    state.realm,
-                    state.origin.clone(),
-                    None,
-                    PropertyFailure::NotDeletable,
-                )?));
-            }
-            PropertyDeleteOutcome::Failed(failure) => {
-                return Err(NativeFailure::Abrupt(property_exception_at(
-                    state.realm,
-                    state.origin.clone(),
-                    None,
-                    failure,
-                )?));
-            }
-        }
+        return begin_internal_delete(
+            runtime,
+            reference,
+            key,
+            true,
+            false,
+            state.realm,
+            return_to,
+            state.origin.clone(),
+            execution_budget,
+        );
     }
     let value = value.ok_or(EngineFault::RuntimeInvariant {
         message: "an array mutator write stage ran without a value",
     })?;
-    match write_static_property(
+    let name = property_key_name(&key).ok_or(EngineFault::RuntimeInvariant {
+        message: "an array mutator index has no diagnostic name",
+    })?;
+    begin_internal_set(
         runtime,
-        state.realm,
-        &state.target,
+        reference,
         key,
+        name,
         value,
+        state.target.duplicate(),
         true,
+        false,
+        state.realm,
+        return_to,
+        state.origin.clone(),
         execution_budget,
-    )? {
-        PropertyWriteOutcome::Complete => Ok(ElementWrite::Complete),
-        PropertyWriteOutcome::Setter {
-            function,
-            receiver,
-            value,
-        } => Ok(ElementWrite::Suspend(SuspendedCall {
-            function,
-            receiver,
-            argument: Some(value),
-        })),
-        PropertyWriteOutcome::Failed(failure) => Err(NativeFailure::Abrupt(property_exception_at(
-            state.realm,
-            state.origin.clone(),
-            None,
-            failure,
-        )?)),
-    }
+    )
 }
 
 /// Which stage of a splice a continuation resumes into.
@@ -1391,6 +1364,8 @@ enum ArraySpliceStage {
     AwaitExtractPresence,
     /// Awaiting an extracted element's read.
     AwaitExtract,
+    /// Awaiting `CreateDataPropertyOrThrow` on the removed-elements result.
+    AwaitExtractDefine,
     /// Ready to perform the next planned step of the shift.
     NextStep,
     /// Awaiting `HasProperty` for the next shifted source.
@@ -1435,6 +1410,8 @@ pub(crate) struct ArraySpliceContinuation {
     final_length: u64,
     /// Whether the argument conversions have completed.
     planned: bool,
+    /// Whether the post-extraction shift steps have been materialized.
+    moves_planned: bool,
     realm: RealmId,
     stage: ArraySpliceStage,
     origin: JsStackFrame,
@@ -1516,6 +1493,7 @@ pub(super) fn begin_array_splice(
         written: 0,
         final_length: 0,
         planned: false,
+        moves_planned: false,
         realm,
         stage: ArraySpliceStage::AwaitLength,
         origin,
@@ -1733,7 +1711,7 @@ pub(super) fn advance_array_splice(
                         // `splice()` with no arguments removes nothing.
                         state.start = 0;
                         state.removed = 0;
-                        plan_splice(&mut state)?;
+                        prepare_splice(&mut state)?;
                         state.stage = ArraySpliceStage::SelectSpecies;
                     }
                 }
@@ -1744,7 +1722,7 @@ pub(super) fn advance_array_splice(
                     let requested = number_to_integer_or_infinity(number);
                     let available = state.length.saturating_sub(state.start);
                     state.removed = clamp_count(requested, available);
-                    plan_splice(&mut state)?;
+                    prepare_splice(&mut state)?;
                     state.stage = ArraySpliceStage::SelectSpecies;
                     continue;
                 }
@@ -1769,7 +1747,7 @@ pub(super) fn advance_array_splice(
                         // An absent count removes everything from `start`, which
                         // is why `[1,2,3].splice(1)` leaves `[1]`.
                         state.removed = state.length.saturating_sub(state.start);
-                        plan_splice(&mut state)?;
+                        prepare_splice(&mut state)?;
                         state.stage = ArraySpliceStage::SelectSpecies;
                     }
                 }
@@ -1835,18 +1813,37 @@ pub(super) fn advance_array_splice(
                         .ok_or(EngineFault::RuntimeInvariant {
                             message: "Array splice lost its ArraySpeciesCreate result",
                         })?;
-                match define_static_property(runtime, destination, key, value, execution_budget)? {
-                    PropertyWriteOutcome::Complete => {}
-                    PropertyWriteOutcome::Failed(failure) => {
-                        return Err(splice_failure(&state, failure));
-                    }
-                    PropertyWriteOutcome::Setter { .. } => {
-                        return Err(EngineFault::RuntimeInvariant {
-                            message: "splice CreateDataPropertyOrThrow attempted to call a setter",
-                        }
-                        .into());
-                    }
-                }
+                let reference =
+                    destination
+                        .heap_reference()
+                        .ok_or(EngineFault::RuntimeInvariant {
+                            message: "Array splice species result is not an object",
+                        })?;
+                let definition =
+                    PropertyDefinition::data(Requested::Present(value), Requested::Present(true))
+                        .with_enumerable(Requested::Present(true))
+                        .with_configurable(Requested::Present(true));
+                state.stage = ArraySpliceStage::AwaitExtractDefine;
+                let dispatch = begin_internal_define_own_property(
+                    runtime,
+                    reference,
+                    key,
+                    definition,
+                    state.realm,
+                    return_to,
+                    state.origin.clone(),
+                    execution_budget,
+                    DefinePropertyResult::Target,
+                )?;
+                await_get!(continue_get_state_after(
+                    dispatch,
+                    state,
+                    array_splice_continuation,
+                    "Array splice extraction [[DefineOwnProperty]] produced a structured result",
+                ));
+            }
+            ArraySpliceStage::AwaitExtractDefine => {
+                let _ = take_completion(&mut completion)?;
                 state.stage = ArraySpliceStage::NextExtract;
             }
             ArraySpliceStage::FinishRemoved => {
@@ -1938,6 +1935,7 @@ pub(super) fn advance_array_splice(
                 state.stage = ArraySpliceStage::NextStep;
             }
             ArraySpliceStage::NextStep => {
+                plan_splice_moves(&mut state)?;
                 let Some(step) = state.moves.get(state.next_move).copied() else {
                     state.stage = ArraySpliceStage::AwaitLengthWrite;
                     continue;
@@ -2246,19 +2244,17 @@ fn begin_array_splice_get(
     )
 }
 
-/// Plans the shift that follows a splice's extraction.
+/// Validates the result length before `ArraySpeciesCreate`.
 ///
-/// The tail moves by `insertions - removed`. Moving it in the correct direction
-/// is what keeps a source from being overwritten before it is read: growing
-/// walks the tail from the end, shrinking walks it from the front.
-fn plan_splice(state: &mut ArraySpliceContinuation) -> Result<(), NativeFailure> {
+/// The potentially large shift plan is deferred until after the removed result
+/// is created and populated, because either observable phase can complete
+/// abruptly before any source mutation.
+fn prepare_splice(state: &mut ArraySpliceContinuation) -> Result<(), NativeFailure> {
     if state.planned {
         return Ok(());
     }
     state.planned = true;
     let inserted = state.insertion_count();
-    let tail_start = state.start.saturating_add(state.removed);
-    let tail_length = state.length.saturating_sub(tail_start);
     let final_length = state
         .length
         .saturating_sub(state.removed)
@@ -2271,6 +2267,29 @@ fn plan_splice(state: &mut ArraySpliceContinuation) -> Result<(), NativeFailure>
         )?));
     }
     state.final_length = final_length;
+    Ok(())
+}
+
+/// Plans the shift that follows a splice's extraction.
+///
+/// The tail moves by `insertions - removed`. Moving it in the correct direction
+/// is what keeps a source from being overwritten before it is read: growing
+/// walks the tail from the end, shrinking walks it from the front.
+fn plan_splice_moves(state: &mut ArraySpliceContinuation) -> Result<(), NativeFailure> {
+    if state.moves_planned {
+        return Ok(());
+    }
+    state.moves_planned = true;
+    if !state.planned {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "splice shift planning preceded result-length validation",
+        }
+        .into());
+    }
+    let inserted = state.insertion_count();
+    let tail_start = state.start.saturating_add(state.removed);
+    let tail_length = state.length.saturating_sub(tail_start);
+    let final_length = state.final_length;
 
     let tail_count = usize::try_from(tail_length).map_err(|_| EngineFault::RuntimeInvariant {
         message: "a splice tail exceeded the addressable step plan",

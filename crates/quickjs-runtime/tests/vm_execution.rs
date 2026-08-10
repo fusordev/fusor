@@ -34,6 +34,45 @@ fn runtime() -> Runtime {
 }
 
 #[test]
+fn immutable_local_and_captured_writes_follow_declarative_environment_semantics() {
+    let authority = compile(
+        "function run(){\
+            const local=1;\
+            let localResult;\
+            try{local=2;}catch(error){localResult=error.name+':'+local;}\
+            const captured=3;\
+            function writeCaptured(){\
+                try{captured=4;}catch(error){return error.name+':'+captured;}\
+            }\
+            let sloppy=function self(){self=0;return self===sloppy;};\
+            let strict=function self(){\
+                'use strict';\
+                try{self=0;}catch(error){return error.name+':'+(self===strict);}\
+            };\
+            return localResult+'|'+writeCaptured()+'|'+sloppy()+'|'+strict();\
+        }",
+        "run",
+    );
+    let mut runtime = runtime();
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = context.instantiate(authority).expect("function");
+
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("immutable writes are catchable language exceptions");
+    assert_eq!(
+        result
+            .as_string()
+            .expect("live result")
+            .expect("string")
+            .to_utf8_lossy()
+            .expect("UTF-8"),
+        "TypeError:1|TypeError:3|true|TypeError:true"
+    );
+}
+
+#[test]
 fn regexp_literal_opcode_allocates_a_branded_runtime_object() {
     let authority = compile("function make(){return /a+/giu;}", "make");
     let mut runtime = runtime();
@@ -80,6 +119,42 @@ fn for_in_executes_ordered_own_keys_string_indices_and_getter_free_enumeration()
             .to_utf8_lossy()
             .expect("UTF-8"),
         "1,2,b,a|0|0,1,2|"
+    );
+}
+
+#[test]
+fn for_in_destructuring_supports_declarations_assignments_and_iteration_closures() {
+    let authority = compile(
+        "function run(){\
+            let declared='';\
+            for(const [first,second] in {ab:0})declared=first+second;\
+            let assigned;\
+            for([assigned] in {cd:0}){}\
+            let firstCapture,lastCapture,index=0;\
+            for(let [head] in {x:0,y:0}){\
+                if(index++===0)firstCapture=function(){return head;};\
+                else lastCapture=function(){return head;};\
+            }\
+            return declared+'|'+assigned+'|'+firstCapture()+lastCapture();\
+        }",
+        "run",
+    );
+    let mut runtime = runtime();
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = context.instantiate(authority).expect("function");
+
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("for-in destructuring execution");
+    assert_eq!(
+        result
+            .as_string()
+            .expect("live result")
+            .expect("string")
+            .to_utf8_lossy()
+            .expect("UTF-8"),
+        "ab|c|xy"
     );
 }
 

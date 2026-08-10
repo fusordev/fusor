@@ -223,6 +223,50 @@ fn map_and_map_iterator_trace_keys_values_and_release_entry_charges() {
 }
 
 #[test]
+fn iterator_chunking_helper_traces_values_retained_only_in_its_buffer() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let realm_id = realm.0.id;
+    let object_prototype = runtime
+        .realm_object_prototype(realm_id)
+        .expect("Object.prototype");
+    let baseline = runtime.usage();
+    let value = runtime
+        .allocate_ordinary_object(object_prototype)
+        .expect("buffered value");
+    let helper = runtime
+        .allocate_iterator_chunking_helper(
+            realm_id,
+            StoredValue::Undefined,
+            StoredValue::Undefined,
+            crate::object::IteratorHelperKind::Chunks,
+            2,
+            false,
+        )
+        .expect("chunks helper");
+    assert!(
+        runtime
+            .push_iterator_chunking_value(helper, StoredValue::Object(value))
+            .expect("buffer first chunk value")
+            .is_none()
+    );
+
+    runtime
+        .collect_cycles_with_roots(|mark| {
+            mark(CollectionRoot::Heap(HeapReference::Object(helper)));
+        })
+        .expect("rooted chunking helper collection");
+    assert!(runtime.objects.get(value).is_some());
+    assert_eq!(runtime.usage().heap_objects(), baseline.heap_objects() + 2);
+
+    let report = runtime
+        .collect_cycles()
+        .expect("unrooted helper collection");
+    assert_eq!(report.objects(), 2);
+    assert_eq!(runtime.usage(), baseline);
+}
+
+#[test]
 fn deleted_map_entries_release_key_and_value_edges_but_retain_slot_charge() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
@@ -1332,6 +1376,13 @@ fn array_from_is_admitted_by_whole_graph_runtime_preflight() {
 }
 
 #[test]
+fn spread_eval_is_admitted_by_whole_graph_runtime_preflight() {
+    assert!(is_supported_opcode(
+        quickjs_bytecode::FinalOpcode::ApplyEval
+    ));
+}
+
+#[test]
 fn inferred_function_name_opcode_is_admitted_by_whole_graph_runtime_preflight() {
     assert!(is_supported_opcode(quickjs_bytecode::FinalOpcode::SetName));
     assert!(is_supported_opcode(
@@ -1382,6 +1433,16 @@ fn array_spread_opcodes_are_admitted_without_public_iterator_markers() {
             },
         )
         .expect("yield-star missing-throw shortcut")
+    ));
+    assert!(is_supported_instruction(
+        Instruction::new(
+            FinalOpcode::ThrowError,
+            Operands::AtomU8 {
+                atom: AtomPoolIndex::new(0),
+                value: 3,
+            },
+        )
+        .expect("delete-super ReferenceError shortcut")
     ));
     assert!(!is_supported_instruction(
         Instruction::new(
@@ -2322,6 +2383,34 @@ fn realm_installs_the_exact_function_intrinsic_graph() {
         NativeFunctionKind::ObjectPrototypeValueOf,
         PredefinedAtom::ValueOf,
         0,
+    );
+    let proto_accessors = match object_prototype
+        .own_property(&runtime.predefined_property_key(PredefinedAtom::Proto))
+    {
+        Some(OwnProperty::Accessor {
+            layout,
+            getter: Some(getter),
+            setter: Some(setter),
+        }) if layout == PropertyLayout::accessor(false, true) => (getter, setter),
+        _ => panic!("Object.prototype.__proto__ is not the expected accessor"),
+    };
+    assert_native_method_named(
+        &runtime,
+        proto_accessors.0,
+        function_prototype,
+        realm_id,
+        NativeFunctionKind::ObjectPrototypeProtoGetter,
+        &JsString::from_utf8("get __proto__").expect("getter name"),
+        0,
+    );
+    assert_native_method_named(
+        &runtime,
+        proto_accessors.1,
+        function_prototype,
+        realm_id,
+        NativeFunctionKind::ObjectPrototypeProtoSetter,
+        &JsString::from_utf8("set __proto__").expect("setter name"),
+        1,
     );
 
     assert_data_property(

@@ -253,15 +253,23 @@ pub(super) fn begin_async_function_resume(
         .into());
     }
     let mut frame = record.frame;
-    match kind {
-        crate::object::PromiseReactionKind::Fulfill => push(&mut frame, argument),
-        crate::object::PromiseReactionKind::Reject => {
-            let realm = code(runtime, frame.code)?.realm;
-            frame.resume_abrupt = Some(PendingException {
-                realm,
-                payload: PendingExceptionPayload::ThrownValue(argument),
-                origin: record.origin,
-            });
+    if !resume_pending_async_iterator_close(
+        runtime,
+        &mut frame,
+        kind,
+        argument.duplicate(),
+        record.origin.clone(),
+    )? {
+        match kind {
+            crate::object::PromiseReactionKind::Fulfill => push(&mut frame, argument),
+            crate::object::PromiseReactionKind::Reject => {
+                let realm = code(runtime, frame.code)?.realm;
+                frame.resume_abrupt = Some(PendingException {
+                    realm,
+                    payload: PendingExceptionPayload::ThrownValue(argument),
+                    origin: record.origin,
+                });
+            }
         }
     }
     runtime.collection_pending = true;

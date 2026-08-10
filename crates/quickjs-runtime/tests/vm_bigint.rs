@@ -489,12 +489,15 @@ fn the_constructor_rejects_inconvertible_arguments() {
 
 /// Oracle: `new BigInt(1) !! TypeError: BigInt is not a constructor`.
 #[test]
-fn the_constructor_is_not_constructable() {
+fn construction_rejects_before_coercing_the_argument() {
     assert_throws(
         "return new BigInt(1);",
         ExceptionKind::TypeError,
         "BigInt is not a constructor",
     );
+    assert!(boolean(
+        "let observed=false;try{new BigInt({valueOf(){observed=true;}});}catch(error){return error instanceof TypeError&&!observed;}return false;"
+    ));
 }
 
 /// Oracle: `BigInt.length => [1]`, `BigInt.name => [BigInt]`,

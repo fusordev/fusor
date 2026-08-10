@@ -332,7 +332,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                         });
                     };
                     return self
-                        .instance_field_constructor_owner(class.node_id.get(), class)
+                        .class_instance_initializer_owner(class.node_id.get(), class)
                         .map(Some);
                 }
                 _ => {}
@@ -408,6 +408,20 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                     literal.span,
                 )?;
                 record_string_candidate(owner, value, literal.span, candidates, atom_candidates)?;
+            }
+            AstKind::UnaryExpression(unary)
+                if unary.operator == UnaryOperator::Delete
+                    && delete_operand_is_super_member(&unary.argument) =>
+            {
+                // `throw_error` carries an atom-shaped field even though its
+                // delete-super form does not inspect the atom. Give the
+                // terminal a deterministic in-bounds pool entry of its own.
+                record_property_candidate(
+                    owner,
+                    compiler_identifier_string("", unary.span)?,
+                    unary.span,
+                    atom_candidates,
+                )?;
             }
             AstKind::IdentifierReference(identifier)
                 if has_direct_eval_with
@@ -609,7 +623,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                                 && field.decorators.is_empty() =>
                         {
                             let field_owner =
-                                self.instance_field_constructor_owner(node_id, class)?;
+                                self.class_instance_initializer_owner(node_id, class)?;
                             if let Some(key) = compiled_static_property_key(&field.key)? {
                                 record_property_candidate(
                                     field_owner,
@@ -707,37 +721,18 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         Ok(())
     }
 
-    fn instance_field_constructor_owner(
+    fn class_instance_initializer_owner(
         &self,
         class_node: NodeId,
         class: &super::Class<'arena>,
     ) -> Result<ExecutableId, LeafCompilationError> {
-        for element in &class.body.body {
-            let super::ClassElement::MethodDefinition(method) = element else {
-                continue;
-            };
-            if method.kind != super::MethodDefinitionKind::Constructor {
-                continue;
-            }
-            return self
-                .planned
-                .identities
-                .executable_by_node
-                .get(method.value.node_id.get().index())
-                .copied()
-                .flatten()
-                .ok_or(LeafCompilationError::SemanticInvariant {
-                    invariant: "class constructor owns its public field atoms",
-                    span: Some(method.span),
-                });
-        }
         self.planned
             .identities
-            .default_class_constructors
+            .class_instance_initializers
             .get(&class_node)
             .copied()
             .ok_or(LeafCompilationError::SemanticInvariant {
-                invariant: "class without a source constructor owns a synthesized field template",
+                invariant: "class with an instance field has a hidden initializer",
                 span: Some(class.span),
             })
     }
@@ -781,6 +776,9 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 }
                 AstKind::AssignmentTargetWithDefault(assignment) => {
                     return Self::direct_class_assignment_default_name(node_id, class, assignment);
+                }
+                AstKind::FormalParameter(parameter) => {
+                    return Self::class_formal_parameter_default_name(node_id, class, parameter);
                 }
                 _ => {
                     // The remaining expression contexts do not perform
@@ -888,10 +886,17 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             });
         }
         match &assignment.left {
-            super::AssignmentTarget::AssignmentTargetIdentifier(identifier) => Ok((
-                compiler_identifier_string(identifier.name.as_str(), identifier.span)?,
-                identifier.span,
-            )),
+            super::AssignmentTarget::AssignmentTargetIdentifier(identifier)
+                if assignment.span.start == identifier.span.start =>
+            {
+                Ok((
+                    compiler_identifier_string(identifier.name.as_str(), identifier.span)?,
+                    identifier.span,
+                ))
+            }
+            super::AssignmentTarget::AssignmentTargetIdentifier(_) => {
+                Ok((compiler_identifier_string("", class.span)?, class.span))
+            }
             // Assignment NamedEvaluation applies only to identifier references.
             // A static member assignment still creates the class through the
             // typed class-definition path, but its default name is the empty
@@ -933,6 +938,43 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         if initializer.node_id() != node_id {
             return Err(LeafCompilationError::SemanticInvariant {
                 invariant: "anonymous class name is inferred from its direct binding default",
+                span: Some(class.span),
+            });
+        }
+        Ok((
+            compiler_identifier_string(identifier.name.as_str(), identifier.span)?,
+            identifier.span,
+        ))
+    }
+
+    fn class_formal_parameter_default_name(
+        node_id: NodeId,
+        class: &super::Class<'arena>,
+        parameter: &super::FormalParameter<'arena>,
+    ) -> Result<(CompilerString, Span), LeafCompilationError> {
+        let BindingPattern::BindingIdentifier(identifier) = &parameter.pattern else {
+            // `BindingElement : BindingPattern Initializer` uses ordinary
+            // evaluation. Only `SingleNameBinding` performs NamedEvaluation.
+            return Ok((compiler_identifier_string("", class.span)?, class.span));
+        };
+        let Some(mut initializer) = parameter.initializer.as_deref() else {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "anonymous class formal parameter has a default initializer",
+                span: Some(class.span),
+            });
+        };
+        while let Expression::ParenthesizedExpression(parenthesized) = initializer {
+            initializer = &parenthesized.expression;
+        }
+        let Expression::ClassExpression(initializer) = initializer else {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "anonymous class remains the direct formal parameter initializer",
+                span: Some(class.span),
+            });
+        };
+        if initializer.node_id() != node_id {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "anonymous class name is inferred from its formal parameter binding",
                 span: Some(class.span),
             });
         }
@@ -1159,6 +1201,22 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             )?;
         }
         Ok(())
+    }
+}
+
+fn delete_operand_is_super_member(expression: &Expression<'_>) -> bool {
+    let mut expression = expression;
+    while let Expression::ParenthesizedExpression(parenthesized) = expression {
+        expression = &parenthesized.expression;
+    }
+    match expression {
+        Expression::StaticMemberExpression(member) => {
+            matches!(&member.object, Expression::Super(_))
+        }
+        Expression::ComputedMemberExpression(member) => {
+            matches!(&member.object, Expression::Super(_))
+        }
+        _ => false,
     }
 }
 

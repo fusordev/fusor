@@ -520,8 +520,7 @@ pub(crate) fn number_to_integer_or_infinity(value: JsNumber) -> f64 {
 ///
 /// The result is clamped into `0..=MAX_SAFE_INTEGER`, matching
 /// `JS_ToLengthFree` (`quickjs.c:13509`). This is deliberately distinct from
-/// the `ToUint32` length read that `js_get_length32` performs
-/// (`quickjs.c:41008`), which the array-iterator path keeps using.
+/// the non-normative `ToUint32` length reads used by some `QuickJS` internals.
 #[must_use]
 pub(crate) fn number_to_length(value: JsNumber) -> u64 {
     let integer = number_to_integer_or_infinity(value);

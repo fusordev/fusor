@@ -129,6 +129,7 @@ mod data_view;
 mod date;
 mod define_property_intrinsics;
 mod dynamic;
+mod dynamic_import;
 mod error_stack;
 mod errors;
 mod exceptions;
@@ -181,13 +182,13 @@ use {
     array_from_async::*, array_join::*, array_mutators::*, array_search::*, array_sort::*,
     array_statics::*, async_from_sync::*, async_generator::*, atomics::*, bigint_intrinsics::*,
     bindings::*, conversions::*, data_view::*, date::*, define_property_intrinsics::*, dynamic::*,
-    error_stack::*, errors::*, exceptions::*, execution::*, for_in::*, from_entries::*,
-    generator::*, group_by::*, intl::*, iterators::*, json_parse::*, json_stringify::*,
-    locale_string::*, map::*, math::*, math_sum_precise::*, native::*, object_intrinsics::*,
-    promise::*, promise_combinators::*, properties::*, proxy::*, reflect::*, regexp::*, set::*,
-    stack::*, string_methods::*, string_raw::*, string_replace::*, string_split::*, temporal::*,
-    typed_array::*, uint8_array::*, uri::*, weak_collections::*, weak_references::*,
-    with_environment::*,
+    dynamic_import::*, error_stack::*, errors::*, exceptions::*, execution::*, for_in::*,
+    from_entries::*, generator::*, group_by::*, intl::*, iterators::*, json_parse::*,
+    json_stringify::*, locale_string::*, map::*, math::*, math_sum_precise::*, native::*,
+    object_intrinsics::*, promise::*, promise_combinators::*, properties::*, proxy::*, reflect::*,
+    regexp::*, set::*, stack::*, string_methods::*, string_raw::*, string_replace::*,
+    string_split::*, temporal::*, typed_array::*, uint8_array::*, uri::*, weak_collections::*,
+    weak_references::*, with_environment::*,
 };
 
 /// Inclusive per-call interpreter limits.
@@ -329,8 +330,13 @@ enum FrameBinding {
 enum OperandStackEntry {
     JavaScript(StoredValue),
     Catch { handler: InstructionIndex },
-    ForOfCatch { active: bool },
+    ForOfCatch { active: bool, asynchronous: bool },
     FinallyReturn { continuation: InstructionIndex },
+}
+
+enum PendingAsyncIteratorClose {
+    Normal,
+    Abrupt(PendingException),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -358,6 +364,12 @@ impl ConstructorProfile {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct EvalGrammarContext {
+    in_function: bool,
+    in_class_field_initializer: bool,
+}
+
 pub(crate) struct Frame {
     function: FunctionId,
     code: InstalledCodeId,
@@ -370,7 +382,7 @@ pub(crate) struct Frame {
     inherited_eval_environment: Option<SharedEvalVariableEnvironment>,
     parameter_eval_boundary: Option<SharedEvalVariableEnvironment>,
     receiver: StoredValue,
-    eval_in_function: bool,
+    eval_context: EvalGrammarContext,
     new_target: Option<FunctionId>,
     instruction: InstructionIndex,
     return_to: Option<CallReturn>,
@@ -384,6 +396,7 @@ pub(crate) struct Frame {
     generator_resume: Option<ObjectId>,
     generator_result: Option<ObjectId>,
     resume_abrupt: Option<PendingException>,
+    pending_async_iterator_close: Option<PendingAsyncIteratorClose>,
     reserved_values: u64,
     arguments_snapshot_use: ArgumentsSnapshotUse,
     arguments_snapshot: Option<Vec<StoredValue>>,
@@ -395,6 +408,16 @@ pub(crate) struct Frame {
     environment: Vec<EnvironmentBinding>,
     environment_eval_shadows: Vec<Option<EvalBindingShadow>>,
     stack: Vec<OperandStackEntry>,
+}
+
+struct OrdinaryConstructorPrototypeContinuation {
+    frame: Frame,
+}
+
+impl OrdinaryConstructorPrototypeContinuation {
+    const fn retained_values(&self) -> u64 {
+        self.frame.reserved_values
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -878,6 +901,8 @@ enum NativeContinuation {
     IteratorZipCreation(Box<IteratorZipCreationContinuation>),
     IteratorZipNext(IteratorZipNextContinuation),
     IteratorZipClose(Box<IteratorZipCloseContinuation>),
+    IteratorIncludes(IteratorIncludesContinuation),
+    IteratorJoin(IteratorJoinContinuation),
     IteratorConsumer(IteratorConsumerContinuation),
     IteratorDispose(IteratorDisposeContinuation),
     IteratorHelperCreation(IteratorHelperCreationContinuation),
@@ -902,6 +927,7 @@ enum NativeContinuation {
     ProxyEnumerable(Box<ProxyEnumerableContinuation>),
     ObjectAssign(Box<ObjectAssignContinuation>),
     GetOwnPropertyDescriptors(Box<GetOwnPropertyDescriptorsContinuation>),
+    ArrayToString(ArrayToStringContinuation),
     ArrayJoin(Box<ArrayJoinContinuation>),
     ArraySearch(Box<ArraySearchContinuation>),
     ArrayMutator(Box<ArrayMutatorContinuation>),
@@ -947,9 +973,11 @@ enum NativeContinuation {
     DefineProperty(Box<DefinePropertyContinuation>),
     DefineProperties(Box<DefinePropertiesContinuation>),
     InstanceOf(InstanceOfContinuation),
+    DynamicImport(Box<DynamicImportContinuation>),
     Promise(PromiseContinuation),
     PromiseCombinator(Box<PromiseCombinatorContinuation>),
     WithGet(Box<WithGetContinuation>),
+    OrdinaryConstructorPrototype(Box<OrdinaryConstructorPrototypeContinuation>),
     ProxyGet(Box<ProxyGetContinuation>),
     ProxyCall(Box<ProxyCallContinuation>),
     ProxyBoolean(Box<ProxyBooleanContinuation>),
@@ -961,6 +989,8 @@ enum NativeContinuation {
     IntegrityLevel(Box<IntegrityLevelContinuation>),
     IsPrototypeOf(Box<IsPrototypeOfContinuation>),
     ObjectMeta(ObjectMetaContinuation),
+    LegacyAccessorLookup(Box<LegacyAccessorLookupContinuation>),
+    LegacyDefineAccessor,
     OwnDescriptorQuery(OwnDescriptorQueryContinuation),
     AsyncAwait {
         origin: JsStackFrame,
@@ -1137,6 +1167,8 @@ impl NativeContinuation {
             Self::IteratorZipCreation(state) => state.retained_values(),
             Self::IteratorZipNext(state) => state.retained_values(),
             Self::IteratorZipClose(state) => state.retained_values(),
+            Self::IteratorIncludes(state) => state.retained_values(),
+            Self::IteratorJoin(state) => state.retained_values(),
             Self::IteratorConsumer(state) => state.retained_values(),
             Self::IteratorDispose(_) => IteratorDisposeContinuation::retained_values(),
             Self::IteratorHelperCreation(state) => state.retained_values(),
@@ -1163,6 +1195,7 @@ impl NativeContinuation {
             Self::ProxyEnumerable(state) => state.retained_values(),
             Self::ObjectAssign(state) => state.retained_values(),
             Self::GetOwnPropertyDescriptors(state) => state.retained_values(),
+            Self::ArrayToString(_) => ArrayToStringContinuation::retained_values(),
             Self::ArrayJoin(_) => ArrayJoinContinuation::retained_values(),
             Self::ArraySearch(_) => ArraySearchContinuation::retained_values(),
             Self::ArrayMutator(state) => state.retained_values(),
@@ -1212,9 +1245,11 @@ impl NativeContinuation {
             Self::DefineProperty(state) => state.retained_values(),
             Self::DefineProperties(state) => state.retained_values(),
             Self::InstanceOf(state) => state.retained_values(),
+            Self::DynamicImport(state) => state.retained_values(),
             Self::Promise(state) => state.retained_values(),
             Self::PromiseCombinator(state) => state.retained_values(),
             Self::WithGet(state) => state.retained_values(),
+            Self::OrdinaryConstructorPrototype(state) => state.retained_values(),
             Self::ProxyGet(state) => state.retained_values(),
             Self::ProxyCall(state) => state.retained_values(),
             Self::ProxyBoolean(state) => state.retained_values(),
@@ -1226,7 +1261,9 @@ impl NativeContinuation {
             Self::IntegrityLevel(state) => state.retained_values(),
             Self::IsPrototypeOf(_) => IsPrototypeOfContinuation::retained_values(),
             Self::ObjectMeta(_) => ObjectMetaContinuation::retained_values(),
+            Self::LegacyAccessorLookup(_) => LegacyAccessorLookupContinuation::retained_values(),
             Self::OwnDescriptorQuery(_)
+            | Self::LegacyDefineAccessor
             | Self::AsyncAwait { .. }
             | Self::ReflectSet
             | Self::ProxyWrite
@@ -1245,6 +1282,7 @@ impl NativeContinuation {
                 | Self::SetConstructor(_)
                 | Self::ArrayStatic(_)
                 | Self::ArrayFromAsync(_)
+                | Self::DynamicImport(_)
                 | Self::PromiseCombinator(_)
                 | Self::IteratorHelperNext(_)
                 | Self::IteratorHelperReturn(_)
@@ -1265,7 +1303,9 @@ impl NativeContinuation {
                     if matches!(
                         &state.target,
                         OperatorPrimitiveTarget::ArrayFromAsyncLength { .. }
+                            | OperatorPrimitiveTarget::DynamicImportSpecifier(_)
                             | OperatorPrimitiveTarget::IteratorLimit(_)
+                            | OperatorPrimitiveTarget::IteratorJoin(_)
                     ) || matches!(
                         &state.target,
                         OperatorPrimitiveTarget::RegExpValue(state) if state.handles_abrupt()
@@ -1477,6 +1517,9 @@ impl PromiseContinuation {
 }
 
 enum IntrinsicGetContinuation {
+    ObjectConstructor {
+        new_target: FunctionId,
+    },
     BooleanConstructor {
         new_target: FunctionId,
         value: bool,
@@ -1584,7 +1627,8 @@ enum IntrinsicGetContinuation {
 impl IntrinsicGetContinuation {
     fn retained_values(&self) -> u64 {
         match self {
-            Self::BooleanConstructor { .. }
+            Self::ObjectConstructor { .. }
+            | Self::BooleanConstructor { .. }
             | Self::NumberConstructor { .. }
             | Self::DateConstructor { .. }
             | Self::ArrayBufferConstructor { .. }
@@ -1616,39 +1660,31 @@ impl IntrinsicGetContinuation {
 
 #[derive(Clone, Copy)]
 enum ObjectPrototypeTag {
-    ArrayBuffer,
-    SharedArrayBuffer,
     Arguments,
     Array,
-    BigInt,
     Boolean,
     Date,
     Error,
     Function,
     Number,
     Object,
-    Promise,
+    RegExp,
     String,
-    Symbol,
 }
 
 impl ObjectPrototypeTag {
     const fn name(self) -> &'static str {
         match self {
-            Self::ArrayBuffer => "ArrayBuffer",
-            Self::SharedArrayBuffer => "SharedArrayBuffer",
             Self::Arguments => "Arguments",
             Self::Array => "Array",
-            Self::BigInt => "BigInt",
             Self::Boolean => "Boolean",
             Self::Date => "Date",
             Self::Error => "Error",
             Self::Function => "Function",
             Self::Number => "Number",
             Self::Object => "Object",
-            Self::Promise => "Promise",
+            Self::RegExp => "RegExp",
             Self::String => "String",
-            Self::Symbol => "Symbol",
         }
     }
 }
@@ -1663,7 +1699,7 @@ struct ArrayIteratorNextContinuation {
     iterator: ObjectId,
     iterated: StoredValue,
     kind: crate::object::ArrayIteratorKind,
-    index: u32,
+    index: u64,
     realm: RealmId,
     stage: ArrayIteratorNextStage,
     prepared_result: Option<PreparedIteratorResultPlan>,
@@ -1682,6 +1718,7 @@ struct ForOfStartContinuation {
     iterable: StoredValue,
     iterator: Option<StoredValue>,
     async_from_sync: bool,
+    asynchronous: bool,
     realm: RealmId,
     stage: ForOfStartStage,
     origin: JsStackFrame,
@@ -1724,6 +1761,7 @@ enum ForOfCloseStage {
 
 struct ForOfCloseContinuation {
     iterator: StoredValue,
+    asynchronous: bool,
     realm: RealmId,
     stage: ForOfCloseStage,
     origin: JsStackFrame,
@@ -1920,6 +1958,7 @@ enum IteratorCloseStage {
 struct IteratorCloseContinuation {
     iterator: StoredValue,
     original: PendingException,
+    asynchronous: bool,
     stage: IteratorCloseStage,
 }
 
@@ -2025,6 +2064,19 @@ enum PropertyKeyTarget {
         target: StoredValue,
         realm: RealmId,
     },
+    /// A legacy `__defineGetter__` or `__defineSetter__` key conversion.
+    LegacyDefineAccessor {
+        target: StoredValue,
+        accessor: FunctionId,
+        kind: LegacyAccessorKind,
+        realm: RealmId,
+    },
+    /// A legacy `__lookupGetter__` or `__lookupSetter__` key conversion.
+    LegacyLookupAccessor {
+        target: StoredValue,
+        kind: LegacyAccessorKind,
+        realm: RealmId,
+    },
     /// The `delete` operator's key, awaiting `ToPropertyKey`.
     Delete {
         base: StoredValue,
@@ -2070,12 +2122,14 @@ impl PropertyKeyTarget {
             | Self::OwnPropertyDescriptor { .. }
             | Self::HasOwnProperty { .. }
             | Self::PropertyIsEnumerable { .. }
+            | Self::LegacyLookupAccessor { .. }
             | Self::ReflectOwnPropertyDescriptor { .. }
             | Self::ReflectHas { .. }
             | Self::In { .. } => 1,
             Self::Write { .. }
             | Self::DefineMethod { .. }
             | Self::DefineProperty { .. }
+            | Self::LegacyDefineAccessor { .. }
             | Self::ReflectGet { .. }
             | Self::ReflectDefineProperty { .. } => 2,
             Self::ReflectSet { .. } => 3,
@@ -2147,15 +2201,24 @@ struct FunctionApplyContinuation {
     reason = "the Await prefix marks every observable Function bind suspension boundary"
 )]
 enum FunctionBindStage {
+    AwaitPrototype,
     AwaitLengthDescriptor,
     AwaitLengthValue,
     AwaitNameValue,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FunctionBindPrototype {
+    Pending,
+    Null,
+    Heap(HeapReference),
 }
 
 struct FunctionBindContinuation {
     target: FunctionId,
     bound_this: StoredValue,
     bound_arguments: Vec<StoredValue>,
+    prototype: FunctionBindPrototype,
     length: JsNumber,
     realm: RealmId,
     stage: FunctionBindStage,
@@ -2206,7 +2269,12 @@ impl FunctionApplyContinuation {
 
 impl FunctionBindContinuation {
     fn retained_values(&self) -> u64 {
-        2_u64.saturating_add(usize_to_u64(self.bound_arguments.len()))
+        2_u64
+            .saturating_add(u64::from(matches!(
+                self.prototype,
+                FunctionBindPrototype::Heap(_)
+            )))
+            .saturating_add(usize_to_u64(self.bound_arguments.len()))
     }
 }
 
@@ -2549,6 +2617,8 @@ enum OperatorPrimitiveTarget {
     ArrayIteratorLength(ArrayIteratorNextContinuation),
     /// An Iterator Helper limit, awaiting `ToNumber`.
     IteratorLimit(Box<IteratorLimitContinuation>),
+    /// `Iterator.prototype.join`, awaiting separator or element `ToString`.
+    IteratorJoin(Box<IteratorJoinContinuation>),
     FunctionApplyLength(FunctionApplyContinuation),
     ProxyOwnKeysLength(Box<ProxyOwnKeysContinuation>),
     /// `BigInt.prototype.toString`'s radix, awaiting `ToNumber`.
@@ -2676,6 +2746,8 @@ enum OperatorPrimitiveTarget {
     StringMethodSubject(Box<StringMethodContinuation>),
     /// A `String.prototype` method's argument, awaiting its own coercion.
     StringMethodArgument(Box<StringMethodContinuation>),
+    /// `import()`'s specifier after observable `ToPrimitive(string)`.
+    DynamicImportSpecifier(Box<DynamicImportContinuation>),
 }
 
 impl OperatorPrimitiveTarget {
@@ -2965,6 +3037,7 @@ impl OperatorPrimitiveTarget {
             }
             Self::ArrayIteratorLength(state) => state.retained_values(),
             Self::IteratorLimit(_) => IteratorLimitContinuation::retained_values(),
+            Self::IteratorJoin(state) => state.retained_values(),
             Self::FunctionApplyLength(state) => state.retained_values(),
             Self::ProxyOwnKeysLength(state) => state.retained_values(),
             Self::ArrayJoinSeparator(_) | Self::ArrayJoinElement(_) => {
@@ -2976,6 +3049,7 @@ impl OperatorPrimitiveTarget {
             Self::StringMethodSubject(state) | Self::StringMethodArgument(state) => {
                 state.retained_values()
             }
+            Self::DynamicImportSpecifier(state) => state.retained_values(),
             Self::ArrayCallbackLength(_) => ArrayCallbackContinuation::retained_values(),
             Self::ArrayReductionLength(_) => ArrayReductionContinuation::retained_values(),
             Self::ArraySearchPosition(_) => ArraySearchContinuation::retained_values(),
@@ -3138,6 +3212,7 @@ fn trace_property_key_target_roots(
         | PropertyKeyTarget::OwnPropertyDescriptor { target: base, .. }
         | PropertyKeyTarget::HasOwnProperty { target: base, .. }
         | PropertyKeyTarget::PropertyIsEnumerable { target: base, .. }
+        | PropertyKeyTarget::LegacyLookupAccessor { target: base, .. }
         | PropertyKeyTarget::ReflectOwnPropertyDescriptor { target: base, .. }
         | PropertyKeyTarget::ReflectHas { target: base, .. }
         | PropertyKeyTarget::In { target: base, .. } => {
@@ -3151,6 +3226,12 @@ fn trace_property_key_target_roots(
         } => {
             trace_stored_value_root(target, mark);
             trace_stored_value_root(descriptor, mark);
+        }
+        PropertyKeyTarget::LegacyDefineAccessor {
+            target, accessor, ..
+        } => {
+            trace_stored_value_root(target, mark);
+            mark(CollectionRoot::Heap(HeapReference::Function(*accessor)));
         }
         PropertyKeyTarget::Write { base, value, .. } => {
             trace_stored_value_root(base, mark);
@@ -3430,6 +3511,7 @@ fn trace_operator_primitive_target_roots(
             trace_stored_value_root(&state.iterated, mark);
         }
         OperatorPrimitiveTarget::IteratorLimit(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::IteratorJoin(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::FunctionApplyLength(state) => {
             trace_function_apply_roots(state, mark);
         }
@@ -3443,6 +3525,7 @@ fn trace_operator_primitive_target_roots(
         }
         OperatorPrimitiveTarget::StringMethodSubject(state)
         | OperatorPrimitiveTarget::StringMethodArgument(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::DynamicImportSpecifier(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::ArrayCallbackLength(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::ArrayReductionLength(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::ArraySearchPosition(state) => state.trace_roots(mark),
@@ -3512,7 +3595,7 @@ fn trace_operator_primitive_target_roots(
         OperatorPrimitiveTarget::MathHypot(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::ArrayJoinSeparator(state)
         | OperatorPrimitiveTarget::ArrayJoinElement(state) => {
-            trace_stored_value_root(state.target(), mark);
+            state.trace_roots(mark);
         }
         // The pending truncation operand is a real value and must be traced.
         OperatorPrimitiveTarget::BigIntTruncationBits { value, .. } => {
@@ -3547,6 +3630,9 @@ fn trace_function_bind_roots(
     mark: &mut dyn FnMut(CollectionRoot),
 ) {
     mark(CollectionRoot::Heap(HeapReference::Function(state.target)));
+    if let FunctionBindPrototype::Heap(prototype) = state.prototype {
+        mark(CollectionRoot::Heap(prototype));
+    }
     trace_stored_value_root(&state.bound_this, mark);
     for argument in &state.bound_arguments {
         trace_stored_value_root(argument, mark);
@@ -3584,9 +3670,8 @@ fn trace_native_continuation_roots(
         NativeContinuation::FunctionApply(state) => {
             trace_function_apply_roots(state, mark);
         }
-        NativeContinuation::ArrayJoin(state) => {
-            trace_stored_value_root(state.target(), mark);
-        }
+        NativeContinuation::ArrayToString(state) => state.trace_roots(mark),
+        NativeContinuation::ArrayJoin(state) => state.trace_roots(mark),
         NativeContinuation::ArraySearch(state) => state.trace_roots(mark),
         NativeContinuation::ArrayMutator(state) => state.trace_roots(mark),
         NativeContinuation::ArrayCopier(state) => state.trace_roots(mark),
@@ -3702,7 +3787,8 @@ fn trace_native_continuation_roots(
         NativeContinuation::TemporalInstantDifferenceOptions(state) => state.trace_roots(mark),
         NativeContinuation::TemporalInstantToStringOptions(state) => state.trace_roots(mark),
         NativeContinuation::IntrinsicGet(state) => match state {
-            IntrinsicGetContinuation::BooleanConstructor { new_target, .. }
+            IntrinsicGetContinuation::ObjectConstructor { new_target }
+            | IntrinsicGetContinuation::BooleanConstructor { new_target, .. }
             | IntrinsicGetContinuation::NumberConstructor { new_target, .. }
             | IntrinsicGetContinuation::DateConstructor { new_target, .. }
             | IntrinsicGetContinuation::ArrayBufferConstructor { new_target, .. }
@@ -3793,6 +3879,8 @@ fn trace_native_continuation_roots(
         NativeContinuation::IteratorZipCreation(state) => state.trace_roots(mark),
         NativeContinuation::IteratorZipNext(state) => state.trace_roots(mark),
         NativeContinuation::IteratorZipClose(state) => state.trace_roots(mark),
+        NativeContinuation::IteratorIncludes(state) => state.trace_roots(mark),
+        NativeContinuation::IteratorJoin(state) => state.trace_roots(mark),
         NativeContinuation::IteratorConsumer(state) => state.trace_roots(mark),
         NativeContinuation::IteratorDispose(state) => state.trace_roots(mark),
         NativeContinuation::IteratorHelperCreation(state) => state.trace_roots(mark),
@@ -3894,9 +3982,13 @@ fn trace_native_continuation_roots(
         NativeContinuation::InstanceOf(state) => {
             trace_instance_of_roots(state, mark);
         }
+        NativeContinuation::DynamicImport(state) => state.trace_roots(mark),
         NativeContinuation::Promise(state) => state.trace_roots(mark),
         NativeContinuation::PromiseCombinator(state) => state.trace_roots(mark),
         NativeContinuation::WithGet(state) => state.trace_roots(mark),
+        NativeContinuation::OrdinaryConstructorPrototype(state) => {
+            trace_frame_roots(&state.frame, mark);
+        }
         NativeContinuation::ProxyGet(state) => {
             mark(CollectionRoot::Heap(state.proxy));
             mark(CollectionRoot::Heap(state.target));
@@ -4018,10 +4110,12 @@ fn trace_native_continuation_roots(
         NativeContinuation::IntegrityLevel(state) => state.trace_roots(mark),
         NativeContinuation::IsPrototypeOf(state) => state.trace_roots(mark),
         NativeContinuation::ObjectMeta(state) => trace_stored_value_root(&state.completion, mark),
+        NativeContinuation::LegacyAccessorLookup(state) => state.trace_roots(mark),
         NativeContinuation::AsyncGeneratorReturnAwait { completion, .. } => {
             trace_stored_value_root(completion, mark);
         }
         NativeContinuation::OwnDescriptorQuery(_)
+        | NativeContinuation::LegacyDefineAccessor
         | NativeContinuation::AsyncAwait { .. }
         | NativeContinuation::ReflectSet
         | NativeContinuation::ProxyWrite
@@ -4088,6 +4182,11 @@ pub(crate) fn trace_frame_roots(frame: &Frame, mark: &mut dyn FnMut(CollectionRo
     {
         trace_stored_value_root(value, mark);
     }
+    if let Some(PendingAsyncIteratorClose::Abrupt(pending)) = &frame.pending_async_iterator_close
+        && let PendingExceptionPayload::ThrownValue(value) = &pending.payload
+    {
+        trace_stored_value_root(value, mark);
+    }
     if let Some(dynamic) = &frame.dynamic_return {
         mark(CollectionRoot::Heap(HeapReference::Function(
             dynamic.root.function,
@@ -4096,6 +4195,51 @@ pub(crate) fn trace_frame_roots(frame: &Frame, mark: &mut dyn FnMut(CollectionRo
             mark(CollectionRoot::Heap(HeapReference::Function(construction)));
         }
     }
+}
+
+fn resume_pending_async_iterator_close(
+    runtime: &Runtime,
+    frame: &mut Frame,
+    kind: crate::object::PromiseReactionKind,
+    argument: StoredValue,
+    origin: JsStackFrame,
+) -> Result<bool, ExecutionError> {
+    let Some(close) = frame.pending_async_iterator_close.take() else {
+        return Ok(false);
+    };
+    if let PendingAsyncIteratorClose::Abrupt(original) = close {
+        frame.resume_abrupt = Some(original);
+        return Ok(true);
+    }
+    match kind {
+        crate::object::PromiseReactionKind::Fulfill
+            if matches!(argument, StoredValue::Function(_) | StoredValue::Object(_)) =>
+        {
+            finish_for_of_close_record(frame)?;
+        }
+        crate::object::PromiseReactionKind::Fulfill => {
+            let realm = code(runtime, frame.code)?.realm;
+            frame.resume_abrupt = Some(PendingException {
+                realm,
+                payload: PendingExceptionPayload::EngineError {
+                    kind: ExceptionKind::TypeError,
+                    message: JsString::from_utf8(
+                        "async iterator return must resolve to an object",
+                    )?,
+                },
+                origin,
+            });
+        }
+        crate::object::PromiseReactionKind::Reject => {
+            let realm = code(runtime, frame.code)?.realm;
+            frame.resume_abrupt = Some(PendingException {
+                realm,
+                payload: PendingExceptionPayload::ThrownValue(argument),
+                origin,
+            });
+        }
+    }
+    Ok(true)
 }
 
 fn collect_cycles_with_execution_roots(
@@ -4203,7 +4347,7 @@ struct FramePlan {
     reserved_values: u64,
     arguments_snapshot_use: ArgumentsSnapshotUse,
     entry: FrameEntryKind,
-    eval_in_function: bool,
+    eval_context: EvalGrammarContext,
     constructor_profile: ConstructorProfile,
     strict: bool,
     receiver_access: ReceiverAccess,
@@ -4258,7 +4402,10 @@ enum ReceiverAccess {
 
 impl ReceiverAccess {
     const fn for_function(strict: bool, executable_kind: CompilerExecutableKind) -> Self {
-        if matches!(executable_kind, CompilerExecutableKind::OrdinaryArrow) {
+        if matches!(
+            executable_kind,
+            CompilerExecutableKind::OrdinaryArrow | CompilerExecutableKind::AsyncArrow
+        ) {
             Self::Lexical
         } else if strict
             || matches!(
@@ -4341,6 +4488,11 @@ enum CallInputSource {
         argument_count: usize,
     },
     Prepared(CallInputs),
+}
+
+enum DirectEvalInputSource {
+    Call(CallInputSource),
+    FirstArgument(StoredValue),
 }
 
 impl CallInputSource {
@@ -4428,8 +4580,9 @@ enum Step {
     Continue,
     DirectEval {
         function: FunctionId,
-        inputs: CallInputSource,
+        inputs: DirectEvalInputSource,
         scope_index: u16,
+        strict: bool,
         return_to: CallReturn,
         source_pc: BytecodePc,
     },
@@ -4483,6 +4636,36 @@ struct PendingException {
     realm: RealmId,
     payload: PendingExceptionPayload,
     origin: JsStackFrame,
+}
+
+impl PendingException {
+    fn duplicate(&self) -> Self {
+        let payload = match &self.payload {
+            PendingExceptionPayload::EngineError { kind, message } => {
+                PendingExceptionPayload::EngineError {
+                    kind: *kind,
+                    message: message.clone(),
+                }
+            }
+            PendingExceptionPayload::FrozenEngineError {
+                kind,
+                message,
+                stack,
+            } => PendingExceptionPayload::FrozenEngineError {
+                kind: *kind,
+                message: message.clone(),
+                stack: stack.clone(),
+            },
+            PendingExceptionPayload::ThrownValue(value) => {
+                PendingExceptionPayload::ThrownValue(value.duplicate())
+            }
+        };
+        Self {
+            realm: self.realm,
+            payload,
+            origin: self.origin.clone(),
+        }
+    }
 }
 
 enum FrameArguments<'a> {
@@ -4633,7 +4816,7 @@ impl Context<'_> {
         }
 
         let mut execution_budget = ExecutionBudget::new(limits);
-        drain_host_jobs(self.runtime, compiler, &mut execution_budget)?;
+        drain_ready_atomics_jobs_before_host_turn(self.runtime, compiler, &mut execution_budget)?;
         let mut function_id = function_id;
         let mut receiver = StoredValue::Undefined;
         let mut owned_arguments: Option<Vec<StoredValue>> = None;
@@ -5195,19 +5378,25 @@ fn execute_frame_loop(
                 function,
                 inputs,
                 scope_index,
+                strict,
                 return_to,
                 source_pc,
             } => {
-                let inputs = take_call_inputs(
-                    frames.last_mut().ok_or(EngineFault::MissingInstruction {
-                        function: FunctionTemplateId::new(0),
-                        instruction: 0,
-                    })?,
-                    function,
-                    inputs,
-                )?;
-                let mut arguments = inputs.arguments;
-                let argument = arguments.take_first_or_undefined();
+                let argument = match inputs {
+                    DirectEvalInputSource::Call(inputs) => {
+                        let inputs = take_call_inputs(
+                            frames.last_mut().ok_or(EngineFault::MissingInstruction {
+                                function: FunctionTemplateId::new(0),
+                                instruction: 0,
+                            })?,
+                            function,
+                            inputs,
+                        )?;
+                        let mut arguments = inputs.arguments;
+                        arguments.take_first_or_undefined()
+                    }
+                    DirectEvalInputSource::FirstArgument(argument) => argument,
+                };
                 let StoredValue::String(source) = argument else {
                     let parent = frames.last_mut().ok_or(EngineFault::MissingInstruction {
                         function: FunctionTemplateId::new(0),
@@ -5222,8 +5411,9 @@ fn execute_frame_loop(
                 })?;
                 let realm = code(runtime, caller.code)?.realm;
                 let origin = instruction_location(runtime, caller, source_pc)?;
-                let request = direct_eval_compile_request(runtime, caller, source, scope_index)?;
-                let receiver = caller.receiver.duplicate();
+                let request =
+                    direct_eval_compile_request(runtime, caller, source, scope_index, strict)?;
+                let receiver = direct_eval_receiver(runtime, caller, scope_index)?;
                 let active_frames = active_execution_frames(frames);
                 frames
                     .try_reserve(1)
@@ -6040,7 +6230,9 @@ fn execute_frame_loop(
                 }
                 if !construction && bytecode_function_is_class_constructor(runtime, function)? {
                     let pending = PendingException {
-                        realm: operation_realm,
+                        // ECMAScript function [[Call]] creates this TypeError in
+                        // the class constructor's callee context.
+                        realm: runtime.function_realm(function)?,
                         payload: PendingExceptionPayload::EngineError {
                             kind: ExceptionKind::TypeError,
                             message: class_constructor_call_message(runtime, function)?,
@@ -6085,7 +6277,7 @@ fn execute_frame_loop(
                     inputs,
                 )?;
                 let construction = inputs.new_target;
-                let mut child = create_frame(
+                let child = create_frame(
                     runtime,
                     plan,
                     if construction.is_some() {
@@ -6098,16 +6290,68 @@ fn execute_frame_loop(
                     Some(return_to),
                     None,
                 )?;
-                if let Some(new_target) = construction
+                let active_frames = active_execution_frames(frames);
+                let dispatch = if construction.is_some()
                     && child.constructor_state != ConstructorState::DerivedUninitialized
                 {
-                    child.receiver = StoredValue::Object(create_ordinary_constructor_receiver(
-                        runtime, new_target,
-                    )?);
-                    child.constructor_state = ConstructorState::Ordinary;
+                    begin_ordinary_constructor_receiver(
+                        runtime,
+                        child,
+                        operation_realm,
+                        origin,
+                        execution_budget,
+                    )
+                } else {
+                    Ok(NativeDispatch::Frame(child))
+                };
+                let dispatch = match dispatch {
+                    Ok(dispatch) => resolve_native_dispatch(
+                        runtime,
+                        dispatch,
+                        frames,
+                        active_frames,
+                        *active_frame_values,
+                        compiler,
+                        execution_budget,
+                    ),
+                    Err(error) => Err(error),
+                };
+                match dispatch {
+                    Ok(NativeDispatch::Frame(child)) => {
+                        *active_frame_values =
+                            active_frame_values.saturating_add(child.reserved_values);
+                        frames.push(child);
+                    }
+                    Ok(
+                        NativeDispatch::Immediate(_)
+                        | NativeDispatch::Pair(_, _)
+                        | NativeDispatch::ForOfRecord { .. }
+                        | NativeDispatch::ForOfStep { .. }
+                        | NativeDispatch::ForOfClosed
+                        | NativeDispatch::CopyDataPropertiesDone
+                        | NativeDispatch::AsyncAwait { .. }
+                        | NativeDispatch::Call(_),
+                    ) => {
+                        return Err(EngineFault::RuntimeInvariant {
+                            message: "bytecode call preparation produced an invalid dispatch",
+                        }
+                        .into());
+                    }
+                    Err(
+                        NativeFailure::Abrupt(pending)
+                        | NativeFailure::AbruptAfterTransient(pending),
+                    ) => {
+                        dispatch_pending_exception(
+                            runtime,
+                            frames,
+                            active_frame_values,
+                            pending,
+                            compiler,
+                            execution_budget,
+                        )?;
+                    }
+                    Err(NativeFailure::Execution(error)) => return Err(error),
                 }
-                *active_frame_values = active_frame_values.saturating_add(child.reserved_values);
-                frames.push(child);
             }
             Step::Apply {
                 function,
@@ -6301,12 +6545,16 @@ fn execute_frame_loop(
                         })?;
                         push_operator_pair(parent, original, updated, return_to)?;
                     }
-                    Ok(NativeDispatch::ForOfRecord { iterator, next }) => {
+                    Ok(NativeDispatch::ForOfRecord {
+                        iterator,
+                        next,
+                        asynchronous,
+                    }) => {
                         let parent = frames.last_mut().ok_or(EngineFault::MissingInstruction {
                             function: FunctionTemplateId::new(0),
                             instruction: 0,
                         })?;
-                        push_for_of_record(parent, iterator, next, return_to)?;
+                        push_for_of_record(parent, iterator, next, asynchronous, return_to)?;
                     }
                     Ok(NativeDispatch::ForOfStep {
                         value,
@@ -7060,7 +7308,11 @@ fn execute_frame_loop(
                             push_operator_pair(parent, original, updated, return_to)?;
                             continue;
                         }
-                        Ok(NativeDispatch::ForOfRecord { iterator, next }) => {
+                        Ok(NativeDispatch::ForOfRecord {
+                            iterator,
+                            next,
+                            asynchronous,
+                        }) => {
                             let parent =
                                 frames.last_mut().ok_or(EngineFault::RuntimeInvariant {
                                     message: "for-of start continuation has no executing frame",
@@ -7068,7 +7320,7 @@ fn execute_frame_loop(
                             let return_to = return_to.ok_or(EngineFault::RuntimeInvariant {
                                 message: "for-of start continuation has no caller continuation",
                             })?;
-                            push_for_of_record(parent, iterator, next, return_to)?;
+                            push_for_of_record(parent, iterator, next, asynchronous, return_to)?;
                             continue;
                         }
                         Ok(NativeDispatch::ForOfStep {
@@ -7347,14 +7599,18 @@ fn resume_suspended_native_returns(
             push_operator_pair(parent, original, updated, return_to)?;
             Ok(SuspendedNativeReturn::Continued)
         }
-        Ok(NativeDispatch::ForOfRecord { iterator, next }) => {
+        Ok(NativeDispatch::ForOfRecord {
+            iterator,
+            next,
+            asynchronous,
+        }) => {
             let parent = frames.last_mut().ok_or(EngineFault::RuntimeInvariant {
                 message: "for-of start continuation has no executing frame",
             })?;
             let return_to = return_to.ok_or(EngineFault::RuntimeInvariant {
                 message: "for-of start continuation has no caller continuation",
             })?;
-            push_for_of_record(parent, iterator, next, return_to)?;
+            push_for_of_record(parent, iterator, next, asynchronous, return_to)?;
             Ok(SuspendedNativeReturn::Continued)
         }
         Ok(NativeDispatch::ForOfStep {

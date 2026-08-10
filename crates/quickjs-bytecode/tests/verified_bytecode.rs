@@ -301,6 +301,24 @@ fn source_for_flow(
     )
 }
 
+fn strict_source(strict_mode_pcs: &[u32]) -> CompilerSource {
+    let full_span = SourceByteSpan::new(0, 1);
+    source(
+        "f",
+        full_span,
+        Some(full_span),
+        &[(0, full_span), (5, full_span), (6, full_span)],
+    )
+    .with_strict_mode_pcs(
+        strict_mode_pcs
+            .iter()
+            .copied()
+            .map(BytecodePc::new)
+            .collect::<Vec<_>>()
+            .into(),
+    )
+}
+
 fn verified_single(
     instructions: &[(FinalOpcode, Operands)],
     atoms: &[CompilerAtom],
@@ -311,6 +329,123 @@ fn verified_single(
         single_input(instructions, atoms, variables, source),
         BytecodeGraphVerificationLimits::default(),
     )
+}
+
+#[test]
+fn final_authority_rejects_strict_source_pc_inside_an_operand() {
+    let instructions = [
+        (FinalOpcode::PushI32, Operands::I32(1)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+    ];
+
+    let error = verify_compiler_bytecode_graph(
+        shaped_input(
+            &instructions,
+            &[atom("f")],
+            &[],
+            0,
+            0,
+            &[],
+            strict_source(&[1]),
+        ),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("strict-source PCs must name verified instructions");
+    assert!(matches!(
+        error.kind(),
+        BytecodeVerificationErrorKind::StrictModePcNotInstruction {
+            index: 0,
+            pc,
+        } if *pc == BytecodePc::new(1)
+    ));
+}
+
+#[test]
+fn final_authority_rejects_duplicate_strict_source_pcs() {
+    let instructions = [
+        (FinalOpcode::PushI32, Operands::I32(1)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+    ];
+
+    let error = verify_compiler_bytecode_graph(
+        shaped_input(
+            &instructions,
+            &[atom("f")],
+            &[],
+            0,
+            0,
+            &[],
+            strict_source(&[0, 0]),
+        ),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("strict-source PCs must be strictly increasing");
+    assert!(matches!(
+        error.kind(),
+        BytecodeVerificationErrorKind::StrictModePcNotIncreasing {
+            index: 1,
+            previous,
+            current,
+        } if *previous == BytecodePc::ZERO && *current == BytecodePc::ZERO
+    ));
+}
+
+#[test]
+fn final_authority_bounds_strict_source_pc_count_before_traversal() {
+    let instructions = [
+        (FinalOpcode::PushI32, Operands::I32(1)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+    ];
+
+    let error = verify_compiler_bytecode_graph(
+        shaped_input(
+            &instructions,
+            &[atom("f")],
+            &[],
+            0,
+            0,
+            &[],
+            strict_source(&[0, 5, 6, 7]),
+        ),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("strict-source metadata is bounded by verified instructions");
+    assert!(matches!(
+        error.kind(),
+        BytecodeVerificationErrorKind::StrictModeInstructionCountOutOfBounds {
+            strict_instructions: 4,
+            instructions: 3,
+        }
+    ));
+}
+
+#[test]
+fn final_authority_retains_verified_strict_source_pcs() {
+    let instructions = [
+        (FinalOpcode::PushI32, Operands::I32(1)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+    ];
+
+    let verified = verify_compiler_bytecode_graph(
+        shaped_input(
+            &instructions,
+            &[atom("f")],
+            &[],
+            0,
+            0,
+            &[],
+            strict_source(&[5]),
+        ),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("one sorted instruction PC is a valid strict-source certificate");
+    let source = verified.root().metadata().source();
+    assert!(source.is_strict_mode_pc(BytecodePc::new(5)));
+    assert!(!source.is_strict_mode_pc(BytecodePc::ZERO));
 }
 
 #[test]
@@ -974,13 +1109,6 @@ fn execution_requirement_capacity_matches_the_exhaustive_sorted_family_set() {
 
 #[test]
 fn final_authority_keeps_throw_error_fail_closed() {
-    let instructions = [(
-        FinalOpcode::ThrowError,
-        Operands::AtomU8 {
-            atom: AtomPoolIndex::new(0),
-            value: 0,
-        },
-    )];
     let text = "function f(argument){var local;return undefined}";
     let variables = [
         VariableDefinition::new(
@@ -1000,25 +1128,34 @@ fn final_authority_keeps_throw_error_fail_closed() {
     ];
     let function_span = SourceByteSpan::new(0, u32::try_from(text.len()).expect("source length"));
 
-    let error = verified_single(
-        &instructions,
-        &[atom("f"), atom("argument"), atom("local")],
-        &variables,
-        source(
-            text,
-            function_span,
-            Some(SourceByteSpan::new(9, 10)),
-            &[(0, function_span)],
-        ),
-    )
-    .expect_err("the internal throw-error shortcut remains outside final authority");
-    assert!(matches!(
-        error.kind(),
-        BytecodeVerificationErrorKind::UnsupportedCompilerOpcode {
-            pc,
-            opcode: FinalOpcode::ThrowError,
-        } if *pc == BytecodePc::ZERO
-    ));
+    for value in 0..=3 {
+        let instructions = [(
+            FinalOpcode::ThrowError,
+            Operands::AtomU8 {
+                atom: AtomPoolIndex::new(0),
+                value,
+            },
+        )];
+        let error = verified_single(
+            &instructions,
+            &[atom("f"), atom("argument"), atom("local")],
+            &variables,
+            source(
+                text,
+                function_span,
+                Some(SourceByteSpan::new(9, 10)),
+                &[(0, function_span)],
+            ),
+        )
+        .expect_err("throw-error kinds require their exact compiler authority");
+        assert!(matches!(
+            error.kind(),
+            BytecodeVerificationErrorKind::UnsupportedCompilerOpcode {
+                pc,
+                opcode: FinalOpcode::ThrowError,
+            } if *pc == BytecodePc::ZERO
+        ));
+    }
 }
 
 #[test]
@@ -2596,6 +2733,29 @@ fn final_authority_requires_a_typed_method_closure_and_accessor_arity() {
         error.kind(),
         BytecodeVerificationErrorKind::OrdinaryMethodTemplatePlacementMismatch { .. }
     ));
+
+    let setter_with_default = [
+        (FinalOpcode::Object, Operands::None),
+        (FinalOpcode::FClosure8, Operands::Const8(0)),
+        (
+            FinalOpcode::DefineMethod,
+            Operands::AtomU8 {
+                atom: AtomPoolIndex::new(1),
+                value: 6,
+            },
+        ),
+        (FinalOpcode::Return, Operands::None),
+    ];
+    verify_compiler_bytecode_graph(
+        define_method_input_with_child_counts(
+            &setter_with_default,
+            CompilerExecutableKind::OrdinaryMethod,
+            1,
+            0,
+        ),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("setter arity uses its one formal slot, not its zero observable length");
 }
 
 #[test]
@@ -3097,6 +3257,22 @@ fn typed_stack_input_with_captures(
     variables: &[VariableDefinition],
     captures: &[CompilerCapturedBinding],
 ) -> UnverifiedCompilerBytecodeGraph {
+    typed_stack_input_with_profile(instructions, atoms, variables, captures, false)
+}
+
+fn typed_async_stack_input(
+    instructions: &[(FinalOpcode, Operands)],
+) -> UnverifiedCompilerBytecodeGraph {
+    typed_stack_input_with_profile(instructions, &[], &[], &[], true)
+}
+
+fn typed_stack_input_with_profile(
+    instructions: &[(FinalOpcode, Operands)],
+    atoms: &[CompilerAtom],
+    variables: &[VariableDefinition],
+    captures: &[CompilerCapturedBinding],
+    asynchronous: bool,
+) -> UnverifiedCompilerBytecodeGraph {
     let has_direct_eval = instructions
         .iter()
         .any(|(opcode, _)| matches!(opcode, FinalOpcode::Eval | FinalOpcode::ApplyEval));
@@ -3110,11 +3286,20 @@ fn typed_stack_input_with_captures(
         })
         .max();
     let locals = u32::try_from(variables.len()).expect("fixture local count");
-    let header = UnverifiedFunctionHeader::ordinary_source_function_with_variable_references(
-        false,
-        0,
-        u32::try_from(captures.len()).expect("fixture capture count"),
-    )
+    let capture_count = u32::try_from(captures.len()).expect("fixture capture count");
+    let header = if asynchronous {
+        UnverifiedFunctionHeader::async_source_function_with_variable_references(
+            false,
+            0,
+            capture_count,
+        )
+    } else {
+        UnverifiedFunctionHeader::ordinary_source_function_with_variable_references(
+            false,
+            0,
+            capture_count,
+        )
+    }
     .with_simple_parameter_list(parameter_initialization_end.is_none());
     let flow = flow_with_header(
         instructions,
@@ -3160,7 +3345,12 @@ fn typed_stack_input_with_captures(
             Arc::from(variables),
             Arc::from([]),
             source,
-        )]),
+        )
+        .with_executable_kind(if asynchronous {
+            CompilerExecutableKind::AsyncFunction
+        } else {
+            CompilerExecutableKind::OrdinaryFunction
+        })]),
     )
 }
 
@@ -3547,10 +3737,28 @@ fn catch_marker_certificate_accepts_normal_throw_and_nested_for_in_cleanup() {
         BytecodeGraphVerificationLimits::default(),
     )
     .expect("a handler inside a for-in region retains only the enclosing iterator marker");
+
+    let caught_throw_inside_for_in = [
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::ForInStart, Operands::None),
+        (FinalOpcode::Catch, Operands::Label(8)),
+        (FinalOpcode::Push1, Operands::NoneInt),
+        (FinalOpcode::Throw, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+    ];
+    verify_compiler_bytecode_graph(
+        typed_stack_input(&caught_throw_inside_for_in, &[], &[]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("a caught throw preserves a for-in marker owned outside its handler");
 }
 
 #[test]
-fn catch_marker_certificate_rejects_ordinary_values_stranded_by_throw() {
+fn catch_marker_certificate_accepts_ordinary_values_abandoned_by_throw() {
     let instructions = [
         (FinalOpcode::Catch, Operands::Label(7)),
         (FinalOpcode::Push1, Operands::NoneInt),
@@ -3560,21 +3768,22 @@ fn catch_marker_certificate_rejects_ordinary_values_stranded_by_throw() {
         (FinalOpcode::ReturnUndef, Operands::None),
     ];
 
-    let error = verify_compiler_bytecode_graph(
+    verify_compiler_bytecode_graph(
         typed_stack_input(&instructions, &[], &[]),
         BytecodeGraphVerificationLimits::default(),
     )
-    .expect_err("throw may retain active catch markers but no ordinary operand values");
-    assert!(
-        matches!(
-            error.kind(),
-            BytecodeVerificationErrorKind::CatchMarkerStackMismatch {
-                opcode: FinalOpcode::Throw,
-                ..
-            }
-        ),
-        "{error:?}"
-    );
+    .expect("throw abandons ordinary operand values when unwinding to its catch marker");
+
+    let without_handler = [
+        (FinalOpcode::Push1, Operands::NoneInt),
+        (FinalOpcode::Push2, Operands::NoneInt),
+        (FinalOpcode::Throw, Operands::None),
+    ];
+    verify_compiler_bytecode_graph(
+        typed_stack_input(&without_handler, &[], &[]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("an uncaught throw abandons ordinary values with its frame");
 }
 
 #[test]
@@ -4763,6 +4972,120 @@ fn for_of_marker_certificate_accepts_exact_loop_close_return_and_throw_grammars(
     .expect("a complete for-of catch record may remain for exceptional VM cleanup");
 }
 
+#[track_caller]
+fn assert_for_await_of_stack_mismatch(
+    instructions: &[(FinalOpcode, Operands)],
+    opcode: FinalOpcode,
+) {
+    let error = verify_compiler_bytecode_graph(
+        typed_async_stack_input(instructions),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("mixed, unawaited, and multiply awaited iterator records stay fail closed");
+    assert!(
+        matches!(
+            error.kind(),
+            BytecodeVerificationErrorKind::ForOfIteratorStackMismatch {
+                opcode: actual,
+                ..
+            } if *actual == opcode
+        ),
+        "{opcode}: {error:?}"
+    );
+}
+
+#[test]
+fn for_await_of_marker_certificate_requires_the_exact_awaited_step_sequence() {
+    let loop_body = [
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::ForAwaitOfStart, Operands::None),
+        (FinalOpcode::ForAwaitOfNext, Operands::None),
+        (FinalOpcode::Await, Operands::None),
+        (FinalOpcode::IteratorGetValueDone, Operands::None),
+        (FinalOpcode::IfFalse8, Operands::Label8(5)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::IteratorClose, Operands::None),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::ReturnAsync, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Goto8, Operands::Label8(-11)),
+    ];
+    verify_compiler_bytecode_graph(
+        typed_async_stack_input(&loop_body),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("an async iterator step is awaited before value/done extraction");
+
+    let malformed = [
+        (
+            vec![
+                (FinalOpcode::Undefined, Operands::None),
+                (FinalOpcode::ForOfStart, Operands::None),
+                (FinalOpcode::ForAwaitOfNext, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::Undefined, Operands::None),
+                (FinalOpcode::ReturnAsync, Operands::None),
+            ],
+            FinalOpcode::ForAwaitOfNext,
+        ),
+        (
+            vec![
+                (FinalOpcode::Undefined, Operands::None),
+                (FinalOpcode::ForAwaitOfStart, Operands::None),
+                (FinalOpcode::ForOfNext, Operands::U8(0)),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::Undefined, Operands::None),
+                (FinalOpcode::ReturnAsync, Operands::None),
+            ],
+            FinalOpcode::ForOfNext,
+        ),
+        (
+            vec![
+                (FinalOpcode::Undefined, Operands::None),
+                (FinalOpcode::ForAwaitOfStart, Operands::None),
+                (FinalOpcode::ForAwaitOfNext, Operands::None),
+                (FinalOpcode::IteratorGetValueDone, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::Undefined, Operands::None),
+                (FinalOpcode::ReturnAsync, Operands::None),
+            ],
+            FinalOpcode::IteratorGetValueDone,
+        ),
+        (
+            vec![
+                (FinalOpcode::Undefined, Operands::None),
+                (FinalOpcode::ForAwaitOfStart, Operands::None),
+                (FinalOpcode::ForAwaitOfNext, Operands::None),
+                (FinalOpcode::Await, Operands::None),
+                (FinalOpcode::Await, Operands::None),
+                (FinalOpcode::IteratorGetValueDone, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::Undefined, Operands::None),
+                (FinalOpcode::ReturnAsync, Operands::None),
+            ],
+            FinalOpcode::IteratorGetValueDone,
+        ),
+    ];
+    for (instructions, opcode) in malformed {
+        assert_for_await_of_stack_mismatch(&instructions, opcode);
+    }
+}
+
 #[test]
 fn for_of_head_value_certificate_allows_const_reinitialization_on_backedges() {
     let definition = VariableDefinition::new(
@@ -5503,14 +5826,45 @@ fn define_method_input(
     define_method_input_with_root_arguments(root_instructions, child_kind, child_arguments, 0)
 }
 
-#[allow(
-    clippy::too_many_lines,
-    reason = "the two-function authority fixture keeps graph, metadata, source, and header variants together"
-)]
+fn define_method_input_with_child_counts(
+    root_instructions: &[(FinalOpcode, Operands)],
+    child_kind: CompilerExecutableKind,
+    child_arguments: u32,
+    child_defined_arguments: u32,
+) -> UnverifiedCompilerBytecodeGraph {
+    define_method_input_with_counts(
+        root_instructions,
+        child_kind,
+        child_arguments,
+        child_defined_arguments,
+        0,
+    )
+}
+
 fn define_method_input_with_root_arguments(
     root_instructions: &[(FinalOpcode, Operands)],
     child_kind: CompilerExecutableKind,
     child_arguments: u32,
+    root_arguments: u32,
+) -> UnverifiedCompilerBytecodeGraph {
+    define_method_input_with_counts(
+        root_instructions,
+        child_kind,
+        child_arguments,
+        child_arguments,
+        root_arguments,
+    )
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the two-function authority fixture keeps graph, metadata, source, and header variants together"
+)]
+fn define_method_input_with_counts(
+    root_instructions: &[(FinalOpcode, Operands)],
+    child_kind: CompilerExecutableKind,
+    child_arguments: u32,
+    child_defined_arguments: u32,
     root_arguments: u32,
 ) -> UnverifiedCompilerBytecodeGraph {
     let root_flow = flow_with_header(
@@ -5523,6 +5877,48 @@ fn define_method_input_with_root_arguments(
         &[CompilerConstantKind::Function],
         UnverifiedFunctionHeader::ordinary_source_function(false, root_arguments),
     );
+    let child_header = match child_kind {
+        CompilerExecutableKind::OrdinaryFunction => {
+            UnverifiedFunctionHeader::ordinary_source_function(false, child_defined_arguments)
+        }
+        CompilerExecutableKind::OrdinaryMethod => {
+            UnverifiedFunctionHeader::ordinary_method_with_variable_references(
+                false,
+                child_defined_arguments,
+                0,
+            )
+        }
+        CompilerExecutableKind::ClassInstanceInitializer => {
+            panic!("a define_method child cannot be a hidden class initializer")
+        }
+        CompilerExecutableKind::ClassConstructor => {
+            UnverifiedFunctionHeader::class_constructor_with_variable_references(
+                true,
+                child_defined_arguments,
+                0,
+            )
+        }
+        CompilerExecutableKind::OrdinaryArrow | CompilerExecutableKind::AsyncArrow => {
+            panic!("a define_method child cannot be an arrow")
+        }
+        CompilerExecutableKind::GlobalScript
+        | CompilerExecutableKind::IndirectEvalScript
+        | CompilerExecutableKind::DirectEvalScript
+        | CompilerExecutableKind::DynamicFunctionScript => {
+            panic!("a define_method child cannot be a Script")
+        }
+        CompilerExecutableKind::GeneratorFunction | CompilerExecutableKind::GeneratorMethod => {
+            panic!("this ordinary-method fixture cannot create a generator child")
+        }
+        CompilerExecutableKind::AsyncFunction | CompilerExecutableKind::AsyncMethod => {
+            panic!("this ordinary-method fixture cannot create an async child")
+        }
+        CompilerExecutableKind::AsyncGeneratorFunction
+        | CompilerExecutableKind::AsyncGeneratorMethod => {
+            panic!("this ordinary-method fixture cannot create an async-generator child")
+        }
+    }
+    .with_simple_parameter_list(child_arguments == child_defined_arguments);
     let child_flow = flow_with_header(
         &[(FinalOpcode::ReturnUndef, Operands::None)],
         child_arguments,
@@ -5531,44 +5927,7 @@ fn define_method_input_with_root_arguments(
         &[],
         0,
         &[],
-        match child_kind {
-            CompilerExecutableKind::OrdinaryFunction => {
-                UnverifiedFunctionHeader::ordinary_source_function(false, child_arguments)
-            }
-            CompilerExecutableKind::OrdinaryMethod => {
-                UnverifiedFunctionHeader::ordinary_method_with_variable_references(
-                    false,
-                    child_arguments,
-                    0,
-                )
-            }
-            CompilerExecutableKind::ClassConstructor => {
-                UnverifiedFunctionHeader::class_constructor_with_variable_references(
-                    true,
-                    child_arguments,
-                    0,
-                )
-            }
-            CompilerExecutableKind::OrdinaryArrow => {
-                panic!("a define_method child cannot be an arrow")
-            }
-            CompilerExecutableKind::GlobalScript
-            | CompilerExecutableKind::IndirectEvalScript
-            | CompilerExecutableKind::DirectEvalScript
-            | CompilerExecutableKind::DynamicFunctionScript => {
-                panic!("a define_method child cannot be a Script")
-            }
-            CompilerExecutableKind::GeneratorFunction | CompilerExecutableKind::GeneratorMethod => {
-                panic!("this ordinary-method fixture cannot create a generator child")
-            }
-            CompilerExecutableKind::AsyncFunction | CompilerExecutableKind::AsyncMethod => {
-                panic!("this ordinary-method fixture cannot create an async child")
-            }
-            CompilerExecutableKind::AsyncGeneratorFunction
-            | CompilerExecutableKind::AsyncGeneratorMethod => {
-                panic!("this ordinary-method fixture cannot create an async-generator child")
-            }
-        },
+        child_header,
     );
     let child_atoms = (0..child_arguments)
         .map(|index| atom(&format!("argument{index}")))
@@ -5995,6 +6354,60 @@ fn ordinary_arrow_profile_is_lexical_and_nonconstructable() {
             opcode: FinalOpcode::SpecialObject,
         } if *pc == BytecodePc::ZERO
     ));
+}
+
+#[test]
+fn async_arrow_profile_combines_lexical_authority_with_async_completion() {
+    let text = "async()=>this";
+    let function_span = SourceByteSpan::new(0, u32::try_from(text.len()).expect("source length"));
+    let mappings = [(0, function_span), (1, function_span)];
+    let input = profiled_single_input(
+        &[
+            (FinalOpcode::PushThis, Operands::None),
+            (FinalOpcode::ReturnAsync, Operands::None),
+        ],
+        UnverifiedFunctionHeader::async_arrow_with_variable_references(false, 0, 0),
+        CompilerExecutableKind::AsyncArrow,
+        &[],
+        None,
+        &[],
+        0,
+        0,
+        &[],
+        source(text, function_span, None, &mappings),
+    );
+    let verified =
+        verify_compiler_bytecode_graph(input, BytecodeGraphVerificationLimits::default())
+            .expect("async arrow has lexical receiver and async-return authority");
+    let header = verified.root().function().control_flow().function_header();
+    assert_eq!(header.kind(), quickjs_bytecode::FunctionKind::Async);
+    assert_eq!(header.flags().bits(), 0x0462);
+    assert!(!header.flags().has_prototype());
+    assert!(!header.flags().arguments_allowed());
+    assert!(header.flags().new_target_allowed());
+
+    let wrong_profile = profiled_single_input(
+        &[
+            (FinalOpcode::PushThis, Operands::None),
+            (FinalOpcode::ReturnAsync, Operands::None),
+        ],
+        UnverifiedFunctionHeader::async_source_function_with_variable_references(false, 0, 0),
+        CompilerExecutableKind::AsyncArrow,
+        &[],
+        None,
+        &[],
+        0,
+        0,
+        &[],
+        source(text, function_span, None, &mappings),
+    );
+    let error =
+        verify_compiler_bytecode_graph(wrong_profile, BytecodeGraphVerificationLimits::default())
+            .expect_err("async source-function flags cannot impersonate an async arrow");
+    assert_eq!(
+        error.kind(),
+        &BytecodeVerificationErrorKind::UnsupportedFunctionHeader
+    );
 }
 
 #[test]
@@ -6477,7 +6890,7 @@ fn direct_eval_contextual_special_objects_require_exact_header_authority() {
     verify_compiler_bytecode_graph(contextual, BytecodeGraphVerificationLimits::default())
         .expect("direct eval may use only the contextual capabilities certified in its header");
 
-    for selector in [3, 4, 5] {
+    for selector in [3, 4, 5, 6] {
         let missing_capability = input_for(
             &[
                 (FinalOpcode::SpecialObject, Operands::U8(selector)),
@@ -6519,6 +6932,146 @@ fn direct_eval_contextual_special_objects_require_exact_header_authority() {
             &BytecodeVerificationErrorKind::UnsupportedFunctionHeader
         );
     }
+}
+
+fn direct_eval_instance_elements_input(
+    instructions: &[(FinalOpcode, Operands)],
+    capabilities: DirectEvalFunctionCapabilities,
+    pcs: &[u32],
+) -> UnverifiedCompilerBytecodeGraph {
+    let text = "super()";
+    let function_span = SourceByteSpan::new(0, u32::try_from(text.len()).expect("source length"));
+    let mappings = pcs
+        .iter()
+        .copied()
+        .map(|pc| (pc, function_span))
+        .collect::<Vec<_>>();
+    profiled_single_input(
+        instructions,
+        UnverifiedFunctionHeader::direct_eval_script(false, 0, capabilities),
+        CompilerExecutableKind::DirectEvalScript,
+        &[],
+        None,
+        &[],
+        0,
+        0,
+        &[],
+        source(text, function_span, None, &mappings),
+    )
+}
+
+fn direct_eval_instance_elements_capabilities() -> DirectEvalFunctionCapabilities {
+    DirectEvalFunctionCapabilities::new(true, false, true).with_instance_elements(true)
+}
+
+#[test]
+fn direct_eval_instance_initializer_accepts_the_exact_compiler_sequence() {
+    let exact = [
+        (FinalOpcode::SpecialObject, Operands::U8(4)),
+        (FinalOpcode::GetSuper, Operands::None),
+        (FinalOpcode::SpecialObject, Operands::U8(3)),
+        (
+            FinalOpcode::CallConstructor,
+            Operands::NPop { argument_count: 0 },
+        ),
+        (FinalOpcode::CheckCtorReturn, Operands::None),
+        (FinalOpcode::SpecialObject, Operands::U8(6)),
+        (FinalOpcode::PushThis, Operands::None),
+        (FinalOpcode::Swap, Operands::None),
+        (
+            FinalOpcode::CallMethod,
+            Operands::NPop { argument_count: 0 },
+        ),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Return, Operands::None),
+    ];
+    let exact_pcs = [0, 2, 3, 5, 8, 9, 11, 12, 13, 16, 17, 18];
+    verify_compiler_bytecode_graph(
+        direct_eval_instance_elements_input(
+            &exact,
+            direct_eval_instance_elements_capabilities(),
+            &exact_pcs,
+        ),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("the compiler's contextual instance-initializer sequence is certified");
+}
+
+#[test]
+fn direct_eval_instance_initializer_header_requires_super_authority() {
+    let missing_super = direct_eval_instance_elements_input(
+        &[(FinalOpcode::ReturnUndef, Operands::None)],
+        DirectEvalFunctionCapabilities::default().with_instance_elements(true),
+        &[0],
+    );
+    let error =
+        verify_compiler_bytecode_graph(missing_super, BytecodeGraphVerificationLimits::default())
+            .expect_err(
+                "instance-element authority cannot exist without contextual super-call authority",
+            );
+    assert_eq!(
+        error.kind(),
+        &BytecodeVerificationErrorKind::UnsupportedFunctionHeader
+    );
+}
+
+#[test]
+fn direct_eval_super_return_requires_the_contextual_instance_initializer() {
+    let missing_initializer = [
+        (FinalOpcode::SpecialObject, Operands::U8(4)),
+        (FinalOpcode::GetSuper, Operands::None),
+        (FinalOpcode::SpecialObject, Operands::U8(3)),
+        (
+            FinalOpcode::CallConstructor,
+            Operands::NPop { argument_count: 0 },
+        ),
+        (FinalOpcode::CheckCtorReturn, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+    ];
+    let error = verify_compiler_bytecode_graph(
+        direct_eval_instance_elements_input(
+            &missing_initializer,
+            direct_eval_instance_elements_capabilities(),
+            &[0, 2, 3, 5, 8, 9, 10, 11],
+        ),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("every contextual super return must run the hidden initializer");
+    assert!(matches!(
+        error.kind(),
+        BytecodeVerificationErrorKind::UnsupportedCompilerOpcode {
+            pc,
+            opcode: FinalOpcode::CheckCtorReturn,
+        } if *pc == BytecodePc::new(8)
+    ));
+}
+
+#[test]
+fn direct_eval_instance_initializer_selector_cannot_escape_its_sequence() {
+    let stray_initializer = direct_eval_instance_elements_input(
+        &[
+            (FinalOpcode::SpecialObject, Operands::U8(6)),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::ReturnUndef, Operands::None),
+        ],
+        direct_eval_instance_elements_capabilities(),
+        &[0, 2, 3],
+    );
+    let error = verify_compiler_bytecode_graph(
+        stray_initializer,
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("the hidden initializer selector is not general direct-eval authority");
+    assert!(matches!(
+        error.kind(),
+        BytecodeVerificationErrorKind::UnsupportedCompilerOpcode {
+            pc,
+            opcode: FinalOpcode::SpecialObject,
+        } if *pc == BytecodePc::ZERO
+    ));
 }
 
 fn assert_contextual_special_object_rejected(input: UnverifiedCompilerBytecodeGraph) {
@@ -8004,7 +8557,7 @@ fn parameter_expression_authority_requires_non_simple_reduced_length_and_local_t
 
 #[test]
 #[allow(clippy::too_many_lines)]
-fn policy_analysis_rejects_unchecked_tdz_reads_and_noncompiler_opcodes() {
+fn policy_analysis_rejects_unchecked_tdz_reads_and_retains_checked_immutable_writes() {
     let variables = [
         VariableDefinition::new(
             Some(AtomPoolIndex::new(1)),
@@ -8056,7 +8609,7 @@ fn policy_analysis_rejects_unchecked_tdz_reads_and_noncompiler_opcodes() {
             None,
         ),
     ];
-    let error = verified_single(
+    let verified = verified_single(
         &[
             (FinalOpcode::Push1, Operands::NoneInt),
             (FinalOpcode::PutLoc0, Operands::NoneLoc),
@@ -8075,14 +8628,11 @@ fn policy_analysis_rejects_unchecked_tdz_reads_and_noncompiler_opcodes() {
             ],
         ),
     )
-    .expect_err("a bytecode write cannot mutate the named-function self binding");
-    assert!(matches!(
-        error.kind(),
-        BytecodeVerificationErrorKind::BindingPolicyViolation {
-            reason: BindingPolicyViolationReason::ImmutableWrite,
-            ..
-        }
-    ));
+    .expect("a named-function self write retains immutable policy for the VM");
+    assert_eq!(
+        verified.root().metadata().variables()[1].policy(),
+        function_name_policy()
+    );
 }
 
 #[test]
@@ -8409,6 +8959,54 @@ fn frame_state_distinguishes_proven_let_access_from_repeated_const_initializatio
     assert!(matches!(
         error.kind(),
         BytecodeVerificationErrorKind::BindingPolicyViolation { .. }
+    ));
+}
+
+#[test]
+fn checked_lexical_initialization_requires_an_uninitialized_tdz_cell() {
+    let definition = VariableDefinition::new(
+        Some(AtomPoolIndex::new(0)),
+        ScopeLink::End,
+        const_policy(),
+        true,
+        None,
+    );
+    let valid = [
+        (FinalOpcode::SetLocUninitialized, Operands::Loc(0)),
+        (FinalOpcode::Push1, Operands::NoneInt),
+        (FinalOpcode::PutLocCheckInit, Operands::Loc(0)),
+        (FinalOpcode::ReturnUndef, Operands::None),
+    ];
+    verify_compiler_bytecode_graph(
+        typed_stack_input(&valid, &[atom("value")], std::slice::from_ref(&definition)),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("checked initialization consumes one uninitialized lexical cell");
+
+    let repeated = [
+        (FinalOpcode::SetLocUninitialized, Operands::Loc(0)),
+        (FinalOpcode::Push1, Operands::NoneInt),
+        (FinalOpcode::PutLocCheckInit, Operands::Loc(0)),
+        (FinalOpcode::Push2, Operands::NoneInt),
+        (FinalOpcode::PutLocCheckInit, Operands::Loc(0)),
+        (FinalOpcode::ReturnUndef, Operands::None),
+    ];
+    let error = verify_compiler_bytecode_graph(
+        typed_stack_input(
+            &repeated,
+            &[atom("value")],
+            std::slice::from_ref(&definition),
+        ),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("checked initialization cannot overwrite an initialized lexical cell");
+    assert!(matches!(
+        error.kind(),
+        BytecodeVerificationErrorKind::BindingPolicyViolation {
+            slot: BindingSlot::Local(0),
+            reason: BindingPolicyViolationReason::InvalidLexicalInitialization,
+            ..
+        }
     ));
 }
 

@@ -48,6 +48,7 @@ fn policy(kind: CompilerBindingKind) -> CompilerBindingPolicy {
         | CompilerBindingKind::FunctionName
         | CompilerBindingKind::ClassName
         | CompilerBindingKind::ClassFieldKey
+        | CompilerBindingKind::ClassInstanceInitializer
         | CompilerBindingKind::ClassPrivateName
         | CompilerBindingKind::ClassStaticReceiver
         | CompilerBindingKind::WithObject

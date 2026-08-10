@@ -69,6 +69,54 @@ fn global_script_returns_a_directive_expression_completion() {
 }
 
 #[test]
+fn proxied_derived_new_target_enforces_the_frozen_class_prototype_get_invariant() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+
+    let value = evaluate_script(
+        &mut context,
+        "class Base{}function get(target,key,receiver){if(key==='prototype')return 42;return Reflect.get(target,key,receiver);}class Explicit extends Base{constructor(){super();}}class Default extends Base{}let explicit=false;let defaulted=false;try{new (new Proxy(Explicit,{get}))();}catch(error){explicit=error.name==='TypeError';}try{new (new Proxy(Default,{get}))();}catch(error){defaulted=error.name==='TypeError';}explicit+'|'+defaulted;",
+        "class-proxy-new-target-prototype.js",
+        ScriptLimits::default(),
+    )
+    .expect("proxied derived construction invariant");
+    assert_eq!(string(&value), "true|true");
+}
+
+#[test]
+fn ordinary_construction_observes_new_target_prototype_before_the_body() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+
+    let value = evaluate_script(
+        &mut context,
+        "let body=0;let gets=0;\
+         function Target(){body++;}\
+         function NewTarget(){}\
+         let primitive=new Proxy(NewTarget,{get(target,key,receiver){\
+             if(key==='prototype'){gets++;return 42;}\
+             return Reflect.get(target,key,receiver);\
+         }});\
+         let value=Reflect.construct(Target,[],primitive);\
+         let fallback=Object.getPrototypeOf(value)===Object.prototype&&body===1&&gets===1;\
+         body=0;gets=0;\
+         let abrupt=new Proxy(NewTarget,{get(target,key,receiver){\
+             if(key==='prototype'){gets++;throw 17;}\
+             return Reflect.get(target,key,receiver);\
+         }});\
+         let preserved=false;\
+         try{Reflect.construct(Target,[],abrupt);}catch(error){preserved=error===17;}\
+         fallback+'|'+preserved+'|'+body+'|'+gets;",
+        "ordinary-constructor-new-target-prototype.js",
+        ScriptLimits::default(),
+    )
+    .expect("observable ordinary constructor prototype lookup");
+    assert_eq!(string(&value), "true|true|0|1");
+}
+
+#[test]
 fn annex_b_catch_var_initializer_updates_only_the_catch_parameter() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
@@ -161,6 +209,25 @@ fn annex_b_is_html_dda_host_object_uses_only_the_three_special_semantics() {
             .mark_host_defined_is_html_dda(&primitive)
             .expect("same-runtime primitive")
     );
+}
+
+#[test]
+fn default_private_element_add_accepts_non_extensible_ordinary_objects() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+
+    let value = evaluate_script(
+        &mut context,
+        "class Base{constructor(value){return value;}}\
+         class Box extends Base{#value=42;read(){return this.#value;}static has(value){return #value in value;}}\
+         var target=Object.preventExtensions({});var box=new Box(target);\
+         box===target&&Box.has(target)&&Box.prototype.read.call(box)===42&&Reflect.ownKeys(target).length===0;",
+        "default-private-element-add.js",
+        ScriptLimits::default(),
+    )
+    .expect("default private-element addition");
+    assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
 }
 
 #[test]
@@ -356,6 +423,89 @@ fn global_lexical_access_preserves_tdz_and_immutable_assignment_errors() {
     )
     .expect_err("immutable assignment");
     assert_eq!(exception_kind(immutable), ExceptionKind::TypeError);
+}
+
+#[test]
+fn named_class_inner_bindings_are_immutable_tdz_scoped_and_distinct() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+
+    let value = evaluate_script(
+        &mut context,
+        r#"
+        let bits = 0;
+        class Declaration { tryBreak() { Declaration = 4; } }
+        let immutable = true;
+        for (let Class of [Declaration, class Expression { tryBreak() { Expression = 4; } }]) {
+          try { new Class().tryBreak(); immutable = false; }
+          catch (error) { if (error.name !== "TypeError") immutable = false; }
+        }
+        if (immutable) bits += 1;
+        {
+          class BlockDeclaration { tryBreak() { BlockDeclaration = 4; } }
+          let blockImmutable = true;
+          for (let Class of [BlockDeclaration, class BlockExpression { tryBreak() { BlockExpression = 4; } }]) {
+            try { new Class().tryBreak(); blockImmutable = false; }
+            catch (error) { if (error.name !== "TypeError") blockImmutable = false; }
+          }
+          if (blockImmutable) bits += 2;
+        }
+        let declarationTdz = false;
+        try { eval("class EvalDeclaration { [EvalDeclaration]() {} }"); }
+        catch (error) { declarationTdz = error.name === "ReferenceError"; }
+        if (declarationTdz) bits += 4;
+        let expressionTdz = false;
+        try { eval("(class EvalExpression { [EvalExpression]() {} })"); }
+        catch (error) { expressionTdz = error.name === "ReferenceError"; }
+        if (expressionTdz) bits += 8;
+        {
+          class Outer {
+            test() {
+              class Inner { test() { return Outer === Inner; } }
+              return new Inner().test();
+            }
+          }
+          let declarationDistinct = !new Outer().test();
+          let expressionDistinct = !new class ExpressionOuter {
+            test() {
+              return new class ExpressionInner {
+                test() { return ExpressionOuter === ExpressionInner; }
+              }().test();
+            }
+          }().test();
+          if (declarationDistinct && expressionDistinct) bits += 16;
+        }
+        {
+          class ShadowDeclaration { test(ShadowDeclaration) { return ShadowDeclaration; } }
+          let declarationShadow = new ShadowDeclaration().test(4) === 4;
+          let expressionShadow = new class ShadowExpression {
+            test(ShadowExpression) { return ShadowExpression; }
+          }().test(4) === 4;
+          if (declarationShadow && expressionShadow) bits += 32;
+        }
+        class ExistingName { static method() { throw new Error("outer"); } }
+        let innerShadowsOuter = new class ExistingName {
+          static method() { return 4; }
+          test() { return ExistingName.method(); }
+        }().test() === 4;
+        if (innerShadowsOuter) bits += 64;
+        let original;
+        class MutableOuter { same() { return MutableOuter === original; } }
+        original = MutableOuter;
+        MutableOuter = 13;
+        if (MutableOuter === 13 && new original().same()) bits += 128;
+        bits;
+        "#,
+        "class-inner-bindings.js",
+        ScriptLimits::default(),
+    )
+    .expect("class inner-binding Script");
+    let bits = number(&value);
+    assert!(
+        bits.strict_equals(JsNumber::from_i32(255)),
+        "bits: {bits:?}"
+    );
 }
 
 #[test]

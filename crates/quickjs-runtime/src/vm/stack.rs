@@ -304,6 +304,7 @@ pub(super) fn push_for_of_record(
     frame: &mut Frame,
     iterator: StoredValue,
     next: StoredValue,
+    asynchronous: bool,
     return_to: CallReturn,
 ) -> Result<(), ExecutionError> {
     if !matches!(return_to.disposition, ReturnDisposition::Push) {
@@ -320,9 +321,10 @@ pub(super) fn push_for_of_record(
     }
     push(frame, iterator);
     push(frame, next);
-    frame
-        .stack
-        .push(OperandStackEntry::ForOfCatch { active: true });
+    frame.stack.push(OperandStackEntry::ForOfCatch {
+        active: true,
+        asynchronous,
+    });
     frame.instruction = return_to.instruction;
     Ok(())
 }
@@ -331,7 +333,7 @@ pub(super) fn deactivate_for_of_record(
     frame: &mut Frame,
     allow_return_dummy: bool,
     offset: u8,
-) -> Result<(StoredValue, StoredValue), EngineFault> {
+) -> Result<(StoredValue, StoredValue, bool), EngineFault> {
     // The record marker sits `offset` slots below the stack top: the
     // array-destructuring rest collector keeps its fresh array and cursor
     // above the record while stepping the shared iterator.
@@ -343,7 +345,7 @@ pub(super) fn deactivate_for_of_record(
             message: "verified for-of operation has no record marker",
         })?;
     match frame.stack.get_mut(marker) {
-        Some(OperandStackEntry::ForOfCatch { active }) if allow_return_dummy || *active => {
+        Some(OperandStackEntry::ForOfCatch { active, .. }) if allow_return_dummy || *active => {
             *active = false;
         }
         Some(OperandStackEntry::JavaScript(StoredValue::Undefined)) if allow_return_dummy => {}
@@ -365,7 +367,16 @@ pub(super) fn deactivate_for_of_record(
     let next_index = iterator_index.saturating_add(1);
     let iterator = stack_value_at(frame, iterator_index)?.duplicate();
     let next = stack_value_at(frame, next_index)?.duplicate();
-    Ok((iterator, next))
+    let asynchronous = match frame.stack.get(marker) {
+        Some(OperandStackEntry::ForOfCatch { asynchronous, .. }) => *asynchronous,
+        Some(OperandStackEntry::JavaScript(StoredValue::Undefined)) if allow_return_dummy => false,
+        _ => {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "verified for-of operation lost its record marker",
+            });
+        }
+    };
+    Ok((iterator, next, asynchronous))
 }
 
 pub(super) fn finish_for_of_step(
@@ -392,7 +403,7 @@ pub(super) fn finish_for_of_step(
             message: "for-of step completed without its record marker",
         })?;
     match frame.stack.get_mut(marker) {
-        Some(OperandStackEntry::ForOfCatch { active }) if !*active => {
+        Some(OperandStackEntry::ForOfCatch { active, .. }) if !*active => {
             *active = !done;
         }
         Some(
@@ -436,6 +447,18 @@ pub(super) fn finish_for_of_close(
         }
         .into());
     }
+    if matches!(
+        frame.pending_async_iterator_close,
+        Some(PendingAsyncIteratorClose::Normal)
+    ) {
+        frame.pending_async_iterator_close = None;
+    }
+    finish_for_of_close_record(frame)?;
+    frame.instruction = return_to.instruction;
+    Ok(())
+}
+
+pub(super) fn finish_for_of_close_record(frame: &mut Frame) -> Result<(), ExecutionError> {
     let marker = frame
         .stack
         .len()
@@ -446,7 +469,7 @@ pub(super) fn finish_for_of_close(
     if !matches!(
         frame.stack.get(marker),
         Some(
-            OperandStackEntry::ForOfCatch { active: false }
+            OperandStackEntry::ForOfCatch { active: false, .. }
                 | OperandStackEntry::JavaScript(StoredValue::Undefined)
         )
     ) || marker < 2
@@ -457,22 +480,24 @@ pub(super) fn finish_for_of_close(
         .into());
     }
     frame.stack.truncate(marker - 2);
-    frame.instruction = return_to.instruction;
     Ok(())
 }
 
 pub(super) fn take_for_of_record_at(
     frame: &mut Frame,
     marker: usize,
-) -> Result<(StoredValue, StoredValue, bool), EngineFault> {
+) -> Result<(StoredValue, StoredValue, bool, bool), EngineFault> {
     if marker < 2 || marker >= frame.stack.len() {
         return Err(EngineFault::RuntimeInvariant {
             message: "exception unwinder found an incomplete for-of record",
         });
     }
     frame.stack.truncate(marker.saturating_add(1));
-    let active = match frame.stack.pop() {
-        Some(OperandStackEntry::ForOfCatch { active }) => active,
+    let (active, asynchronous) = match frame.stack.pop() {
+        Some(OperandStackEntry::ForOfCatch {
+            active,
+            asynchronous,
+        }) => (active, asynchronous),
         Some(
             OperandStackEntry::JavaScript(_)
             | OperandStackEntry::Catch { .. }
@@ -486,7 +511,7 @@ pub(super) fn take_for_of_record_at(
     };
     let next = pop(frame)?;
     let iterator = pop(frame)?;
-    Ok((iterator, next, active))
+    Ok((iterator, next, active, asynchronous))
 }
 
 pub(super) fn drop_stack_entry(frame: &mut Frame) -> Result<(), EngineFault> {

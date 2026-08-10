@@ -103,6 +103,22 @@ pub(super) enum PropertyReadOutcome {
     Failed(PropertyFailure),
 }
 
+pub(super) enum ObservablePropertyReadOutcome {
+    Complete(PropertyReadOutcome),
+    Proxy {
+        reference: HeapReference,
+        receiver: StoredValue,
+    },
+}
+
+enum StaticPropertyBase {
+    Complete(PropertyReadOutcome),
+    Heap {
+        reference: HeapReference,
+        receiver: StoredValue,
+    },
+}
+
 pub(super) enum PropertyWriteOutcome {
     Complete,
     Setter {
@@ -751,68 +767,147 @@ pub(super) fn read_static_property(
     base: &StoredValue,
     key: &PropertyKey,
 ) -> Result<PropertyReadOutcome, ExecutionError> {
+    match static_property_base(runtime, realm, base, key)? {
+        StaticPropertyBase::Complete(outcome) => Ok(outcome),
+        StaticPropertyBase::Heap {
+            reference,
+            receiver,
+        } => read_heap_property_for_receiver(runtime, reference, receiver, key),
+    }
+}
+
+/// Reads one static-key property while preserving the ordinary interpreter
+/// fast path. If the walk reaches a Proxy, the caller receives the exact
+/// reference and original receiver needed to continue through observable
+/// `[[Get]]` semantics.
+pub(super) fn read_observable_static_property(
+    runtime: &Runtime,
+    realm: RealmId,
+    base: &StoredValue,
+    key: &PropertyKey,
+) -> Result<ObservablePropertyReadOutcome, ExecutionError> {
+    let (mut reference, receiver) = match static_property_base(runtime, realm, base, key)? {
+        StaticPropertyBase::Complete(outcome) => {
+            return Ok(ObservablePropertyReadOutcome::Complete(outcome));
+        }
+        StaticPropertyBase::Heap {
+            reference,
+            receiver,
+        } => (reference, receiver),
+    };
+    let mut remaining = runtime
+        .functions
+        .len()
+        .saturating_add(runtime.objects.len())
+        .saturating_add(1);
+    loop {
+        if remaining == 0 {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "ordinary prototype chain contains a cycle",
+            }
+            .into());
+        }
+        remaining -= 1;
+        if runtime.proxy_state(reference)?.is_some() {
+            return Ok(ObservablePropertyReadOutcome::Proxy {
+                reference,
+                receiver,
+            });
+        }
+        if let HeapReference::Object(object) = reference
+            && let TypedArrayOwnProperty::IntegerIndexed(property) =
+                runtime.typed_array_own_property(object, key)?
+        {
+            return Ok(ObservablePropertyReadOutcome::Complete(property.map_or(
+                PropertyReadOutcome::Value(StoredValue::Undefined),
+                |property| property_read_outcome(property, receiver),
+            )));
+        }
+        if let Some(property) = heap_own_property(runtime, reference, key)? {
+            return Ok(ObservablePropertyReadOutcome::Complete(
+                property_read_outcome(property, receiver),
+            ));
+        }
+        let Some(prototype) = runtime.object_record(reference)?.prototype() else {
+            return Ok(ObservablePropertyReadOutcome::Complete(
+                PropertyReadOutcome::Value(StoredValue::Undefined),
+            ));
+        };
+        reference = prototype;
+    }
+}
+
+fn static_property_base(
+    runtime: &Runtime,
+    realm: RealmId,
+    base: &StoredValue,
+    key: &PropertyKey,
+) -> Result<StaticPropertyBase, ExecutionError> {
     Ok(match base {
-        StoredValue::Undefined => PropertyReadOutcome::Failed(PropertyFailure::ReadUndefined),
-        StoredValue::Null => PropertyReadOutcome::Failed(PropertyFailure::ReadNull),
-        StoredValue::Boolean(_) => read_heap_property_for_receiver(
-            runtime,
-            HeapReference::Object(runtime.realm_boolean_prototype(realm)?),
-            base.duplicate(),
-            key,
-        )?,
-        StoredValue::Number(_) => read_heap_property_for_receiver(
-            runtime,
-            HeapReference::Object(runtime.realm_number_prototype(realm)?),
-            base.duplicate(),
-            key,
-        )?,
-        StoredValue::BigInt(_) => read_heap_property_for_receiver(
-            runtime,
-            HeapReference::Object(runtime.realm_bigint_prototype(realm)?),
-            base.duplicate(),
-            key,
-        )?,
-        StoredValue::Symbol(_) => read_heap_property_for_receiver(
-            runtime,
-            HeapReference::Object(runtime.realm_symbol_prototype(realm)?),
-            base.duplicate(),
-            key,
-        )?,
+        StoredValue::Undefined => StaticPropertyBase::Complete(PropertyReadOutcome::Failed(
+            PropertyFailure::ReadUndefined,
+        )),
+        StoredValue::Null => {
+            StaticPropertyBase::Complete(PropertyReadOutcome::Failed(PropertyFailure::ReadNull))
+        }
+        StoredValue::Boolean(_) => StaticPropertyBase::Heap {
+            reference: HeapReference::Object(runtime.realm_boolean_prototype(realm)?),
+            receiver: base.duplicate(),
+        },
+        StoredValue::Number(_) => StaticPropertyBase::Heap {
+            reference: HeapReference::Object(runtime.realm_number_prototype(realm)?),
+            receiver: base.duplicate(),
+        },
+        StoredValue::BigInt(_) => StaticPropertyBase::Heap {
+            reference: HeapReference::Object(runtime.realm_bigint_prototype(realm)?),
+            receiver: base.duplicate(),
+        },
+        StoredValue::Symbol(_) => StaticPropertyBase::Heap {
+            reference: HeapReference::Object(runtime.realm_symbol_prototype(realm)?),
+            receiver: base.duplicate(),
+        },
         StoredValue::String(value) => {
             if let Some(index) = key.as_index()
                 && index.get() < value.len()
             {
-                PropertyReadOutcome::Value(StoredValue::String(
+                StaticPropertyBase::Complete(PropertyReadOutcome::Value(StoredValue::String(
                     value.slice(index.get()..index.get().saturating_add(1))?,
-                ))
+                )))
             } else if key.as_atom().and_then(crate::Atom::predefined_atom)
                 == Some(PredefinedAtom::Length)
             {
-                PropertyReadOutcome::Value(StoredValue::Number(JsNumber::from_f64(f64::from(
-                    value.len(),
-                ))))
+                StaticPropertyBase::Complete(PropertyReadOutcome::Value(StoredValue::Number(
+                    JsNumber::from_f64(f64::from(value.len())),
+                )))
             } else {
-                read_heap_property_for_receiver(
-                    runtime,
-                    HeapReference::Object(runtime.realm_string_prototype(realm)?),
-                    base.duplicate(),
-                    key,
-                )?
+                StaticPropertyBase::Heap {
+                    reference: HeapReference::Object(runtime.realm_string_prototype(realm)?),
+                    receiver: base.duplicate(),
+                }
             }
         }
-        StoredValue::Function(function) => read_heap_property_for_receiver(
-            runtime,
-            HeapReference::Function(*function),
-            base.duplicate(),
-            key,
-        )?,
-        StoredValue::Object(object) => read_heap_property_for_receiver(
-            runtime,
-            HeapReference::Object(*object),
-            base.duplicate(),
-            key,
-        )?,
+        StoredValue::Function(function) => StaticPropertyBase::Heap {
+            reference: HeapReference::Function(*function),
+            receiver: base.duplicate(),
+        },
+        StoredValue::Object(object) => StaticPropertyBase::Heap {
+            reference: HeapReference::Object(*object),
+            receiver: base.duplicate(),
+        },
     })
+}
+
+fn property_read_outcome(property: OwnProperty, receiver: StoredValue) -> PropertyReadOutcome {
+    match property {
+        OwnProperty::Data { value, .. } => PropertyReadOutcome::Value(value),
+        OwnProperty::Accessor {
+            getter: Some(function),
+            ..
+        } => PropertyReadOutcome::Getter { function, receiver },
+        OwnProperty::Accessor { getter: None, .. } => {
+            PropertyReadOutcome::Value(StoredValue::Undefined)
+        }
+    }
 }
 
 pub(super) fn read_heap_property_for_receiver(
@@ -821,17 +916,10 @@ pub(super) fn read_heap_property_for_receiver(
     receiver: StoredValue,
     key: &PropertyKey,
 ) -> Result<PropertyReadOutcome, ExecutionError> {
-    Ok(match lookup_heap_property(runtime, Some(reference), key)? {
-        None => PropertyReadOutcome::Value(StoredValue::Undefined),
-        Some(OwnProperty::Data { value, .. }) => PropertyReadOutcome::Value(value),
-        Some(OwnProperty::Accessor {
-            getter: Some(function),
-            ..
-        }) => PropertyReadOutcome::Getter { function, receiver },
-        Some(OwnProperty::Accessor { getter: None, .. }) => {
-            PropertyReadOutcome::Value(StoredValue::Undefined)
-        }
-    })
+    Ok(lookup_heap_property(runtime, Some(reference), key)?.map_or(
+        PropertyReadOutcome::Value(StoredValue::Undefined),
+        |property| property_read_outcome(property, receiver),
+    ))
 }
 
 pub(super) fn read_heap_property(

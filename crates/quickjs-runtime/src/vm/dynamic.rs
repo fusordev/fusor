@@ -337,6 +337,7 @@ pub(super) fn finish_direct_eval(
     let allows_new_target = request.allows_new_target();
     let allows_super_property = request.allows_super_property();
     let allows_super_call = request.allows_super_call();
+    let has_instance_elements = request.has_instance_elements();
     let inherited_new_target = allows_new_target.then_some(caller.new_target).flatten();
     let inherited_home_object = if allows_super_property {
         Some(
@@ -389,6 +390,7 @@ pub(super) fn finish_direct_eval(
         || flags.new_target_allowed() != allows_new_target
         || flags.super_allowed() != allows_super_property
         || flags.super_call_allowed() != allows_super_call
+        || flags.direct_eval_has_instance_elements() != has_instance_elements
     {
         return Err(NativeFailure::Execution(
             EngineFault::RuntimeInvariant {
@@ -496,7 +498,7 @@ pub(super) fn finish_direct_eval(
     frame.eval_environment = caller.eval_environment.as_ref().map(Rc::clone);
     frame.eval_declaration_environment =
         caller.eval_declaration_environment.as_ref().map(Rc::clone);
-    frame.eval_in_function = caller.eval_in_function;
+    frame.eval_context = caller.eval_context;
     if let Some((constructor, this_cell)) = inherited_derived_environment {
         frame.derived_constructor = Some(constructor);
         frame.derived_this_cell = Some(this_cell);
@@ -586,20 +588,12 @@ pub(super) fn begin_object_prototype_to_string(
                 ObjectPrototypeTag::Boolean
             } else if runtime.boxed_number(*object)?.is_some() {
                 ObjectPrototypeTag::Number
-            } else if runtime.boxed_bigint(*object)?.is_some() {
-                ObjectPrototypeTag::BigInt
             } else if runtime.boxed_string(*object)?.is_some() {
                 ObjectPrototypeTag::String
-            } else if runtime.boxed_symbol(*object)?.is_some() {
-                ObjectPrototypeTag::Symbol
             } else if runtime.date_value(*object)?.is_some() {
                 ObjectPrototypeTag::Date
-            } else if let Some(state) = runtime.array_buffer_state(*object)? {
-                if state.is_shared() {
-                    ObjectPrototypeTag::SharedArrayBuffer
-                } else {
-                    ObjectPrototypeTag::ArrayBuffer
-                }
+            } else if runtime.regexp_state(*object)?.is_some() {
+                ObjectPrototypeTag::RegExp
             } else if runtime
                 .objects
                 .get(*object)
@@ -611,17 +605,6 @@ pub(super) fn begin_object_prototype_to_string(
                 .is_error()
             {
                 ObjectPrototypeTag::Error
-            } else if runtime
-                .objects
-                .get(*object)
-                .ok_or(EngineFault::StaleHeapEdge {
-                    edge: "object",
-                    index: object.index(),
-                    generation: object.generation(),
-                })?
-                .is_promise()
-            {
-                ObjectPrototypeTag::Promise
             } else {
                 ObjectPrototypeTag::Object
             },
@@ -724,7 +707,7 @@ fn begin_boxed_bigint_object_prototype_to_string(
     let temporary = runtime.allocate_boxed_bigint(realm, value)?;
     let receiver = StoredValue::Object(temporary);
     let continuation = IntrinsicGetContinuation::ObjectPrototypeToString {
-        default_tag: ObjectPrototypeTag::BigInt,
+        default_tag: ObjectPrototypeTag::Object,
         temporary_receiver: Some(temporary),
     };
     let outcome = match read_heap_property_for_receiver(
@@ -742,7 +725,7 @@ fn begin_boxed_bigint_object_prototype_to_string(
     match outcome {
         PropertyReadOutcome::Value(tag) => {
             remove_unobservable_temporary_wrapper(runtime, temporary, collection_pending);
-            finish_object_prototype_to_string(ObjectPrototypeTag::BigInt, tag)
+            finish_object_prototype_to_string(ObjectPrototypeTag::Object, tag)
         }
         PropertyReadOutcome::Getter { function, receiver } => {
             Ok(intrinsic_getter_call_with_reserved_continuation(
@@ -883,7 +866,7 @@ fn begin_boxed_symbol_object_prototype_to_string(
     let temporary = runtime.allocate_boxed_symbol(realm, value)?;
     let receiver = StoredValue::Object(temporary);
     let continuation = IntrinsicGetContinuation::ObjectPrototypeToString {
-        default_tag: ObjectPrototypeTag::Symbol,
+        default_tag: ObjectPrototypeTag::Object,
         temporary_receiver: Some(temporary),
     };
     let outcome = match read_heap_property_for_receiver(
@@ -901,7 +884,7 @@ fn begin_boxed_symbol_object_prototype_to_string(
     match outcome {
         PropertyReadOutcome::Value(tag) => {
             remove_unobservable_temporary_wrapper(runtime, temporary, collection_pending);
-            finish_object_prototype_to_string(ObjectPrototypeTag::Symbol, tag)
+            finish_object_prototype_to_string(ObjectPrototypeTag::Object, tag)
         }
         PropertyReadOutcome::Getter { function, receiver } => {
             Ok(intrinsic_getter_call_with_reserved_continuation(
@@ -1279,6 +1262,7 @@ pub(super) fn direct_eval_compile_request(
     frame: &Frame,
     source: JsString,
     scope_index: u16,
+    strict: bool,
 ) -> Result<DirectEvalCompileRequest, ExecutionError> {
     let installed_code = code(runtime, frame.code)?;
     let template = installed_code.authority.function(frame.template).ok_or(
@@ -1320,25 +1304,95 @@ pub(super) fn direct_eval_compile_request(
     } else {
         frame.direct_eval_variable_environment
     };
-    let allows_super_call = match frame.derived_constructor {
-        Some(constructor) => {
-            !runtime
+    let (allows_super_call, has_instance_elements) = match frame.derived_constructor {
+        Some(constructor) => (
+            true,
+            runtime
                 .bytecode_function(constructor)
                 .ok_or(EngineFault::InvalidClosureEnvironment {
                     function: frame.template,
                 })?
-                .has_instance_elements
-        }
-        None => false,
+                .has_instance_elements,
+        ),
+        None => (false, false),
     };
-    Ok(DirectEvalCompileRequest::new(source, frame.strict)
+    Ok(DirectEvalCompileRequest::new(source, strict)
         .with_bindings(bindings.into())
         .with_scope_index(scope_index)
         .with_variable_environment(variable_environment)
-        .with_new_target(frame.eval_in_function)
+        .with_new_target(frame.eval_context.in_function)
         .with_super_property(function_code.home_object.is_some())
         .with_super_call(allows_super_call)
-        .with_arguments_allowed(function_context))
+        .with_instance_elements(has_instance_elements)
+        .with_arguments_allowed(!frame.eval_context.in_class_field_initializer))
+}
+
+/// Resolves the caller's active `this` binding for a direct eval.
+///
+/// Static field initializers and static blocks are lowered inline into their
+/// surrounding executable. Their specification-level `this` environment is
+/// therefore represented by a verified `ClassStaticReceiver` binding instead
+/// of the surrounding frame's dynamic receiver. The eval callsite's adjusted
+/// lexical-scope operand selects the active local cell; an arrow nested in the
+/// initializer carries the same cell as a verified closure capture.
+pub(super) fn direct_eval_receiver(
+    runtime: &Runtime,
+    frame: &Frame,
+    scope_index: u16,
+) -> Result<StoredValue, ExecutionError> {
+    let installed_code = code(runtime, frame.code)?;
+    let template = installed_code.authority.function(frame.template).ok_or(
+        EngineFault::InvalidClosureEnvironment {
+            function: frame.template,
+        },
+    )?;
+    let domains = template.function().control_flow().domains();
+    let argument_count = domains.argument_count();
+    let local_count = domains.local_count();
+    let variables = template.metadata().variables();
+
+    let mut lexical_local = (scope_index >= 2).then(|| u32::from(scope_index - 2));
+    while let Some(local) = lexical_local {
+        if local >= local_count {
+            return Err(EngineFault::InvalidClosureEnvironment {
+                function: frame.template,
+            }
+            .into());
+        }
+        let variable = variables
+            .get(argument_count.saturating_add(local) as usize)
+            .ok_or(EngineFault::InvalidClosureEnvironment {
+                function: frame.template,
+            })?;
+        if variable.policy().kind() == CompilerBindingKind::ClassStaticReceiver {
+            return duplicate_binding(runtime, frame_local(frame, local)?, false, frame)
+                .map_err(ExecutionError::from);
+        }
+        lexical_local = match variable.scope_next() {
+            ScopeLink::Local(parent) => Some(parent),
+            ScopeLink::End | ScopeLink::ArgumentScopeEnd => None,
+        };
+    }
+
+    let mut captured_receiver = None;
+    for (index, definition) in template.metadata().closures().iter().enumerate() {
+        if definition.policy().kind() != CompilerBindingKind::ClassStaticReceiver {
+            continue;
+        }
+        if captured_receiver.replace(index).is_some() {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "direct eval has more than one lexical class receiver",
+            }
+            .into());
+        }
+    }
+    let Some(index) = captured_receiver else {
+        return Ok(frame.receiver.duplicate());
+    };
+    let index = u32::try_from(index).map_err(|_| EngineFault::InvalidClosureEnvironment {
+        function: frame.template,
+    })?;
+    duplicate_environment(runtime, frame, index, false).map_err(ExecutionError::from)
 }
 
 #[allow(
@@ -1703,6 +1757,7 @@ const fn direct_eval_local_scope(kind: CompilerBindingKind) -> DirectEvalCallerB
         | CompilerBindingKind::Function => DirectEvalCallerBindingScope::Variable,
         CompilerBindingKind::FunctionName
         | CompilerBindingKind::ClassFieldKey
+        | CompilerBindingKind::ClassInstanceInitializer
         | CompilerBindingKind::ClassPrivateName
         | CompilerBindingKind::ClassStaticReceiver
         | CompilerBindingKind::GlobalReference => DirectEvalCallerBindingScope::Outer,
@@ -1720,7 +1775,7 @@ fn push_direct_eval_caller_binding(
     if matches!(
         policy.kind(),
         CompilerBindingKind::ClassFieldKey
-            | CompilerBindingKind::ClassPrivateName
+            | CompilerBindingKind::ClassInstanceInitializer
             | CompilerBindingKind::ClassStaticReceiver
             | CompilerBindingKind::GlobalReference
     ) {
@@ -1736,12 +1791,19 @@ fn push_direct_eval_caller_binding(
             pool: "direct-eval caller atom",
             index: name.get(),
         })?;
-    let name = atom
-        .description()
-        .ok_or(EngineFault::RuntimeInvariant {
-            message: "direct-eval caller binding has no string atom",
-        })?
-        .clone();
+    let atom = atom.description().ok_or(EngineFault::RuntimeInvariant {
+        message: "direct-eval caller binding has no string atom",
+    })?;
+    let name = if policy.kind() == CompilerBindingKind::ClassPrivateName {
+        if atom.code_units().next() != Some(u16::from(b'#')) {
+            // Private method/accessor value cells are compiler internals, not
+            // entries in the specification's PrivateEnvironment.
+            return Ok(());
+        }
+        atom.slice(1..atom.len())?
+    } else {
+        atom.clone()
+    };
     if name.code_units().eq("_ret_".encode_utf16()) {
         return Ok(());
     }
@@ -1853,16 +1915,60 @@ pub(super) fn bytecode_function_is_class_constructor(
     Ok(template.metadata().executable_kind() == CompilerExecutableKind::ClassConstructor)
 }
 
-pub(super) fn create_ordinary_constructor_receiver(
+pub(super) fn begin_ordinary_constructor_receiver(
     runtime: &mut Runtime,
-    new_target: FunctionId,
-) -> Result<ObjectId, ExecutionError> {
+    frame: Frame,
+    realm: RealmId,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let new_target = frame.new_target.ok_or(EngineFault::RuntimeInvariant {
+        message: "ordinary constructor receiver creation has no new.target",
+    })?;
+    if frame.constructor_state == ConstructorState::DerivedUninitialized {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "derived constructor attempted eager receiver creation",
+        }
+        .into());
+    }
+    let receiver = StoredValue::Function(new_target);
+    charge_heap_property_lookup(runtime, &receiver, execution_budget)?;
     let prototype_key = runtime.predefined_property_key(PredefinedAtom::Prototype);
-    let requested =
-        read_heap_property(runtime, HeapReference::Function(new_target), &prototype_key)?;
+    let return_to = frame.return_to;
+    let state = OrdinaryConstructorPrototypeContinuation { frame };
+    let dispatch = begin_internal_get(
+        runtime,
+        HeapReference::Function(new_target),
+        receiver,
+        prototype_key,
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )?;
+    continue_get_after(
+        dispatch,
+        state,
+        |state| NativeContinuation::OrdinaryConstructorPrototype(Box::new(state)),
+        |state, requested| finish_ordinary_constructor_prototype(runtime, state, &requested),
+        "ordinary constructor prototype Get produced a structured result",
+    )
+}
+
+pub(super) fn finish_ordinary_constructor_prototype(
+    runtime: &mut Runtime,
+    mut state: OrdinaryConstructorPrototypeContinuation,
+    requested: &StoredValue,
+) -> Result<NativeDispatch, NativeFailure> {
+    let new_target = state
+        .frame
+        .new_target
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "ordinary constructor prototype completion lost new.target",
+        })?;
     let prototype = match requested {
-        StoredValue::Function(function) => HeapReference::Function(function),
-        StoredValue::Object(object) => HeapReference::Object(object),
+        StoredValue::Function(function) => HeapReference::Function(*function),
+        StoredValue::Object(object) => HeapReference::Object(*object),
         StoredValue::Undefined
         | StoredValue::Null
         | StoredValue::Boolean(_)
@@ -1874,7 +1980,13 @@ pub(super) fn create_ordinary_constructor_receiver(
             HeapReference::Object(runtime.realm_object_prototype(realm)?)
         }
     };
-    runtime.allocate_ordinary_object_with_prototype(prototype)
+    state.frame.receiver = StoredValue::Object(
+        runtime
+            .allocate_ordinary_object_with_prototype(prototype)
+            .map_err(NativeFailure::Execution)?,
+    );
+    state.frame.constructor_state = ConstructorState::Ordinary;
+    Ok(NativeDispatch::Frame(state.frame))
 }
 
 pub(super) fn retire_active_dynamic_roots(

@@ -22,6 +22,20 @@ fn compile(source: &str, name: &str) -> CompiledFunctionTree {
     .expect("frontend")
 }
 
+fn compile_script(source: &str) -> CompiledFunctionTree {
+    with_parsed_program(
+        source,
+        FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
+        |unit| {
+            CompilationContext::new(unit)
+                .expect("storage plan")
+                .compile_global_script(VerificationLimits::default())
+                .expect("Global Script authority")
+        },
+    )
+    .expect("frontend")
+}
+
 #[test]
 fn explicit_base_class_constructor_and_public_methods_lower_to_typed_class_bytecode() {
     let tree = compile(
@@ -164,8 +178,11 @@ fn private_fields_after_optional_chains_lower_with_brand_checked_reads() {
             .iter()
             .filter(|&&opcode| opcode == FinalOpcode::CallMethod)
             .count(),
-        2
+        3
     );
+    assert!(tree.verified_bytecode().functions().any(|function| {
+        function.metadata().executable_kind() == CompilerExecutableKind::ClassInstanceInitializer
+    }));
 }
 
 #[test]
@@ -383,6 +400,81 @@ fn class_super_properties_lower_through_home_object_and_receiver_aware_opcodes()
 }
 
 #[test]
+fn optional_and_spread_super_method_calls_keep_the_actual_receiver() {
+    let tree = compile(
+        "function make(){class Base{method(...values){return values.length;}get missing(){return null;}}class Derived extends Base{constructor(){super()?.missing;}staticCall(){return super.method?.(1);}computedCall(key){return super[key]?.(2);}parenthesizedCall(){return (super.method)?.();}parenthesizedComputedCall(key){return (super[key])?.();}missingCall(effect){return super.missing?.(effect());}spread(values){return super.method(...values);}computedSpread(key,values){return super[key](...values);}read(){return super[0]?.value;}}return Derived;}",
+        "make",
+    );
+    let opcodes = tree
+        .functions()
+        .iter()
+        .flat_map(|function| function.control_flow().instructions())
+        .map(|instruction| instruction.decoded().instruction().opcode())
+        .collect::<Vec<_>>();
+
+    assert!(opcodes.contains(&FinalOpcode::IsUndefinedOrNull));
+    assert!(
+        opcodes
+            .iter()
+            .filter(|&&opcode| opcode == FinalOpcode::GetSuperValue)
+            .count()
+            >= 6
+    );
+    assert!(opcodes.contains(&FinalOpcode::CallMethod));
+    assert!(opcodes.contains(&FinalOpcode::Apply));
+}
+
+#[test]
+fn super_destructuring_and_iteration_targets_keep_complete_references() {
+    let tree = compile(
+        "function make(){class Base{}class Derived extends Base{write(source,key){[super.value,super[key],...super.rest]=source;({first:super.value,second:super[key],...super.rest}=source);for(super.value in source){}for(super[key] of source){}}}return Derived;}",
+        "make",
+    );
+    let opcodes = tree
+        .functions()
+        .iter()
+        .flat_map(|function| function.control_flow().instructions())
+        .map(|instruction| instruction.decoded().instruction().opcode())
+        .collect::<Vec<_>>();
+
+    assert!(
+        opcodes
+            .iter()
+            .filter(|&&opcode| opcode == FinalOpcode::PutSuperValue)
+            .count()
+            >= 8
+    );
+    assert!(opcodes.contains(&FinalOpcode::Rot4l));
+    assert!(opcodes.contains(&FinalOpcode::Perm5));
+    assert!(opcodes.contains(&FinalOpcode::CopyDataProperties));
+}
+
+#[test]
+fn private_field_iteration_heads_lower_as_brand_checked_writes() {
+    let tree = compile(
+        "function make(){class Box{#value;write(values,object){for(this.#value of values){}for(this.#value in object){}return this.#value;}}return Box;}",
+        "make",
+    );
+    let opcodes = tree
+        .functions()
+        .iter()
+        .flat_map(|function| function.control_flow().instructions())
+        .map(|instruction| instruction.decoded().instruction().opcode())
+        .collect::<Vec<_>>();
+
+    assert!(opcodes.contains(&FinalOpcode::ForOfStart));
+    assert!(opcodes.contains(&FinalOpcode::ForInStart));
+    assert!(
+        opcodes
+            .iter()
+            .filter(|&&opcode| opcode == FinalOpcode::PutPrivateField)
+            .count()
+            >= 2
+    );
+    assert!(opcodes.contains(&FinalOpcode::Rot3l));
+}
+
+#[test]
 fn a_named_base_class_expression_uses_the_same_typed_definition_path() {
     let tree = compile(
         "function make(){let Result=class Box{static self(){return Box;}};return Result;}",
@@ -462,6 +554,36 @@ fn a_direct_anonymous_base_class_assignment_uses_its_target_name() {
 }
 
 #[test]
+fn a_parenthesized_class_assignment_target_keeps_the_empty_default_name() {
+    let tree = compile(
+        "function make(){let Direct,Parenthesized;Direct=class{};(Parenthesized)=class{};return [Direct,Parenthesized];}",
+        "make",
+    );
+    let names = tree
+        .root()
+        .control_flow()
+        .instructions()
+        .iter()
+        .filter_map(|instruction| {
+            let instruction = instruction.decoded().instruction();
+            match (instruction.opcode(), instruction.operands()) {
+                (FinalOpcode::DefineClass, quickjs_bytecode::Operands::AtomU8 { atom, .. }) => {
+                    Some(
+                        tree.root().atoms()[atom.get() as usize]
+                            .string()
+                            .code_units()
+                            .collect::<Vec<_>>(),
+                    )
+                }
+                _ => None,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(names, ["Direct".encode_utf16().collect::<Vec<_>>(), vec![]]);
+}
+
+#[test]
 fn anonymous_base_class_binding_defaults_use_their_binding_names() {
     let tree = compile(
         "function make(){let [ArrayName=class{}]=[];let {value:ObjectName=class{}}={};return [ArrayName,ObjectName];}",
@@ -487,6 +609,36 @@ fn anonymous_base_class_binding_defaults_use_their_binding_names() {
             .any(|instruction| instruction.decoded().instruction().opcode() == FinalOpcode::SetName),
         "class inference cannot reuse the ordinary-function SetName opcode"
     );
+}
+
+#[test]
+fn anonymous_base_class_formal_parameter_defaults_respect_the_binding_shape() {
+    let tree = compile(
+        "function make(Result=class{static answer(){return 7;}},{}=class{}){return Result;}",
+        "make",
+    );
+    let names = tree
+        .root()
+        .control_flow()
+        .instructions()
+        .iter()
+        .filter_map(|instruction| {
+            let instruction = instruction.decoded().instruction();
+            match (instruction.opcode(), instruction.operands()) {
+                (FinalOpcode::DefineClass, quickjs_bytecode::Operands::AtomU8 { atom, .. }) => {
+                    Some(
+                        tree.root().atoms()[atom.get() as usize]
+                            .string()
+                            .code_units()
+                            .collect::<Vec<_>>(),
+                    )
+                }
+                _ => None,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(names, ["Result".encode_utf16().collect::<Vec<_>>(), vec![]]);
 }
 
 #[test]
@@ -590,6 +742,44 @@ fn computed_public_class_methods_use_the_typed_computed_definition_path() {
 }
 
 #[test]
+fn static_class_methods_retain_only_the_nested_method_definition_source() {
+    let tree = compile(
+        "function make(key){class Box{static /* before */f /* a */ ( /* b */ ) /* c */ { /* d */ }static /* before */get /* a */ g /* b */ ( /* c */ ) /* d */ { /* e */ }static /* before */set /* a */ h /* b */ ( /* c */ value /* d */ ) /* e */ { /* f */ }static /* before */async /* a */ i /* b */ ( /* c */ ) /* d */ { /* e */ }static /* before */async /* a */ * /* b */ j /* c */ ( /* d */ ) /* e */ { /* f */ }static /* before */* /* a */ k /* b */ ( /* c */ ) /* d */ { /* e */ }static /* before */#p /* a */ ( /* b */ ) /* c */ { /* d */ }static /* before */[ /* a */ key /* b */ ] /* c */ ( /* d */ ) /* e */ { /* f */ }static // before\nline(){}static \u{feff}wide(){}}return Box;}",
+        "make",
+    );
+    let sources = tree
+        .verified_bytecode()
+        .functions()
+        .filter(|function| {
+            matches!(
+                function.metadata().executable_kind(),
+                CompilerExecutableKind::OrdinaryMethod
+                    | CompilerExecutableKind::GeneratorMethod
+                    | CompilerExecutableKind::AsyncMethod
+                    | CompilerExecutableKind::AsyncGeneratorMethod
+            )
+        })
+        .map(|function| function.metadata().source().function_source())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        sources,
+        [
+            "f /* a */ ( /* b */ ) /* c */ { /* d */ }",
+            "get /* a */ g /* b */ ( /* c */ ) /* d */ { /* e */ }",
+            "set /* a */ h /* b */ ( /* c */ value /* d */ ) /* e */ { /* f */ }",
+            "async /* a */ i /* b */ ( /* c */ ) /* d */ { /* e */ }",
+            "async /* a */ * /* b */ j /* c */ ( /* d */ ) /* e */ { /* f */ }",
+            "* /* a */ k /* b */ ( /* c */ ) /* d */ { /* e */ }",
+            "#p /* a */ ( /* b */ ) /* c */ { /* d */ }",
+            "[ /* a */ key /* b */ ] /* c */ ( /* d */ ) /* e */ { /* f */ }",
+            "line(){}",
+            "wide(){}",
+        ]
+    );
+}
+
+#[test]
 fn async_generator_class_methods_are_owned_by_their_definition() {
     let tree = compile(
         "function make(){class Box{async *values(){yield 1;}}return Box;}",
@@ -619,7 +809,7 @@ fn static_class_fields_lower_to_the_typed_field_definition_path() {
 }
 
 #[test]
-fn initializer_free_public_instance_fields_lower_into_each_constructor() {
+fn initializer_free_public_instance_fields_lower_into_hidden_initializers() {
     let tree = compile(
         "function make(){class Empty{empty;}class Base{base;constructor(){}}class Explicit extends Base{own;constructor(){super();}}class Default extends Base{forward;}return [Empty,Base,Explicit,Default];}",
         "make",
@@ -632,6 +822,16 @@ fn initializer_free_public_instance_fields_lower_into_each_constructor() {
         })
         .collect::<Vec<_>>();
     assert_eq!(constructors.len(), 4);
+    assert_eq!(
+        tree.verified_bytecode()
+            .functions()
+            .filter(|function| {
+                function.metadata().executable_kind()
+                    == CompilerExecutableKind::ClassInstanceInitializer
+            })
+            .count(),
+        4
+    );
     assert_eq!(
         tree.functions()
             .iter()
@@ -955,6 +1155,25 @@ fn static_blocks_lower_in_class_element_order_with_a_lexical_receiver() {
 }
 
 #[test]
+fn static_block_throw_can_abandon_the_in_progress_class_stack() {
+    let tree = compile(
+        "function run(){let subsequent=false;try{class Failed{static{throw 7;}static x=subsequent=true;}}catch(error){if(error!==7)return false;}class Recovered{static{try{throw 3;}catch(error){this.x=error;}}static y=4;}return !subsequent&&Recovered.x===3&&Recovered.y===4;}",
+        "run",
+    );
+    assert!(tree.functions().iter().any(|function| {
+        function
+            .control_flow()
+            .instructions()
+            .iter()
+            .any(|instruction| instruction.decoded().instruction().opcode() == FinalOpcode::Throw)
+    }));
+    compile(
+        "function run(){class Failed{static{throw 1;}static x=2;}}",
+        "run",
+    );
+}
+
+#[test]
 fn derived_super_spread_uses_the_typed_constructor_apply_form() {
     let tree = compile(
         "function make(Base){return class Derived extends Base{constructor(args){super(...args);}}}",
@@ -1001,7 +1220,7 @@ fn private_accessors_share_one_name_and_lower_to_accessor_kinds() {
 }
 
 #[test]
-fn uncomputed_public_instance_field_initializers_lower_into_each_constructor() {
+fn uncomputed_public_instance_fields_lower_into_hidden_initializers() {
     let tree = compile(
         "function make(seed){class Base{value=seed;constructor(){}}class Derived extends Base{next=seed+1;constructor(){super();}}class Default extends Base{forward=seed+2;}return [Base,Derived,Default];}",
         "make",
@@ -1033,6 +1252,16 @@ fn uncomputed_public_instance_field_initializers_lower_into_each_constructor() {
         })
         .collect::<Vec<_>>();
     assert_eq!(class_flags, [2, 3, 3]);
+    assert_eq!(
+        tree.verified_bytecode()
+            .functions()
+            .filter(|function| {
+                function.metadata().executable_kind()
+                    == CompilerExecutableKind::ClassInstanceInitializer
+            })
+            .count(),
+        3
+    );
 }
 
 #[test]
@@ -1066,6 +1295,35 @@ fn computed_public_instance_fields_capture_a_once_evaluated_class_key() {
                     )
             })
     );
+    let initializer_index = tree
+        .functions()
+        .iter()
+        .enumerate()
+        .find_map(|(index, _)| {
+            (tree
+                .verified_bytecode()
+                .function(quickjs_bytecode::FunctionTemplateId::new(
+                    u32::try_from(index).expect("template index"),
+                ))
+                .expect("verified function")
+                .metadata()
+                .executable_kind()
+                == CompilerExecutableKind::ClassInstanceInitializer)
+                .then_some(index)
+        })
+        .expect("class instance initializer");
+    let opcodes = tree.functions()[initializer_index]
+        .control_flow()
+        .instructions()
+        .iter()
+        .map(|instruction| instruction.decoded().instruction().opcode())
+        .collect::<Vec<_>>();
+    assert!(
+        opcodes
+            .windows(2)
+            .any(|pair| { pair == [FinalOpcode::PushThis, FinalOpcode::GetVarRefCheck] })
+    );
+    assert!(opcodes.contains(&FinalOpcode::DefineArrayEl));
     let constructor_index = tree
         .functions()
         .iter()
@@ -1083,18 +1341,25 @@ fn computed_public_instance_fields_capture_a_once_evaluated_class_key() {
                 .then_some(index)
         })
         .expect("class constructor");
-    let opcodes = tree.functions()[constructor_index]
-        .control_flow()
-        .instructions()
-        .iter()
-        .map(|instruction| instruction.decoded().instruction().opcode())
-        .collect::<Vec<_>>();
+    let constructor = &tree.functions()[constructor_index];
     assert!(
-        opcodes
-            .windows(2)
-            .any(|pair| { pair == [FinalOpcode::PushThis, FinalOpcode::GetVarRefCheck] })
+        constructor
+            .control_flow()
+            .instructions()
+            .iter()
+            .any(|instruction| {
+                instruction.decoded().instruction().opcode() == FinalOpcode::CallMethod
+            })
     );
-    assert!(opcodes.contains(&FinalOpcode::DefineArrayEl));
+    assert!(
+        !constructor
+            .control_flow()
+            .instructions()
+            .iter()
+            .any(|instruction| {
+                instruction.decoded().instruction().opcode() == FinalOpcode::DefineArrayEl
+            })
+    );
 }
 
 #[test]
@@ -1161,6 +1426,34 @@ fn named_base_class_members_capture_a_distinct_immutable_class_name_cell() {
         .map(|instruction| instruction.decoded().instruction().opcode())
         .collect::<Vec<_>>();
     assert!(opcodes.contains(&FinalOpcode::CloseLoc));
+}
+
+#[test]
+fn instance_field_direct_eval_captures_the_synthetic_class_name_cell() {
+    let tree = compile_script("let Box=class Inner{field=eval('Inner');};");
+    let initializer = tree
+        .functions()
+        .iter()
+        .enumerate()
+        .find_map(|(index, function)| {
+            (tree
+                .verified_bytecode()
+                .function(quickjs_bytecode::FunctionTemplateId::new(
+                    u32::try_from(index).expect("template index"),
+                ))
+                .expect("verified function")
+                .metadata()
+                .executable_kind()
+                == CompilerExecutableKind::ClassInstanceInitializer)
+                .then_some(function)
+        })
+        .expect("class instance initializer");
+
+    assert_eq!(initializer.closure_variables().len(), 1);
+    assert_eq!(
+        initializer.closure_variables()[0].policy().kind(),
+        DeclarationKind::ClassName,
+    );
 }
 
 #[test]

@@ -974,7 +974,7 @@ fn object_assignment_member_target_with_default() {
 }
 
 #[test]
-fn object_assignment_member_targets_evaluate_bases_after_reading() {
+fn object_assignment_member_targets_evaluate_bases_before_reading() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
     let mut context = runtime.context(&realm).expect("context");
@@ -991,11 +991,26 @@ fn object_assignment_member_targets_evaluate_bases_after_reading() {
     let result = context
         .call(&function, &[], ExecutionLimits::default())
         .expect("object member base ordering");
-    // The pinned QuickJS order reads the property from the source (the
-    // getter records 1) before evaluating the member base (records 2), then
-    // stores into the reference; the array-pattern counterpart evaluates
-    // the base before the step instead.
-    assert_number(&result, 512);
+    // KeyedDestructuringAssignmentEvaluation evaluates the target reference
+    // (the base records 2) before GetV invokes the source getter (records 1).
+    assert_number(&result, 521);
+}
+
+#[test]
+fn object_assignment_computed_references_follow_spec_evaluation_order() {
+    assert_eq!(
+        run_text(
+            "\
+            let order='';\
+            function source(){order+='source,';return {get p(){order+='get,';}};}\
+            function target(){order+='target,';return {set q(value){order+='set,';}};}\
+            function sourceKey(){order+='source-key,';return {toString(){order+='source-key-tostring,';return 'p';}};}\
+            function targetKey(){order+='target-key,';return {toString(){order+='target-key-tostring,';return 'q';}};}\
+            ({[sourceKey()]: target()[targetKey()]} = source());\
+            return order;",
+        ),
+        "source,source-key,source-key-tostring,target,target-key,get,target-key-tostring,set,"
+    );
 }
 
 #[test]

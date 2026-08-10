@@ -635,6 +635,35 @@ fn object_methods_and_accessors_lower_super_through_the_home_object() {
 }
 
 #[test]
+fn computed_super_assignment_converts_its_key_after_the_rhs() {
+    let tree = compile_tree(
+        "function make(){return {write(key,value){return super[key]=value;}};}",
+        "make",
+    );
+    let instructions = tree_instructions(&tree.functions()[1]);
+    let rhs = instructions
+        .iter()
+        .position(|instruction| instruction == &(FinalOpcode::GetArg1, Operands::NoneArg))
+        .expect("assignment RHS read");
+    let conversion = instructions
+        .iter()
+        .position(|instruction| instruction == &(FinalOpcode::ToPropKey, Operands::None))
+        .expect("computed super key conversion");
+
+    assert!(rhs < conversion, "{instructions:?}");
+    assert!(instructions.windows(5).any(|window| {
+        window
+            == [
+                (FinalOpcode::Swap, Operands::None),
+                (FinalOpcode::ToPropKey, Operands::None),
+                (FinalOpcode::Swap, Operands::None),
+                (FinalOpcode::Insert4, Operands::None),
+                (FinalOpcode::PutSuperValue, Operands::None),
+            ]
+    }));
+}
+
+#[test]
 fn static_property_read_uses_the_function_local_atom() {
     let compiled = compile("function read(object){return object.value;}", "read");
 

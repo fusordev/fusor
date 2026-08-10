@@ -2248,6 +2248,22 @@ pub(super) fn drain_promise_jobs(
     Ok(())
 }
 
+/// Delivers only externally-ready `Atomics.waitAsync` completions before a
+/// new host event. Each waiter settles and drains its Promise reactions before
+/// the next waiter, preserving the runtime's established FIFO ordering.
+/// Finalization cleanup remains an end-of-turn checkpoint and must not run
+/// ahead of the host event.
+pub(super) fn drain_ready_atomics_jobs_before_host_turn(
+    runtime: &mut Runtime,
+    compiler: Option<&Arc<dyn OrdinaryDynamicFunctionCompiler>>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<(), ExecutionError> {
+    while runtime.settle_next_ready_atomics_waiter()? {
+        drain_promise_jobs(runtime, compiler, execution_budget)?;
+    }
+    Ok(())
+}
+
 pub(super) fn drain_host_jobs(
     runtime: &mut Runtime,
     compiler: Option<&Arc<dyn OrdinaryDynamicFunctionCompiler>>,

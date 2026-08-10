@@ -6,8 +6,8 @@ use super::{
 };
 use crate::runtime::realm::{
     CONSTRUCTOR_PROTOTYPE_PROPERTY, FROZEN_PROPERTY, LocaleStringMethod, METHOD_PROPERTY,
-    NativeFunctionKind, OBJECT_PROTOTYPE_REFLECTION, OBJECT_STATIC_METHODS, PredefinedAtom,
-    PropertyLayout,
+    NativeFunctionKind, OBJECT_PROTOTYPE_LEGACY_ACCESSORS, OBJECT_PROTOTYPE_REFLECTION,
+    OBJECT_STATIC_METHODS, PredefinedAtom, PropertyLayout,
     schema::{
         IntrinsicFunctionId, IntrinsicIdentity, IntrinsicIdentityPublication, IntrinsicKeySpec,
         IntrinsicNameSpec, IntrinsicObjectId, IntrinsicObjectKind, IntrinsicStringSpec,
@@ -119,10 +119,27 @@ fn visit_object_functions(visit: FunctionSink<'_>) {
             IntrinsicNameSpec::Predefined(PredefinedAtom::ValueOf),
             0,
         ),
+        (
+            NativeFunctionKind::ObjectPrototypeProtoGetter,
+            IntrinsicNameSpec::Literal("get __proto__"),
+            0,
+        ),
+        (
+            NativeFunctionKind::ObjectPrototypeProtoSetter,
+            IntrinsicNameSpec::Literal("set __proto__"),
+            1,
+        ),
     ] {
         visit(ordinary(kind, name, length));
     }
     for (_, kind, length) in OBJECT_PROTOTYPE_REFLECTION {
+        visit(ordinary(
+            kind,
+            IntrinsicNameSpec::RealmName(RealmNameId::ObjectPrototypeMethod(kind)),
+            length,
+        ));
+    }
+    for (_, kind, length) in OBJECT_PROTOTYPE_LEGACY_ACCESSORS {
         visit(ordinary(
             kind,
             IntrinsicNameSpec::RealmName(RealmNameId::ObjectPrototypeMethod(kind)),
@@ -156,6 +173,24 @@ fn visit_object_prototype_properties(visit: PropertySink<'_>) {
         NativeFunctionKind::ObjectPrototypeValueOf,
     ));
     for (_, function, _) in OBJECT_PROTOTYPE_REFLECTION {
+        visit(method(
+            prototype,
+            IntrinsicKeySpec::InternedString(RealmNameId::ObjectPrototypeMethod(function)),
+            function,
+        ));
+    }
+    visit(accessor(
+        prototype,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Proto),
+        PropertyLayout::accessor(false, true),
+        Some(IntrinsicFunctionId(
+            NativeFunctionKind::ObjectPrototypeProtoGetter,
+        )),
+        Some(IntrinsicFunctionId(
+            NativeFunctionKind::ObjectPrototypeProtoSetter,
+        )),
+    ));
+    for (_, function, _) in OBJECT_PROTOTYPE_LEGACY_ACCESSORS {
         visit(method(
             prototype,
             IntrinsicKeySpec::InternedString(RealmNameId::ObjectPrototypeMethod(function)),

@@ -7,11 +7,12 @@ use super::{
 use crate::runtime::realm::{
     ARRAY_CALLBACK_METHODS, ARRAY_COPIER_METHODS, ARRAY_FLATTEN_METHODS, ARRAY_LENGTH_PROPERTY,
     ARRAY_MUTATOR_METHODS, ARRAY_PREDEFINED_COPIERS, ARRAY_REDUCTION_METHODS, ARRAY_SEARCH_METHODS,
-    ARRAY_SORT_METHODS, ArrayStatic, CONSTRUCTOR_PROTOTYPE_PROPERTY, LOCALE_STRING_METHODS,
+    ARRAY_SORT_METHODS, ArrayCallback, ArrayCopier, ArrayFlatten, ArrayMutator, ArraySearch,
+    ArraySort, ArrayStatic, CONSTRUCTOR_PROTOTYPE_PROPERTY, LOCALE_STRING_METHODS,
     NUMBER_FORMAT_METHODS, NativeFunctionKind, PredefinedAtom, PropertyLayout,
     schema::{
         IntrinsicFunctionId, IntrinsicIdentity, IntrinsicKeySpec, IntrinsicNameSpec,
-        IntrinsicObjectId, IntrinsicObjectKind, IntrinsicValueSpec, RealmNameId,
+        IntrinsicObjectId, IntrinsicObjectKind, IntrinsicValueSpec, PrototypeSpec, RealmNameId,
     },
 };
 
@@ -20,6 +21,11 @@ pub(super) fn visit_objects(visit: ObjectSink<'_>) {
         IntrinsicObjectId::ArrayPrototype,
         object_prototype(),
         IntrinsicObjectKind::ArrayPrototype,
+    ));
+    visit(object(
+        IntrinsicObjectId::ArrayUnscopables,
+        PrototypeSpec::Null,
+        IntrinsicObjectKind::Ordinary,
     ));
 }
 
@@ -127,6 +133,7 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
             function,
         ));
     }
+    visit_unscopables(prototype, visit);
     visit(data(
         constructor,
         IntrinsicKeySpec::PredefinedString(PredefinedAtom::Prototype),
@@ -144,6 +151,42 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
         IntrinsicIdentity::Object(IntrinsicObjectId::GlobalObject),
         IntrinsicKeySpec::PredefinedString(PredefinedAtom::Array),
         NativeFunctionKind::ArrayConstructor,
+    ));
+}
+
+fn visit_unscopables(prototype: IntrinsicIdentity, visit: PropertySink<'_>) {
+    let table = IntrinsicIdentity::Object(IntrinsicObjectId::ArrayUnscopables);
+    let entry_layout = PropertyLayout::data(true, true, true);
+    for key in [
+        IntrinsicKeySpec::InternedString(RealmNameId::ArrayCopier(ArrayCopier::At)),
+        IntrinsicKeySpec::InternedString(RealmNameId::ArrayMutator(ArrayMutator::CopyWithin)),
+        IntrinsicKeySpec::InternedString(RealmNameId::Entries),
+        IntrinsicKeySpec::InternedString(RealmNameId::ArrayMutator(ArrayMutator::Fill)),
+        IntrinsicKeySpec::InternedString(RealmNameId::ArrayCallback(ArrayCallback::Find)),
+        IntrinsicKeySpec::InternedString(RealmNameId::ArrayCallback(ArrayCallback::FindIndex)),
+        IntrinsicKeySpec::InternedString(RealmNameId::ArrayCallback(ArrayCallback::FindLast)),
+        IntrinsicKeySpec::InternedString(RealmNameId::ArrayCallback(ArrayCallback::FindLastIndex)),
+        IntrinsicKeySpec::InternedString(RealmNameId::ArrayFlatten(ArrayFlatten::Flat)),
+        IntrinsicKeySpec::InternedString(RealmNameId::ArrayFlatten(ArrayFlatten::FlatMap)),
+        IntrinsicKeySpec::InternedString(RealmNameId::ArraySearch(ArraySearch::Includes)),
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Keys),
+        IntrinsicKeySpec::InternedString(RealmNameId::ArrayCopier(ArrayCopier::ToReversed)),
+        IntrinsicKeySpec::InternedString(RealmNameId::ArraySort(ArraySort::ToSorted)),
+        IntrinsicKeySpec::InternedString(RealmNameId::ArrayCopier(ArrayCopier::ToSpliced)),
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Values),
+    ] {
+        visit(data(
+            table,
+            key,
+            entry_layout,
+            IntrinsicValueSpec::Boolean(true),
+        ));
+    }
+    visit(data(
+        prototype,
+        IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolUnscopables),
+        PropertyLayout::data(false, false, true),
+        IntrinsicValueSpec::Object(IntrinsicObjectId::ArrayUnscopables),
     ));
 }
 

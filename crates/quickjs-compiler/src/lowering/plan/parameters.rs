@@ -81,6 +81,12 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         )?;
         entries.sort_unstable_by_key(ScopeEntryInitialization::order_key);
         if function_scope {
+            let has_instantiation_function = entries.iter().any(|entry| {
+                matches!(
+                    entry,
+                    ScopeEntryInitialization::Function { scoped: false, .. }
+                )
+            });
             self.emit_parameter_binding_activations(executable, planning.layout, flow)?;
             self.emit_arguments_object_initializer(executable, planning.layout, flow)?;
             self.emit_parameter_pattern_initializers(executable, planning, flow)?;
@@ -94,6 +100,9 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 && executable_metadata.has_direct_eval()
             {
                 flow.mark_parameter_initialization_end(span)?;
+            }
+            if has_instantiation_function {
+                flow.mark_function_initializer_prefix_start(span)?;
             }
             self.emit_realm_global_function_initializers(
                 executable,
@@ -330,7 +339,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             .ok_or(LeafCompilationError::InvalidExecutable { executable })?;
         let parameters = match self.unit.semantic().nodes().kind(node) {
             AstKind::Function(function) => function.params.as_ref(),
-            AstKind::ArrowFunctionExpression(arrow) if !arrow.r#async => arrow.params.as_ref(),
+            AstKind::ArrowFunctionExpression(arrow) => arrow.params.as_ref(),
             AstKind::Program(_) => return Ok(()),
             _ => {
                 return unsupported(UnsupportedLeafFeature::NonOrdinaryFunction, metadata.span());
@@ -825,13 +834,13 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         Ok(())
     }
 
-    /// Re-arms the for-of loop scope's TDZ cells at the back edge. Each
+    /// Re-arms a for-in/of loop scope's TDZ cells at the back edge. Each
     /// iteration writes the head bindings (identifier or
     /// destructuring) as fresh initializations. Captured cells first detach
     /// through `close_loc`; re-arming every TDZ local here then makes the new
     /// direct binding uninitialized before the next head write, while the
     /// detached cell retains the preceding iteration's value.
-    pub(in crate::lowering) fn plan_for_of_rotation(
+    pub(in crate::lowering) fn plan_iteration_rotation(
         &self,
         executable: ExecutableId,
         scope: ScopeId,
@@ -843,7 +852,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         for symbol in scoping.iter_bindings_in(scope) {
             if scoping.symbol_scope_id(symbol) != scope {
                 return Err(LeafCompilationError::SemanticInvariant {
-                    invariant: "for-of rotation exact-scope binding belongs to that scope",
+                    invariant: "iteration rotation exact-scope binding belongs to that scope",
                     span: Some(scoping.symbol_span(symbol)),
                 });
             }
@@ -851,13 +860,13 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             let binding = self.binding_for_identifier(Some(symbol), declaration_span)?;
             let storage = self.planned.plan.binding(binding).ok_or(
                 LeafCompilationError::SemanticInvariant {
-                    invariant: "for-of rotation compiler binding exists",
+                    invariant: "iteration rotation compiler binding exists",
                     span: Some(declaration_span),
                 },
             )?;
             if storage.executable() != executable {
                 return Err(LeafCompilationError::SemanticInvariant {
-                    invariant: "for-of rotation binding belongs to the selected executable",
+                    invariant: "iteration rotation binding belongs to the selected executable",
                     span: Some(declaration_span),
                 });
             }
@@ -868,12 +877,12 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 layout
                     .slot(binding)
                     .ok_or(LeafCompilationError::SemanticInvariant {
-                        invariant: "for-of rotation TDZ binding has a frame slot",
+                        invariant: "iteration rotation TDZ binding has a frame slot",
                         span: Some(declaration_span),
                     })?
             else {
                 return Err(LeafCompilationError::SemanticInvariant {
-                    invariant: "for-of rotation TDZ binding uses a local slot",
+                    invariant: "iteration rotation TDZ binding uses a local slot",
                     span: Some(declaration_span),
                 });
             };

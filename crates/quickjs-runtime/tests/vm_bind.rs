@@ -413,6 +413,27 @@ fn bound_construction_uses_bound_args_and_original_new_target() {
 }
 
 #[test]
+fn bound_functions_inherit_the_target_prototype_and_forward_derived_new_target() {
+    assert!(call(
+        "function target(a,b){return this.base+a+b;}let customPrototype={};\
+         Object.setPrototypeOf(target,customPrototype);\
+         let bound=Function.prototype.bind.call(target,{base:3},4);\
+         let inherited=Object.getPrototypeOf(bound)===customPrototype&&bound(5)===12;\
+         Object.setPrototypeOf(target,null);\
+         bound=Function.prototype.bind.call(target,{base:1},3);\
+         let nullPrototype=Object.getPrototypeOf(bound)===null&&bound(2)===6;\
+         let log='';customPrototype={};function Target(){this.seen=new.target;}\
+         let proxy=new Proxy(Target,{getPrototypeOf(){log=log+'p';return customPrototype;}});\
+         let proxyBound=Function.prototype.bind.call(proxy,undefined);\
+         let observable=Object.getPrototypeOf(proxyBound)===customPrototype&&log==='p';\
+         let derivedTarget=Target.bind(undefined);derivedTarget.prototype={};\
+         class Derived extends derivedTarget{}let value=new Derived();\
+         return inherited&&nullPrototype&&observable&&value.seen===Derived&&Object.getPrototypeOf(value)===Derived.prototype;",
+        boolean,
+    ));
+}
+
+#[test]
 fn bound_nonconstructor_construction_uses_the_bound_name() {
     assert_eq!(
         caught("return new (Function.prototype.apply.bind(null))();"),

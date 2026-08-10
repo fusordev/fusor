@@ -200,6 +200,50 @@ fn array_to_string_drives_ordinary_string_coercion() {
     // lowering is a separate milestone, so concatenation covers it here.
 }
 
+#[test]
+fn array_to_string_calls_join_or_the_intrinsic_object_fallback() {
+    assert_eq!(
+        text(
+            "var receiver={flag:'ok',join:function(){\
+                 return this.flag+':'+arguments.length;\
+             }};\
+             return Array.prototype.toString.call(receiver);"
+        ),
+        "ok:0"
+    );
+    assert_eq!(
+        text(
+            "delete Object.prototype.toString;\
+             return Array.prototype.toString.call({join:null});"
+        ),
+        "[object Object]"
+    );
+    assert_eq!(
+        text(
+            "return Array.prototype.toString.call(true)+'|'\
+                 +Array.prototype.toString.call(false);"
+        ),
+        "[object Boolean]|[object Boolean]"
+    );
+    assert_eq!(
+        text(
+            "return Array.prototype.toString.call({\
+                 join:0,[Symbol.toStringTag]:'Tagged'\
+             });"
+        ),
+        "[object Tagged]"
+    );
+    assert_eq!(
+        type_error_message(
+            "return [{\
+                 toString(){return {};},\
+                 valueOf(){return {};}\
+             }].toString();"
+        ),
+        "toPrimitive"
+    );
+}
+
 /// Oracle: `join toString order => [oo]`. Each element's `toString` runs, in
 /// index order, and its result is interpolated.
 #[test]
@@ -240,14 +284,8 @@ fn join_and_to_string_report_the_pinned_arities() {
     assert_number("return Array.prototype.toString.length;", 0);
 }
 
-/// Oracle: `toString on nonarray => [[object Object]]`.
-///
-/// `Array.prototype.toString` is generic: it reads `length` from any receiver,
-/// so a plain object with no `length` joins to the empty string. The oracle
-/// reports `[object Object]` because its `toString` first looks for a callable
-/// `join` on the receiver; with the profile's non-replaceable `join` the
-/// generic length path is what remains observable, so this asserts the
-/// array-like behavior instead.
+/// `Array.prototype.join` is generic over array-like receivers and reads
+/// `length` with `LengthOfArrayLike`.
 #[test]
 fn join_is_generic_over_array_like_receivers() {
     assert_eq!(
@@ -289,6 +327,38 @@ fn join_reads_its_length_once_before_the_element_loop() {
              return Array.prototype.join.call(source,\"-\");"
         ),
         "x-"
+    );
+}
+
+/// `LengthOfArrayLike` snapshots the iteration count before separator
+/// conversion, even when that conversion mutates the receiver's length.
+#[test]
+fn join_snapshots_length_before_converting_the_separator() {
+    assert_eq!(
+        text(
+            "var log='';\
+             var source={get length(){log+='l';return 2;},0:'a',1:'b'};\
+             var separator={toString(){log+='s';return '-';}};\
+             var joined=Array.prototype.join.call(source,separator);\
+             return log+'|'+joined;"
+        ),
+        "ls|a-b"
+    );
+    assert_eq!(
+        text(
+            "var source={length:2,0:'a',1:'b',2:'c'};\
+             var separator={toString(){source.length=3;return '-';}};\
+             return Array.prototype.join.call(source,separator);"
+        ),
+        "a-b"
+    );
+    assert_eq!(
+        text(
+            "var source={length:2,0:'a',1:'b'};\
+             var separator={toString(){source.length=1;return '-';}};\
+             return Array.prototype.join.call(source,separator);"
+        ),
+        "a-b"
     );
 }
 

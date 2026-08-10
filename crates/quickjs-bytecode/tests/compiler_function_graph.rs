@@ -270,6 +270,25 @@ fn direct_eval_parameter_boundary_certifies_scope_zero_only_in_parameter_code() 
 }
 
 #[test]
+fn function_initializer_prefix_start_is_bounded_by_the_verified_body() {
+    let error = verify_compiler_function_graph(
+        graph(vec![
+            function(leaf_flow(), &[], &[]).with_function_initializer_prefix_start(2),
+        ]),
+        FunctionGraphVerificationLimits::default(),
+    )
+    .expect_err("initializer prefix start must name an instruction boundary");
+
+    assert_eq!(
+        error.kind(),
+        &FunctionGraphVerificationErrorKind::FunctionInitializerPrefixStartOutOfBounds {
+            start: 2,
+            instructions: 1,
+        }
+    );
+}
+
+#[test]
 fn eval_reference_call_metadata_is_checked_and_retained() {
     let flow = compiler_flow(
         &[

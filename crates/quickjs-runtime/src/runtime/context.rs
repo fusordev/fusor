@@ -899,6 +899,7 @@ impl Context<'_> {
                 eval_environment: None,
                 lexical_receiver: None,
                 lexical_eval_in_function: false,
+                lexical_eval_in_class_field_initializer: false,
                 lexical_new_target: None,
                 lexical_derived_constructor: None,
                 lexical_derived_this: None,

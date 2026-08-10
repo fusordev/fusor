@@ -183,6 +183,7 @@ impl DirectEvalCapabilities {
     const SUPER_PROPERTY: u8 = 1 << 2;
     const SUPER_CALL: u8 = 1 << 3;
     const ARGUMENTS_ALLOWED: u8 = 1 << 4;
+    const INSTANCE_ELEMENTS: u8 = 1 << 5;
 
     /// Creates a context with no inherited capabilities.
     #[must_use]
@@ -218,6 +219,14 @@ impl DirectEvalCapabilities {
         self
     }
 
+    /// Records whether a contextual `super()` must initialize class instance
+    /// elements owned by the inherited derived-constructor environment.
+    #[must_use]
+    pub const fn with_instance_elements(mut self, yes: bool) -> Self {
+        self.set(Self::INSTANCE_ELEMENTS, yes);
+        self
+    }
+
     /// Selects whether the `arguments` identifier is syntactically allowed.
     ///
     /// This is a grammar capability inherited from the caller. It does not
@@ -250,6 +259,13 @@ impl DirectEvalCapabilities {
     #[must_use]
     pub const fn allows_super_call(self) -> bool {
         self.contains(Self::SUPER_CALL)
+    }
+
+    /// Returns whether a contextual `super()` must initialize class instance
+    /// elements after binding the inherited derived `this` environment.
+    #[must_use]
+    pub const fn has_instance_elements(self) -> bool {
+        self.contains(Self::INSTANCE_ELEMENTS)
     }
 
     /// Returns whether the `arguments` identifier is syntactically allowed.
@@ -450,82 +466,27 @@ impl<'scope> DirectEvalBinding<'scope> {
     }
 }
 
-/// The role of a private name visible to direct `eval`.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[non_exhaustive]
-pub enum DirectEvalPrivateNameKind {
-    /// A private field.
-    Field,
-    /// A private method.
-    Method,
-    /// A private getter.
-    Getter,
-    /// A private setter.
-    Setter,
-    /// A combined private getter/setter pair.
-    GetterSetter,
-}
-
 /// A private name visible in one direct-eval scope frame.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DirectEvalPrivateName<'scope> {
     name: &'scope str,
-    kind: DirectEvalPrivateNameKind,
-    is_static: bool,
-    is_lexical: bool,
-    is_const: bool,
     location: DirectEvalBindingLocation,
 }
 
 impl<'scope> DirectEvalPrivateName<'scope> {
-    /// Creates a private-name snapshot without discarding storage metadata.
+    /// Creates a private-name snapshot retaining its live caller-cell address.
+    ///
+    /// Field/method/accessor and static/instance classifications belong to the
+    /// class element, not to the specification's `PrivateEnvironment` entry.
     #[must_use]
-    pub const fn new(
-        name: &'scope str,
-        kind: DirectEvalPrivateNameKind,
-        is_static: bool,
-        is_lexical: bool,
-        is_const: bool,
-        location: DirectEvalBindingLocation,
-    ) -> Self {
-        Self {
-            name,
-            kind,
-            is_static,
-            is_lexical,
-            is_const,
-            location,
-        }
+    pub const fn new(name: &'scope str, location: DirectEvalBindingLocation) -> Self {
+        Self { name, location }
     }
 
     /// Returns the private name, without a leading `#`.
     #[must_use]
     pub const fn name(self) -> &'scope str {
         self.name
-    }
-
-    /// Returns the private-name role.
-    #[must_use]
-    pub const fn kind(self) -> DirectEvalPrivateNameKind {
-        self.kind
-    }
-
-    /// Returns whether the name belongs to the static class context.
-    #[must_use]
-    pub const fn is_static(self) -> bool {
-        self.is_static
-    }
-
-    /// Returns whether this private name is lexical.
-    #[must_use]
-    pub const fn is_lexical(self) -> bool {
-        self.is_lexical
-    }
-
-    /// Returns whether writes to this private-name binding are forbidden.
-    #[must_use]
-    pub const fn is_const(self) -> bool {
-        self.is_const
     }
 
     /// Returns the private name's independent storage location.
@@ -855,11 +816,12 @@ impl UnsupportedCompilationGoal {
                 goal.forces_strict()
             ),
             Self::DirectEval(capabilities) => format!(
-                "direct eval compilation (strict={}, new_target={}, super_property={}, super_call={}, arguments_allowed={}) is not implemented",
+                "direct eval compilation (strict={}, new_target={}, super_property={}, super_call={}, instance_elements={}, arguments_allowed={}) is not implemented",
                 capabilities.is_strict(),
                 capabilities.allows_new_target(),
                 capabilities.allows_super_property(),
                 capabilities.allows_super_call(),
+                capabilities.has_instance_elements(),
                 capabilities.allows_arguments()
             ),
             Self::DynamicFunction(kind) => {
@@ -881,11 +843,12 @@ impl fmt::Display for UnsupportedCompilationGoal {
             ),
             Self::DirectEval(capabilities) => write!(
                 formatter,
-                "direct eval (strict: {}, new target: {}, super property: {}, super call: {}, arguments allowed: {})",
+                "direct eval (strict: {}, new target: {}, super property: {}, super call: {}, instance elements: {}, arguments allowed: {})",
                 capabilities.is_strict(),
                 capabilities.allows_new_target(),
                 capabilities.allows_super_property(),
                 capabilities.allows_super_call(),
+                capabilities.has_instance_elements(),
                 capabilities.allows_arguments()
             ),
             Self::DynamicFunction(kind) => write!(formatter, "dynamic function ({kind})"),
@@ -1819,6 +1782,8 @@ pub enum FrontendDiagnosticCode {
     OxcParser,
     /// An Oxc semantic/early-error diagnostic.
     OxcSemantic,
+    /// Direct eval in a class field initializer contained an `arguments` reference.
+    DirectEvalContainsArguments,
     /// The project-owned `RegExp` grammar rejected a literal as an early error.
     InvalidRegExpLiteral,
     /// A labeled `continue` chain does not terminate in an iteration statement.
@@ -1839,7 +1804,7 @@ pub enum FrontendDiagnosticCode {
     UnsupportedClassAccessor,
     /// An Annex B HTML-style source comment.
     UnsupportedAnnexBHtmlComment,
-    /// An Annex B legacy octal numeric literal or string escape.
+    /// An Annex B legacy octal numeric literal.
     UnsupportedAnnexBLegacyOctal,
     /// A legacy `assert` import clause.
     UnsupportedLegacyImportAssertion,
@@ -1876,6 +1841,9 @@ impl FrontendDiagnosticCode {
             Self::AsyncScriptImportMeta => "quickjs::frontend::async_script::import_meta",
             Self::OxcParser => "quickjs::frontend::oxc::parser",
             Self::OxcSemantic => "quickjs::frontend::oxc::semantic",
+            Self::DirectEvalContainsArguments => {
+                "quickjs::frontend::semantic::direct_eval_contains_arguments"
+            }
             Self::InvalidRegExpLiteral => "quickjs::frontend::regexp::invalid_literal",
             Self::InvalidChainedContinueTarget => {
                 "quickjs::frontend::semantic::invalid_chained_continue_target"
@@ -1921,6 +1889,7 @@ impl FrontendDiagnosticCode {
             | Self::AsyncScriptImportMeta
             | Self::OxcParser
             | Self::OxcSemantic
+            | Self::DirectEvalContainsArguments
             | Self::InvalidRegExpLiteral
             | Self::InvalidChainedContinueTarget
             | Self::ModuleSyntaxLowering => None,
@@ -2234,6 +2203,26 @@ impl FrontendError {
                     span,
                     message: Some(
                         "this label chain does not terminate in an iteration statement".to_owned(),
+                    ),
+                }],
+            }],
+            parser_panicked: false,
+            unsupported_goal: None,
+            limit_error: None,
+        }
+    }
+
+    fn direct_eval_contains_arguments(span: Span) -> Self {
+        Self {
+            stage: DiagnosticStage::Semantic,
+            diagnostics: vec![FrontendDiagnostic {
+                code: FrontendDiagnosticCode::DirectEvalContainsArguments,
+                message: "direct eval in a class field initializer cannot contain `arguments`"
+                    .to_owned(),
+                labels: vec![DiagnosticLabel {
+                    span,
+                    message: Some(
+                        "this reference is rejected by PerformEval before evaluation".to_owned(),
                     ),
                 }],
             }],
@@ -2624,13 +2613,6 @@ fn quickjs_profile_diagnostics(nodes: &AstNodes<'_>) -> Vec<FrontendDiagnostic> 
                     message: "Annex B legacy octal literals are not supported",
                 });
             }
-            AstKind::StringLiteral(literal) if is_annex_b_legacy_octal_escape(literal) => {
-                violations.push(ProfileViolation {
-                    span: literal.span,
-                    code: FrontendDiagnosticCode::UnsupportedAnnexBLegacyOctal,
-                    message: "Annex B legacy octal escapes are not supported",
-                });
-            }
             AstKind::WithClause(clause) if clause.keyword == WithClauseKeyword::Assert => {
                 violations.push(ProfileViolation {
                     span: clause.span,
@@ -2674,35 +2656,6 @@ fn is_annex_b_legacy_octal_numeric_literal(literal: &oxc_ast::ast::NumericLitera
     };
     let bytes = raw.as_bytes();
     bytes.len() > 1 && bytes[0] == b'0' && bytes[1].is_ascii_digit()
-}
-
-fn is_annex_b_legacy_octal_escape(literal: &oxc_ast::ast::StringLiteral<'_>) -> bool {
-    let Some(raw) = literal.raw.as_ref().map(oxc_ast::ast::Str::as_str) else {
-        return false;
-    };
-    let bytes = raw.as_bytes();
-    let mut index = 1;
-    while index + 1 < bytes.len() {
-        if bytes[index] != b'\\' {
-            index += 1;
-            continue;
-        }
-        let mut slash_count = 1;
-        index += 1;
-        while index < bytes.len() && bytes[index] == b'\\' {
-            slash_count += 1;
-            index += 1;
-        }
-        if slash_count % 2 == 1
-            && index < bytes.len()
-            && (matches!(bytes[index], b'1'..=b'9')
-                || (bytes[index] == b'0' && bytes.get(index + 1).is_some_and(u8::is_ascii_digit)))
-        {
-            return true;
-        }
-        index += 1;
-    }
-    false
 }
 
 fn push_call_argument_prefix_violation(
@@ -3113,11 +3066,7 @@ fn parse_in_mode<'arena, 'scope>(
         .with_build_nodes(true)
         .build(program);
     if let CompilationGoal::DirectEval(context) = goal {
-        remove_admitted_direct_eval_diagnostics(
-            &mut semantic.diagnostics,
-            &semantic.semantic,
-            context.capabilities(),
-        );
+        apply_direct_eval_context(&mut semantic.diagnostics, &semantic.semantic, context)?;
     }
     if allow_top_level_await
         && let Some(span) = async_script_await_identifier_span(&semantic.semantic)
@@ -3162,14 +3111,49 @@ fn parse_in_mode<'arena, 'scope>(
     })
 }
 
+fn apply_direct_eval_context(
+    diagnostics: &mut Diagnostics,
+    semantic: &Semantic<'_>,
+    context: DirectEvalContext<'_>,
+) -> Result<(), FrontendError> {
+    let capabilities = context.capabilities();
+    remove_admitted_direct_eval_diagnostics(diagnostics, semantic, context);
+    if !capabilities.allows_arguments()
+        && let Some(span) = direct_eval_contains_arguments_span(semantic.nodes())
+    {
+        return Err(FrontendError::direct_eval_contains_arguments(span));
+    }
+    Ok(())
+}
+
 fn remove_admitted_direct_eval_diagnostics(
     diagnostics: &mut Diagnostics,
     semantic: &Semantic<'_>,
-    capabilities: DirectEvalCapabilities,
+    context: DirectEvalContext<'_>,
 ) {
     diagnostics.retain(|diagnostic| {
-        !is_admitted_direct_eval_super_diagnostic(diagnostic, semantic, capabilities)
+        !is_admitted_direct_eval_super_diagnostic(diagnostic, semantic, context.capabilities())
+            && !is_admitted_direct_eval_private_name_diagnostic(diagnostic, context)
     });
+}
+
+fn is_admitted_direct_eval_private_name_diagnostic(
+    diagnostic: &OxcDiagnostic,
+    context: DirectEvalContext<'_>,
+) -> bool {
+    let message = diagnostic.to_string();
+    let Some(name) = message
+        .strip_prefix("Private identifier '#")
+        .and_then(|message| message.strip_suffix("' is not allowed outside class bodies"))
+    else {
+        return false;
+    };
+    context
+        .scope_snapshot()
+        .frames()
+        .iter()
+        .flat_map(|frame| frame.private_names())
+        .any(|private_name| private_name.name() == name)
 }
 
 fn parse_program_for_goal<'arena>(
@@ -3273,6 +3257,27 @@ fn is_admitted_direct_eval_super_diagnostic(
             nodes.kind(ancestor),
             AstKind::Function(_) | AstKind::StaticBlock(_)
         )
+    })
+}
+
+/// Implements `ContainsArguments` for a direct-eval `ScriptBody`.
+///
+/// Ordinary, generator, and async functions are grammar boundaries. Arrow
+/// functions deliberately are not, so their lexical `arguments` context is
+/// inherited from the class field initializer that called `eval`.
+fn direct_eval_contains_arguments_span(nodes: &AstNodes<'_>) -> Option<Span> {
+    nodes.iter_enumerated().find_map(|(node_id, node)| {
+        let AstKind::IdentifierReference(identifier) = node.kind() else {
+            return None;
+        };
+        if identifier.name != "arguments"
+            || nodes
+                .ancestor_kinds(node_id)
+                .any(|ancestor| matches!(ancestor, AstKind::Function(_)))
+        {
+            return None;
+        }
+        Some(identifier.span)
     })
 }
 

@@ -139,14 +139,21 @@ pub(super) fn plan_frame(
 
     let control_flow = verified.function().control_flow();
     let executable_kind = verified.metadata().executable_kind();
-    let eval_in_function = !matches!(
-        executable_kind,
-        CompilerExecutableKind::GlobalScript
-            | CompilerExecutableKind::IndirectEvalScript
-            | CompilerExecutableKind::DirectEvalScript
-            | CompilerExecutableKind::DynamicFunctionScript
-            | CompilerExecutableKind::OrdinaryArrow
-    );
+    let eval_context = EvalGrammarContext {
+        in_function: !matches!(
+            executable_kind,
+            CompilerExecutableKind::GlobalScript
+                | CompilerExecutableKind::IndirectEvalScript
+                | CompilerExecutableKind::DirectEvalScript
+                | CompilerExecutableKind::DynamicFunctionScript
+                | CompilerExecutableKind::OrdinaryArrow
+                | CompilerExecutableKind::AsyncArrow
+        ),
+        in_class_field_initializer: matches!(
+            executable_kind,
+            CompilerExecutableKind::ClassInstanceInitializer
+        ),
+    };
     let asynchronous = control_flow.function_header().kind() == FunctionKind::Async;
     let constructor_profile = if control_flow
         .function_header()
@@ -236,7 +243,7 @@ pub(super) fn plan_frame(
         reserved_values: frame_values,
         arguments_snapshot_use,
         entry,
-        eval_in_function,
+        eval_context,
         constructor_profile,
         strict,
         receiver_access,
@@ -306,17 +313,99 @@ fn duplicate_arguments_snapshot(frame: &Frame) -> Result<Vec<StoredValue>, Execu
     Ok(duplicate)
 }
 
-enum CapturedWriteAction {
+enum BindingWriteAction {
     Write,
     Ignore,
     Throw,
 }
 
+const fn binding_write_action(
+    policy: quickjs_bytecode::CompilerWritePolicy,
+    strict: bool,
+) -> BindingWriteAction {
+    match policy {
+        quickjs_bytecode::CompilerWritePolicy::Mutable => BindingWriteAction::Write,
+        quickjs_bytecode::CompilerWritePolicy::Immutable => BindingWriteAction::Throw,
+        quickjs_bytecode::CompilerWritePolicy::ImmutableInStrictCode if strict => {
+            BindingWriteAction::Throw
+        }
+        quickjs_bytecode::CompilerWritePolicy::ImmutableInStrictCode => BindingWriteAction::Ignore,
+    }
+}
+
+fn local_write_action(
+    runtime: &Runtime,
+    frame: &Frame,
+    strict: bool,
+    index: u32,
+    unchecked_tdz_initialization: bool,
+) -> Result<BindingWriteAction, EngineFault> {
+    let code = code(runtime, frame.code)?;
+    let function =
+        code.authority
+            .function(frame.template)
+            .ok_or(EngineFault::InvalidClosureEnvironment {
+                function: frame.template,
+            })?;
+    let argument_count = function
+        .function()
+        .control_flow()
+        .domains()
+        .argument_count();
+    let definition = function
+        .metadata()
+        .variables()
+        .get(argument_count as usize + index as usize)
+        .ok_or(EngineFault::MissingPoolEntry {
+            pool: "local variable",
+            index,
+        })?;
+    if unchecked_tdz_initialization && definition.policy().has_temporal_dead_zone() {
+        return Ok(BindingWriteAction::Write);
+    }
+    Ok(binding_write_action(definition.policy().writes(), strict))
+}
+
+fn apply_local_write(
+    runtime: &mut Runtime,
+    frame: &mut Frame,
+    strict: bool,
+    index: u32,
+    source_pc: BytecodePc,
+    preserve_value: bool,
+    unchecked_tdz_initialization: bool,
+) -> Result<Option<Step>, ExecutionError> {
+    match local_write_action(runtime, frame, strict, index, unchecked_tdz_initialization)? {
+        BindingWriteAction::Throw => Ok(Some(Step::Abrupt(immutable_binding_exception(
+            runtime,
+            frame,
+            BindingName::Local(index),
+            source_pc,
+        )?))),
+        BindingWriteAction::Ignore => {
+            if !preserve_value {
+                pop(frame)?;
+            }
+            Ok(None)
+        }
+        BindingWriteAction::Write => {
+            let value = if preserve_value {
+                peek(frame)?.duplicate()
+            } else {
+                pop(frame)?
+            };
+            write_local(runtime, frame, index, SlotValue::Value(value))?;
+            Ok(None)
+        }
+    }
+}
+
 fn captured_write_action(
     runtime: &Runtime,
     frame: &Frame,
+    strict: bool,
     index: u32,
-) -> Result<CapturedWriteAction, EngineFault> {
+) -> Result<BindingWriteAction, EngineFault> {
     let code = code(runtime, frame.code)?;
     let function =
         code.authority
@@ -335,14 +424,7 @@ fn captured_write_action(
             function: frame.template,
         });
     };
-    Ok(match policy.writes() {
-        quickjs_bytecode::CompilerWritePolicy::Mutable => CapturedWriteAction::Write,
-        quickjs_bytecode::CompilerWritePolicy::Immutable => CapturedWriteAction::Throw,
-        quickjs_bytecode::CompilerWritePolicy::ImmutableInStrictCode if frame.strict => {
-            CapturedWriteAction::Throw
-        }
-        quickjs_bytecode::CompilerWritePolicy::ImmutableInStrictCode => CapturedWriteAction::Ignore,
-    })
+    Ok(binding_write_action(policy.writes(), strict))
 }
 
 #[allow(
@@ -387,7 +469,10 @@ pub(super) fn create_frame(
         .lexical_receiver
         .as_ref()
         .map(StoredValue::duplicate);
-    let lexical_eval_in_function = bytecode.lexical_eval_in_function;
+    let lexical_eval_context = EvalGrammarContext {
+        in_function: bytecode.lexical_eval_in_function,
+        in_class_field_initializer: bytecode.lexical_eval_in_class_field_initializer,
+    };
     let lexical_new_target = bytecode.lexical_new_target;
     let lexical_derived_constructor = bytecode.lexical_derived_constructor;
     let lexical_derived_this = bytecode.lexical_derived_this;
@@ -621,7 +706,7 @@ pub(super) fn create_frame(
             additional: plan.stack_capacity,
         })?;
 
-    let (receiver, eval_in_function, new_target) =
+    let (receiver, eval_context, new_target) =
         if matches!(plan.receiver_access, ReceiverAccess::Lexical) {
             if plan.entry.is_construction() || new_target.is_some() {
                 return Err(EngineFault::RuntimeInvariant {
@@ -640,10 +725,10 @@ pub(super) fn create_frame(
                 }
                 .into());
             }
-            (receiver, lexical_eval_in_function, lexical_new_target)
+            (receiver, lexical_eval_context, lexical_new_target)
         } else {
             if lexical_receiver.is_some()
-                || lexical_eval_in_function
+                || lexical_eval_context != EvalGrammarContext::default()
                 || lexical_new_target.is_some()
                 || lexical_derived_constructor.is_some()
                 || lexical_derived_this.is_some()
@@ -655,7 +740,7 @@ pub(super) fn create_frame(
             }
             (
                 normalize_receiver(runtime, realm, plan.receiver_access, receiver)?,
-                plan.eval_in_function,
+                plan.eval_context,
                 new_target,
             )
         };
@@ -715,7 +800,9 @@ pub(super) fn create_frame(
             | CompilerExecutableKind::DynamicFunctionScript
             | CompilerExecutableKind::OrdinaryFunction
             | CompilerExecutableKind::OrdinaryArrow
+            | CompilerExecutableKind::AsyncArrow
             | CompilerExecutableKind::OrdinaryMethod
+            | CompilerExecutableKind::ClassInstanceInitializer
             | CompilerExecutableKind::GeneratorFunction
             | CompilerExecutableKind::GeneratorMethod
             | CompilerExecutableKind::AsyncFunction
@@ -730,7 +817,7 @@ pub(super) fn create_frame(
         inherited_eval_environment: inherited_eval_environment_marker,
         parameter_eval_boundary,
         receiver,
-        eval_in_function,
+        eval_context,
         new_target,
         instruction: plan.instruction,
         return_to,
@@ -749,6 +836,7 @@ pub(super) fn create_frame(
         generator_resume: None,
         generator_result: None,
         resume_abrupt: None,
+        pending_async_iterator_close: None,
         reserved_values: plan.reserved_values,
         arguments_snapshot_use: plan.arguments_snapshot_use,
         arguments_snapshot,
@@ -772,7 +860,13 @@ pub(super) fn execute_one(
     frame: &mut Frame,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<Step, ExecutionError> {
-    let (verified_instruction, source_pc, parameter_initialization_end, eval_reference_call) = {
+    let (
+        verified_instruction,
+        source_pc,
+        parameter_initialization_end,
+        eval_reference_call,
+        strict_mode_override,
+    ) = {
         let code = code(runtime, frame.code)?;
         let function = code.authority.function(frame.template).ok_or(
             EngineFault::InvalidClosureEnvironment {
@@ -795,8 +889,13 @@ pub(super) fn execute_one(
             function
                 .function()
                 .is_eval_reference_call(frame.instruction),
+            function
+                .metadata()
+                .source()
+                .is_strict_mode_pc(instruction.decoded().pc()),
         )
     };
+    let strict = frame.strict || strict_mode_override;
 
     if parameter_initialization_end.is_some_and(|boundary| frame.instruction.get() >= boundary)
         && let Some(body) = frame.body_eval_environment.take()
@@ -984,7 +1083,7 @@ pub(super) fn execute_one(
                     property.key,
                     property.name,
                     value != 0,
-                    frame.strict,
+                    strict,
                     realm,
                     Some(return_to),
                     origin,
@@ -996,7 +1095,7 @@ pub(super) fn execute_one(
                     property.key,
                     property.name,
                     value != 0,
-                    frame.strict,
+                    strict,
                     realm,
                     Some(return_to),
                     origin,
@@ -1049,7 +1148,7 @@ pub(super) fn execute_one(
                     property.key,
                     property.name,
                     value,
-                    frame.strict,
+                    strict,
                     realm,
                     Some(return_to),
                     origin,
@@ -1126,6 +1225,18 @@ pub(super) fn execute_one(
                             HeapReference::Function(function) => StoredValue::Function(function),
                             HeapReference::Object(object) => StoredValue::Object(object),
                         },
+                    );
+                }
+                6 => {
+                    let constructor =
+                        frame
+                            .derived_constructor
+                            .ok_or(EngineFault::RuntimeInvariant {
+                                message: "verified contextual instance initializer has no derived constructor",
+                            })?;
+                    push(
+                        frame,
+                        StoredValue::Function(class_instance_initializer(runtime, constructor)?),
                     );
                 }
                 arguments_kind @ (0 | 1) => {
@@ -1238,6 +1349,31 @@ pub(super) fn execute_one(
                 matcher,
             )?;
             push(frame, StoredValue::Object(object));
+        }
+        FinalOpcode::Import => {
+            let options = pop(frame)?;
+            let specifier = pop(frame)?;
+            let realm = code(runtime, frame.code)?.realm;
+            let return_to =
+                CallReturn::push(verified_instruction.successors().fallthrough().ok_or(
+                    EngineFault::InvalidSuccessor {
+                        function: frame.template,
+                        pc: source_pc,
+                    },
+                )?);
+            let origin = instruction_location(runtime, frame, source_pc)?;
+            return native_step(
+                begin_dynamic_import(
+                    runtime,
+                    specifier,
+                    options,
+                    realm,
+                    Some(return_to),
+                    origin,
+                    execution_budget,
+                ),
+                return_to,
+            );
         }
         FinalOpcode::ArrayFrom => {
             let Operands::NPop { argument_count } = operands else {
@@ -1478,6 +1614,16 @@ pub(super) fn execute_one(
             push(frame, first);
             push(frame, second);
         }
+        FinalOpcode::Rot4l => {
+            let fourth = pop(frame)?;
+            let third = pop(frame)?;
+            let second = pop(frame)?;
+            let first = pop(frame)?;
+            push(frame, second);
+            push(frame, third);
+            push(frame, fourth);
+            push(frame, first);
+        }
         FinalOpcode::Call
         | FinalOpcode::Call0
         | FinalOpcode::Call1
@@ -1568,8 +1714,71 @@ pub(super) fn execute_one(
             }
             return Ok(Step::DirectEval {
                 function: *function,
-                inputs,
+                inputs: DirectEvalInputSource::Call(inputs),
                 scope_index,
+                strict,
+                return_to,
+                source_pc,
+            });
+        }
+        FinalOpcode::ApplyEval => {
+            let Operands::U16(scope_index) = operands else {
+                return unsupported_dispatch(opcode);
+            };
+            let required = if eval_reference_call { 3 } else { 2 };
+            if frame.stack.len() < required {
+                return Err(EngineFault::StackDepthMismatch {
+                    function: frame.template,
+                    pc: source_pc,
+                    expected: u32::try_from(required).unwrap_or(u32::MAX),
+                    actual: frame.stack.len(),
+                }
+                .into());
+            }
+            let callee_index = frame.stack.len() - 2;
+            let StoredValue::Function(function) = stack_value_at(frame, callee_index)? else {
+                return Ok(Step::Abrupt(not_callable_exception(
+                    runtime, frame, source_pc,
+                )?));
+            };
+            let function = *function;
+            let array_like = stack_value_at(frame, callee_index + 1)?.duplicate();
+            let receiver = if eval_reference_call {
+                stack_value_at(frame, callee_index - 1)?.duplicate()
+            } else {
+                StoredValue::Undefined
+            };
+            let return_to =
+                CallReturn::push(verified_instruction.successors().fallthrough().ok_or(
+                    EngineFault::InvalidSuccessor {
+                        function: frame.template,
+                        pc: source_pc,
+                    },
+                )?);
+            let realm = code(runtime, frame.code)?.realm;
+            frame.stack.truncate(callee_index);
+            if !is_canonical_realm_eval(runtime, function, realm)? {
+                return Ok(Step::Apply {
+                    function,
+                    receiver,
+                    array_like,
+                    magic: 0,
+                    return_to,
+                    source_pc,
+                });
+            }
+            let StoredValue::Object(arguments) = array_like else {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "verified apply_eval argument list is not an Array",
+                }
+                .into());
+            };
+            let argument = verified_apply_eval_first_argument(runtime, arguments)?;
+            return Ok(Step::DirectEval {
+                function,
+                inputs: DirectEvalInputSource::FirstArgument(argument),
+                scope_index,
+                strict,
                 return_to,
                 source_pc,
             });
@@ -1748,7 +1957,7 @@ pub(super) fn execute_one(
                     property.name,
                     value,
                     receiver,
-                    frame.strict,
+                    strict,
                     false,
                     realm,
                     Some(return_to),
@@ -2016,7 +2225,7 @@ pub(super) fn execute_one(
                     key,
                     PropertyKeyTarget::Delete {
                         base,
-                        strict: frame.strict,
+                        strict,
                         realm,
                     },
                     realm,
@@ -2113,7 +2322,7 @@ pub(super) fn execute_one(
                     PropertyKeyTarget::Write {
                         base,
                         value,
-                        strict: frame.strict,
+                        strict,
                         realm,
                     },
                     realm,
@@ -2272,8 +2481,11 @@ pub(super) fn execute_one(
             } else {
                 peek(frame)?.duplicate()
             };
-            if let Some(reference) = base.heap_reference()
-                && runtime.proxy_state(reference)?.is_some()
+            let outcome = read_observable_static_property(runtime, realm, &base, &property.key)?;
+            if let ObservablePropertyReadOutcome::Proxy {
+                reference,
+                receiver,
+            } = outcome
             {
                 let return_to =
                     CallReturn::push(verified_instruction.successors().fallthrough().ok_or(
@@ -2287,7 +2499,7 @@ pub(super) fn execute_one(
                     begin_internal_get(
                         runtime,
                         reference,
-                        base,
+                        receiver,
                         property.key,
                         realm,
                         Some(return_to),
@@ -2297,7 +2509,10 @@ pub(super) fn execute_one(
                     return_to,
                 );
             }
-            match read_static_property(runtime, realm, &base, &property.key)? {
+            let ObservablePropertyReadOutcome::Complete(outcome) = outcome else {
+                unreachable!("observable static property read classification is exhaustive")
+            };
+            match outcome {
                 PropertyReadOutcome::Value(value) => push(frame, value),
                 PropertyReadOutcome::Getter { function, receiver } => {
                     let return_to =
@@ -2438,7 +2653,7 @@ pub(super) fn execute_one(
                         property.name,
                         value,
                         base,
-                        frame.strict,
+                        strict,
                         false,
                         realm,
                         Some(return_to),
@@ -2457,8 +2672,7 @@ pub(super) fn execute_one(
                         },
                     )?);
                 let origin = instruction_location(runtime, frame, source_pc)?;
-                let target =
-                    array_length_write_target(base, property.name, frame.strict, false, &value);
+                let target = array_length_write_target(base, property.name, strict, false, &value);
                 return native_step(
                     begin_operator_primitive_conversion(
                         runtime,
@@ -2475,7 +2689,7 @@ pub(super) fn execute_one(
             }
             if let Some((object, key)) = typed_array_indexed_key(runtime, &base, &property.key)? {
                 if runtime.is_typed_array_backing_buffer_immutable(object)? {
-                    if frame.strict {
+                    if strict {
                         return Ok(Step::Abrupt(property_exception(
                             runtime,
                             frame,
@@ -2515,7 +2729,7 @@ pub(super) fn execute_one(
                 &base,
                 property.key,
                 value,
-                frame.strict,
+                strict,
                 execution_budget,
             )? {
                 PropertyWriteOutcome::Complete => {}
@@ -2963,7 +3177,7 @@ pub(super) fn execute_one(
             let global = global_reference_operand(runtime, frame, index)?;
             let name = global.name.clone();
             let value = pop(frame)?;
-            match write_realm_global(runtime, global, value, frame.strict, execution_budget)? {
+            match write_realm_global(runtime, global, value, strict, execution_budget)? {
                 RealmGlobalWriteOutcome::Complete => {}
                 RealmGlobalWriteOutcome::Setter {
                     function,
@@ -3048,8 +3262,11 @@ pub(super) fn execute_one(
         | FinalOpcode::PutLoc2
         | FinalOpcode::PutLoc3 => {
             let index = local_index(opcode, operands)?;
-            let value = pop(frame)?;
-            write_local(runtime, frame, index, SlotValue::Value(value))?;
+            if let Some(step) =
+                apply_local_write(runtime, frame, strict, index, source_pc, false, true)?
+            {
+                return Ok(step);
+            }
         }
         FinalOpcode::SetLoc
         | FinalOpcode::SetLoc8
@@ -3058,8 +3275,11 @@ pub(super) fn execute_one(
         | FinalOpcode::SetLoc2
         | FinalOpcode::SetLoc3 => {
             let index = local_index(opcode, operands)?;
-            let value = peek(frame)?.duplicate();
-            write_local(runtime, frame, index, SlotValue::Value(value))?;
+            if let Some(step) =
+                apply_local_write(runtime, frame, strict, index, source_pc, true, true)?
+            {
+                return Ok(step);
+            }
         }
         FinalOpcode::GetVarRef
         | FinalOpcode::GetVarRef0
@@ -3114,8 +3334,8 @@ pub(super) fn execute_one(
         | FinalOpcode::PutVarRef2
         | FinalOpcode::PutVarRef3 => {
             let index = closure_index(opcode, operands)?;
-            match captured_write_action(runtime, frame, index)? {
-                CapturedWriteAction::Throw => {
+            match captured_write_action(runtime, frame, strict, index)? {
+                BindingWriteAction::Throw => {
                     return Ok(Step::Abrupt(immutable_binding_exception(
                         runtime,
                         frame,
@@ -3123,10 +3343,10 @@ pub(super) fn execute_one(
                         source_pc,
                     )?));
                 }
-                CapturedWriteAction::Ignore => {
+                BindingWriteAction::Ignore => {
                     pop(frame)?;
                 }
-                CapturedWriteAction::Write => {
+                BindingWriteAction::Write => {
                     let value = pop(frame)?;
                     write_environment(runtime, frame, index, SlotValue::Value(value))?;
                 }
@@ -3138,8 +3358,8 @@ pub(super) fn execute_one(
         | FinalOpcode::SetVarRef2
         | FinalOpcode::SetVarRef3 => {
             let index = closure_index(opcode, operands)?;
-            match captured_write_action(runtime, frame, index)? {
-                CapturedWriteAction::Throw => {
+            match captured_write_action(runtime, frame, strict, index)? {
+                BindingWriteAction::Throw => {
                     return Ok(Step::Abrupt(immutable_binding_exception(
                         runtime,
                         frame,
@@ -3147,8 +3367,8 @@ pub(super) fn execute_one(
                         source_pc,
                     )?));
                 }
-                CapturedWriteAction::Ignore => {}
-                CapturedWriteAction::Write => {
+                BindingWriteAction::Ignore => {}
+                BindingWriteAction::Write => {
                     let value = peek(frame)?.duplicate();
                     write_environment(runtime, frame, index, SlotValue::Value(value))?;
                 }
@@ -3184,6 +3404,22 @@ pub(super) fn execute_one(
                     source_pc,
                 )?));
             }
+            if let Some(step) =
+                apply_local_write(runtime, frame, strict, index, source_pc, false, false)?
+            {
+                return Ok(step);
+            }
+        }
+        FinalOpcode::PutLocCheckInit => {
+            let index = local_index(opcode, operands)?;
+            if !local_is_uninitialized(runtime, frame, index)? {
+                return Ok(Step::Abrupt(lexical_reinitialization_exception(
+                    runtime,
+                    frame,
+                    BindingName::Local(index),
+                    source_pc,
+                )?));
+            }
             let value = pop(frame)?;
             write_local(runtime, frame, index, SlotValue::Value(value))?;
         }
@@ -3197,8 +3433,11 @@ pub(super) fn execute_one(
                     source_pc,
                 )?));
             }
-            let value = peek(frame)?.duplicate();
-            write_local(runtime, frame, index, SlotValue::Value(value))?;
+            if let Some(step) =
+                apply_local_write(runtime, frame, strict, index, source_pc, true, false)?
+            {
+                return Ok(step);
+            }
         }
         FinalOpcode::GetVarRefCheck => {
             let index = closure_index(opcode, operands)?;
@@ -3234,8 +3473,8 @@ pub(super) fn execute_one(
                     source_pc,
                 )?));
             }
-            match captured_write_action(runtime, frame, index)? {
-                CapturedWriteAction::Throw => {
+            match captured_write_action(runtime, frame, strict, index)? {
+                BindingWriteAction::Throw => {
                     return Ok(Step::Abrupt(immutable_binding_exception(
                         runtime,
                         frame,
@@ -3243,10 +3482,10 @@ pub(super) fn execute_one(
                         source_pc,
                     )?));
                 }
-                CapturedWriteAction::Ignore => {
+                BindingWriteAction::Ignore => {
                     pop(frame)?;
                 }
-                CapturedWriteAction::Write => {
+                BindingWriteAction::Write => {
                     let value = pop(frame)?;
                     write_environment(runtime, frame, index, SlotValue::Value(value))?;
                 }
@@ -3406,7 +3645,13 @@ pub(super) fn execute_one(
                 frame.instruction = return_to.instruction;
                 return Ok(Step::Continue);
             }
-            let (iterator, next) = deactivate_for_of_record(frame, false, offset)?;
+            let (iterator, next, asynchronous) = deactivate_for_of_record(frame, false, offset)?;
+            if asynchronous {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "verified synchronous for-of step reached an async iterator record",
+                }
+                .into());
+            }
             let realm = code(runtime, frame.code)?.realm;
             let return_to =
                 CallReturn::push(verified_instruction.successors().fallthrough().ok_or(
@@ -3426,6 +3671,75 @@ pub(super) fn execute_one(
                     origin,
                     execution_budget,
                 ),
+                return_to,
+            );
+        }
+        FinalOpcode::ForAwaitOfNext => {
+            let (iterator, next, asynchronous) = deactivate_for_of_record(frame, false, 0)?;
+            if !asynchronous {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "verified async for-of step reached a synchronous iterator record",
+                }
+                .into());
+            }
+            let StoredValue::Function(function) = next else {
+                let realm = code(runtime, frame.code)?.realm;
+                return Ok(Step::Abrupt(PendingException {
+                    realm,
+                    payload: PendingExceptionPayload::EngineError {
+                        kind: ExceptionKind::TypeError,
+                        message: JsString::from_utf8("not a function")?,
+                    },
+                    origin: instruction_location(runtime, frame, source_pc)?,
+                }));
+            };
+            let return_to =
+                CallReturn::push(verified_instruction.successors().fallthrough().ok_or(
+                    EngineFault::InvalidSuccessor {
+                        function: frame.template,
+                        pc: source_pc,
+                    },
+                )?);
+            return Ok(Step::Call {
+                function,
+                inputs: CallInputSource::Prepared(CallInputs {
+                    receiver: iterator,
+                    arguments: CallArguments::from_values(Vec::new()),
+                    new_target: None,
+                }),
+                return_to,
+                source_pc,
+            });
+        }
+        FinalOpcode::IteratorGetValueDone => {
+            let result = pop(frame)?;
+            let (iterator, next, asynchronous) = deactivate_for_of_record(frame, true, 0)?;
+            if !asynchronous {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "verified async iterator result reached a synchronous record",
+                }
+                .into());
+            }
+            let realm = code(runtime, frame.code)?.realm;
+            let return_to =
+                CallReturn::push(verified_instruction.successors().fallthrough().ok_or(
+                    EngineFault::InvalidSuccessor {
+                        function: frame.template,
+                        pc: source_pc,
+                    },
+                )?);
+            let origin = instruction_location(runtime, frame, source_pc)?;
+            let state = ForOfNextContinuation {
+                iterator,
+                next,
+                result: Some(result),
+                realm,
+                stage: ForOfNextStage::Done,
+                offset: 0,
+                origin,
+            };
+            return native_step(
+                begin_for_await_of_result(runtime, state, Some(return_to), execution_budget),
                 return_to,
             );
         }
@@ -3522,7 +3836,7 @@ pub(super) fn execute_one(
             }
         }
         FinalOpcode::IteratorClose => {
-            let (iterator, _next) = deactivate_for_of_record(frame, true, 0)?;
+            let (iterator, _next, asynchronous) = deactivate_for_of_record(frame, true, 0)?;
             let realm = code(runtime, frame.code)?.realm;
             let return_to =
                 CallReturn::discard(verified_instruction.successors().fallthrough().ok_or(
@@ -3532,10 +3846,21 @@ pub(super) fn execute_one(
                     },
                 )?);
             let origin = instruction_location(runtime, frame, source_pc)?;
+            if asynchronous {
+                if frame.pending_async_iterator_close.is_some() {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "async iterator close overlapped another pending close",
+                    }
+                    .into());
+                }
+                frame.pending_async_iterator_close = Some(PendingAsyncIteratorClose::Normal);
+                frame.instruction = return_to.instruction;
+            }
             return native_step(
                 begin_for_of_close(
                     runtime,
                     iterator,
+                    asynchronous,
                     realm,
                     Some(return_to),
                     origin,
@@ -3857,15 +4182,23 @@ pub(super) fn execute_one(
             }));
         }
         FinalOpcode::ThrowError => {
-            let Operands::AtomU8 { value: 4, .. } = operands else {
-                return unsupported_dispatch(opcode);
+            let (kind, message) = match operands {
+                Operands::AtomU8 { value: 3, .. } => (
+                    ExceptionKind::ReferenceError,
+                    "unsupported reference to 'super'",
+                ),
+                Operands::AtomU8 { value: 4, .. } => (
+                    ExceptionKind::TypeError,
+                    "iterator does not have a throw method",
+                ),
+                _ => return unsupported_dispatch(opcode),
             };
             let realm = code(runtime, frame.code)?.realm;
             return Ok(Step::Abrupt(PendingException {
                 realm,
                 payload: PendingExceptionPayload::EngineError {
-                    kind: ExceptionKind::TypeError,
-                    message: JsString::from_utf8("iterator does not have a throw method")?,
+                    kind,
+                    message: JsString::from_utf8(message)?,
                 },
                 origin: instruction_location(runtime, frame, source_pc)?,
             }));
@@ -4068,6 +4401,41 @@ pub(super) fn execute_one(
                 pc: source_pc,
             })?;
     Ok(Step::Continue)
+}
+
+/// Reads the first value from the fresh dense Array certified by spread-call
+/// lowering. A hand-authored compiler graph that substitutes a sparse or
+/// exotic list fails closed instead of bypassing observable indexed `Get`.
+fn verified_apply_eval_first_argument(
+    runtime: &Runtime,
+    array: ObjectId,
+) -> Result<StoredValue, EngineFault> {
+    let object = runtime
+        .objects
+        .get(array)
+        .ok_or(EngineFault::StaleHeapEdge {
+            edge: "object",
+            index: array.index(),
+            generation: array.generation(),
+        })?;
+    let state = object.array_state().ok_or(EngineFault::RuntimeInvariant {
+        message: "verified apply_eval argument list is not an Array",
+    })?;
+    if !state.is_dense()
+        || usize::try_from(state.length()).ok() != Some(state.dense_property_count())
+    {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "verified apply_eval argument list is not a packed dense Array",
+        });
+    }
+    if state.length() == 0 {
+        return Ok(StoredValue::Undefined);
+    }
+    state
+        .dense_value(ArrayIndex::new(0).expect("zero is an Array index"))
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "verified apply_eval argument list lost its first dense element",
+        })
 }
 
 /// Converts the VM-only private-symbol value into the backing key used by the

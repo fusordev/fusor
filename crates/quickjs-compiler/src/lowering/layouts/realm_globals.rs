@@ -70,6 +70,7 @@ pub(in crate::lowering) struct RealmGlobalLayout {
     imports: Box<[RealmGlobalId]>,
     with_by_binding: Box<[Box<[RealmGlobalId]>]>,
     with_by_unresolved: Box<[Box<[RealmGlobalId]>]>,
+    direct_private_by_name: HashMap<Arc<str>, RealmGlobalId>,
     direct_environment_size: u32,
 }
 
@@ -82,6 +83,7 @@ struct RealmGlobalLayoutBuilder<'plan> {
     by_unresolved: Vec<Option<RealmGlobalId>>,
     needs: Vec<Vec<RealmGlobalId>>,
     direct_by_name: HashMap<Arc<str>, DirectEvalCallerBinding>,
+    direct_private_by_name: HashMap<Arc<str>, RealmGlobalId>,
     direct_variable_by_name: HashMap<Arc<str>, DirectEvalCallerBinding>,
     direct_lexical_names: HashSet<Arc<str>>,
     direct_with_objects: Vec<DirectEvalWithObject>,
@@ -189,6 +191,7 @@ impl<'plan> RealmGlobalLayoutBuilder<'plan> {
             by_unresolved: vec![None; plan.unresolved_globals().len()],
             needs: (0..plan.executables().len()).map(|_| Vec::new()).collect(),
             direct_by_name: HashMap::new(),
+            direct_private_by_name: HashMap::new(),
             direct_variable_by_name: HashMap::new(),
             direct_lexical_names: HashSet::new(),
             direct_with_objects: Vec::new(),
@@ -248,9 +251,62 @@ impl<'plan> RealmGlobalLayoutBuilder<'plan> {
                             .insert(Arc::from(binding.name()));
                     }
                 }
+                for private_name in frame.private_names() {
+                    builder.push_direct_private_name(private_name.name())?;
+                }
             }
+            builder.import_direct_private_names()?;
         }
         Ok(builder)
+    }
+
+    fn push_direct_private_name(&mut self, name: &str) -> Result<(), LeafCompilationError> {
+        let index = self.direct_environment_size;
+        self.direct_environment_size = self.direct_environment_size.checked_add(1).ok_or(
+            LeafCompilationError::CapacityExceeded {
+                domain: "direct-eval caller bindings",
+            },
+        )?;
+        if self.direct_private_by_name.contains_key(name) {
+            return Ok(());
+        }
+        let policy = CompilerBindingPolicy::new(
+            CompilerBindingKind::ClassPrivateName,
+            CompilerInitializationPolicy::AtDeclaration,
+            CompilerWritePolicy::Immutable,
+            true,
+        );
+        let first_span = self
+            .plan
+            .executables()
+            .first()
+            .map_or(Span::new(0, 0), crate::storage::Executable::span);
+        let name: Arc<str> = Arc::from(name);
+        let global = self.push_binding(RealmGlobalBinding {
+            name: Arc::from(format!("#{name}")),
+            first_span,
+            policy,
+            binding: CompilerClosureBinding::Captured(policy),
+            root_source: RealmGlobalRootSource::DirectEvalBinding { index },
+            declaration: None,
+        })?;
+        self.direct_private_by_name.insert(name, global);
+        Ok(())
+    }
+
+    fn import_direct_private_names(&mut self) -> Result<(), LeafCompilationError> {
+        // A direct-eval PrivateEnvironment is lexically inherited by every
+        // function created from the eval Script. Import each visible name into
+        // every executable; class-local private names shadow it during
+        // expression resolution.
+        let globals: Vec<_> = self.direct_private_by_name.values().copied().collect();
+        for index in 0..self.plan.executables().len() {
+            let executable = self.plan.executables()[index].id();
+            for &global in &globals {
+                self.push_need(executable, global)?;
+            }
+        }
+        Ok(())
     }
 
     fn direct_with_objects_before(&self, fallback: Option<u32>) -> Vec<RealmGlobalId> {
@@ -499,6 +555,7 @@ impl<'plan> RealmGlobalLayoutBuilder<'plan> {
             DeclarationKind::FunctionName
             | DeclarationKind::ClassName
             | DeclarationKind::ClassFieldKey
+            | DeclarationKind::ClassInstanceInitializer
             | DeclarationKind::ClassPrivateName
             | DeclarationKind::ClassStaticReceiver
             | DeclarationKind::WithObject
@@ -720,6 +777,7 @@ impl<'plan> RealmGlobalLayoutBuilder<'plan> {
                 .map(Vec::into_boxed_slice)
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
+            direct_private_by_name: self.direct_private_by_name,
             direct_environment_size,
         })
     }
@@ -741,6 +799,7 @@ impl RealmGlobalLayout {
                 with_by_binding: vec![Box::default(); plan.bindings().len()].into_boxed_slice(),
                 with_by_unresolved: vec![Box::default(); plan.unresolved_globals().len()]
                     .into_boxed_slice(),
+                direct_private_by_name: HashMap::new(),
                 direct_environment_size: 0,
             });
         }
@@ -791,6 +850,10 @@ impl RealmGlobalLayout {
         self.with_by_unresolved
             .get(id.index())
             .map_or(&[], Box::as_ref)
+    }
+
+    pub(in crate::lowering) fn direct_private_for_name(&self, name: &str) -> Option<RealmGlobalId> {
+        self.direct_private_by_name.get(name).copied()
     }
 
     pub(in crate::lowering) fn imports_for(

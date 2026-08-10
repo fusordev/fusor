@@ -34,6 +34,7 @@ fn verified_binding_policy(
         DeclarationKind::Const => VerifiedBindingKind::Const,
         DeclarationKind::ClassName => VerifiedBindingKind::ClassName,
         DeclarationKind::ClassFieldKey => VerifiedBindingKind::ClassFieldKey,
+        DeclarationKind::ClassInstanceInitializer => VerifiedBindingKind::ClassInstanceInitializer,
         DeclarationKind::ClassPrivateName => VerifiedBindingKind::ClassPrivateName,
         DeclarationKind::ClassStaticReceiver => VerifiedBindingKind::ClassStaticReceiver,
         DeclarationKind::WithObject => VerifiedBindingKind::WithObject,
@@ -138,6 +139,7 @@ pub(in crate::lowering) const fn binding_has_scope(policy: DeclarationPolicy) ->
             | DeclarationKind::Const
             | DeclarationKind::ClassName
             | DeclarationKind::ClassFieldKey
+            | DeclarationKind::ClassInstanceInitializer
             | DeclarationKind::ClassPrivateName
             | DeclarationKind::ClassStaticReceiver
             | DeclarationKind::WithObject
@@ -902,6 +904,7 @@ fn build_unverified_graph_records(
             )
             .with_atom_pool(Arc::clone(&function.atoms))
             .with_parameter_initialization_end(function.parameter_initialization_end)
+            .with_function_initializer_prefix_start(function.function_initializer_prefix_start)
             .with_eval_reference_call_instructions(Arc::clone(
                 &function.eval_reference_call_instructions,
             ))

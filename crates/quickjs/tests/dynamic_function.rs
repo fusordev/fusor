@@ -24,6 +24,23 @@ fn source_kind<'source>(
 }
 
 #[test]
+fn dynamic_function_compiles_parenthesized_super_member_optional_calls() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+
+    construct_dynamic_function(
+        &mut context,
+        source(
+            &[],
+            "class C{constructor(key){void ((super[key])?.());void ((super.value)?.());}}",
+        ),
+        DynamicFunctionLimits::default(),
+    )
+    .expect("parenthesized super references remain valid optional-call callees");
+}
+
+#[test]
 fn dynamic_generator_function_compiles_and_executes_through_the_facade() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
@@ -899,6 +916,99 @@ fn closed_direct_eval_executes_inside_an_object_method() {
     .expect("number value")
     .expect("finite number");
     assert!(result.strict_equals(JsNumber::from_i32(42)));
+}
+
+#[test]
+fn class_field_direct_eval_rejects_arguments_before_execution_across_arrows() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = construct_dynamic_function(
+        &mut context,
+        source(
+            &[],
+            "let executed=0;\
+             class Public{value=(()=>eval('executed++; arguments;'))();}\
+             class Private{#value=eval('executed++; () => arguments;');}\
+             let publicRejected=false;\
+             let privateRejected=false;\
+             try{new Public;}catch(error){publicRejected=error.name==='SyntaxError';}\
+             try{new Private;}catch(error){privateRejected=error.name==='SyntaxError';}\
+             class Boundary{value=(function(){return eval('arguments.length;');})(1,2,3);}\
+             return publicRejected&&privateRejected&&executed===0&&new Boundary().value===3;",
+        ),
+        DynamicFunctionLimits::default(),
+    )
+    .expect("dynamic Function with class field direct eval")
+    .into_value()
+    .into_function()
+    .expect("function completion");
+
+    let result = call_with_dynamic_function_support(
+        &mut context,
+        &function,
+        &[],
+        DynamicFunctionLimits::default(),
+    )
+    .expect("class field direct eval early errors");
+    assert_eq!(result.as_boolean().expect("live Boolean"), Some(true));
+}
+
+#[test]
+fn class_private_environment_is_visible_to_direct_eval() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = construct_dynamic_function(
+        &mut context,
+        source(
+            &[],
+            "class C{\
+                 #field=40;\
+                 #method(){return 1;}\
+                 get #accessor(){return 1;}\
+                 set #accessor(value){this.#field=value;}\
+                 initialized=eval('this.#field+this.#method()+this.#accessor');\
+                 read(){return eval('this.#field');}\
+                 nested(){return eval(\"eval('this.#field')\");}\
+                 escape(){return eval('()=>this.#field');}\
+                 has(){return eval('#field in this');}\
+                 write(){return eval('this.#accessor=42');}\
+                 reject(){try{eval('this.#missing');}catch(error){return error.name;}}\
+                 static #staticField=43;\
+                 static read(){return eval('this.#staticField');}\
+             }\
+             let instance=new C;\
+             let before=instance.read();\
+             let escaped=instance.escape();\
+             instance.write();\
+             return instance.initialized+'|'+before+'|'+instance.read()+'|'+\
+                 instance.nested()+'|'+escaped()+'|'+instance.has()+'|'+\
+                 C.read()+'|'+instance.reject();",
+        ),
+        DynamicFunctionLimits::default(),
+    )
+    .expect("dynamic Function with class private direct eval")
+    .into_value()
+    .into_function()
+    .expect("function completion");
+
+    let result = call_with_dynamic_function_support(
+        &mut context,
+        &function,
+        &[],
+        DynamicFunctionLimits::default(),
+    )
+    .expect("class private direct eval");
+    assert_eq!(
+        result
+            .as_string()
+            .expect("live result")
+            .expect("string")
+            .to_utf8_lossy()
+            .expect("UTF-8"),
+        "42|40|42|42|42|true|43|SyntaxError"
+    );
 }
 
 #[test]

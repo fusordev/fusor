@@ -155,6 +155,7 @@ pub(super) const fn is_declarative_object(id: IntrinsicObjectId) -> bool {
             | IntrinsicObjectId::BigIntPrototype
             | IntrinsicObjectId::StringPrototype
             | IntrinsicObjectId::ArrayPrototype
+            | IntrinsicObjectId::ArrayUnscopables
             | IntrinsicObjectId::ArrayBufferPrototype
             | IntrinsicObjectId::SharedArrayBufferPrototype
             | IntrinsicObjectId::DataViewPrototype
@@ -296,14 +297,18 @@ pub(super) const fn is_declarative_function(id: IntrinsicFunctionId) -> bool {
             | NativeFunctionKind::IteratorZip
             | NativeFunctionKind::IteratorZipKeyed
             | NativeFunctionKind::IteratorFrom
+            | NativeFunctionKind::IteratorPrototypeChunks
             | NativeFunctionKind::IteratorPrototypeDispose
             | NativeFunctionKind::IteratorPrototypeDrop
+            | NativeFunctionKind::IteratorPrototypeIncludes
+            | NativeFunctionKind::IteratorPrototypeJoin
             | NativeFunctionKind::IteratorPrototypeConsumer(_)
             | NativeFunctionKind::IteratorPrototypeFilter
             | NativeFunctionKind::IteratorPrototypeFlatMap
             | NativeFunctionKind::IteratorPrototypeMap
             | NativeFunctionKind::IteratorPrototypeTake
             | NativeFunctionKind::IteratorPrototypeToArray
+            | NativeFunctionKind::IteratorPrototypeWindows
             | NativeFunctionKind::IteratorPrototypeConstructorGetter
             | NativeFunctionKind::IteratorPrototypeConstructorSetter
             | NativeFunctionKind::IteratorPrototypeToStringTagGetter
@@ -677,6 +682,7 @@ const fn is_array_identity(id: IntrinsicIdentity) -> bool {
     match id {
         IntrinsicIdentity::Object(
             IntrinsicObjectId::ArrayPrototype
+            | IntrinsicObjectId::ArrayUnscopables
             | IntrinsicObjectId::ArrayBufferPrototype
             | IntrinsicObjectId::SharedArrayBufferPrototype
             | IntrinsicObjectId::DataViewPrototype
@@ -876,6 +882,12 @@ pub(super) const fn is_kernel_function(id: IntrinsicFunctionId) -> bool {
             | NativeFunctionKind::ObjectConstructor
             | NativeFunctionKind::ObjectPrototypeToString
             | NativeFunctionKind::ObjectPrototypeValueOf
+            | NativeFunctionKind::ObjectPrototypeProtoGetter
+            | NativeFunctionKind::ObjectPrototypeProtoSetter
+            | NativeFunctionKind::ObjectPrototypeDefineGetter
+            | NativeFunctionKind::ObjectPrototypeDefineSetter
+            | NativeFunctionKind::ObjectPrototypeLookupGetter
+            | NativeFunctionKind::ObjectPrototypeLookupSetter
             | NativeFunctionKind::ObjectPrototypeHasOwnProperty
             | NativeFunctionKind::ObjectPrototypeIsPrototypeOf
             | NativeFunctionKind::ObjectPrototypePropertyIsEnumerable
@@ -971,14 +983,18 @@ const fn is_iterator_function(id: IntrinsicFunctionId) -> bool {
             | NativeFunctionKind::IteratorZip
             | NativeFunctionKind::IteratorZipKeyed
             | NativeFunctionKind::IteratorFrom
+            | NativeFunctionKind::IteratorPrototypeChunks
             | NativeFunctionKind::IteratorPrototypeDispose
             | NativeFunctionKind::IteratorPrototypeDrop
+            | NativeFunctionKind::IteratorPrototypeIncludes
+            | NativeFunctionKind::IteratorPrototypeJoin
             | NativeFunctionKind::IteratorPrototypeConsumer(_)
             | NativeFunctionKind::IteratorPrototypeFilter
             | NativeFunctionKind::IteratorPrototypeFlatMap
             | NativeFunctionKind::IteratorPrototypeMap
             | NativeFunctionKind::IteratorPrototypeTake
             | NativeFunctionKind::IteratorPrototypeToArray
+            | NativeFunctionKind::IteratorPrototypeWindows
             | NativeFunctionKind::IteratorPrototypeConstructorGetter
             | NativeFunctionKind::IteratorPrototypeConstructorSetter
             | NativeFunctionKind::IteratorPrototypeToStringTagGetter

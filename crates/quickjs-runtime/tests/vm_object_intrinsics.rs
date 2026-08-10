@@ -215,6 +215,7 @@ fn the_object_constructor_has_the_pinned_identity() {
 #[test]
 fn the_object_constructor_coerces_with_to_object() {
     assert!(boolean("var o={};return Object(o)===o;"));
+    assert!(boolean("var o={};return new Object(o)===o;"));
     assert!(boolean("var a=Object(null);var b=Object();return a!==b;"));
     assert!(boolean("return Object(5) instanceof Number;"));
 }
@@ -295,17 +296,123 @@ fn object_prototype_has_immutable_prototype_exotic_semantics() {
 }
 
 #[test]
-fn annex_b_object_prototype_extensions_are_absent() {
+fn object_prototype_installs_the_normative_optional_legacy_accessors() {
     assert_eq!(
         text(
             "let proto=Object.prototype;\
-             let names=['__proto__','__defineGetter__','__defineSetter__','__lookupGetter__','__lookupSetter__'];\
+             let names=['__defineGetter__','__defineSetter__','__lookupGetter__','__lookupSetter__'];\
              return Object.getOwnPropertyNames(proto).join('|')+'#'+\
-                 names.every(function(name){return proto[name]===undefined&&\
-                   Object.getOwnPropertyDescriptor(proto,name)===undefined;});"
+                 names.map(function(name){let descriptor=Object.getOwnPropertyDescriptor(proto,name);\
+                   return typeof proto[name]+':'+proto[name].name+':'+proto[name].length+':'+\
+                     descriptor.writable+':'+descriptor.enumerable+':'+descriptor.configurable;\
+                 }).join('|');"
         ),
-        "toString|toLocaleString|valueOf|hasOwnProperty|isPrototypeOf|propertyIsEnumerable|constructor#true"
+        "toString|toLocaleString|valueOf|hasOwnProperty|isPrototypeOf|propertyIsEnumerable|\
+         __proto__|__defineGetter__|__defineSetter__|__lookupGetter__|__lookupSetter__|constructor#\
+         function:__defineGetter__:2:true:false:true|\
+         function:__defineSetter__:2:true:false:true|\
+         function:__lookupGetter__:1:true:false:true|\
+         function:__lookupSetter__:1:true:false:true"
     );
+    assert!(boolean(
+        "var descriptor=Object.getOwnPropertyDescriptor(Object.prototype,'__proto__');\
+         return descriptor.get.name==='get __proto__'&&descriptor.get.length===0&&\
+           descriptor.set.name==='set __proto__'&&descriptor.set.length===1&&\
+           !descriptor.enumerable&&descriptor.configurable;"
+    ));
+}
+
+#[test]
+fn legacy_object_accessors_define_merge_and_lookup_without_invoking() {
+    assert!(boolean(
+        "let getterCalls=0,setterCalls=0;\
+         function getter(){getterCalls++;return 7;}\
+         function setter(value){setterCalls++;this.seen=value;}\
+         let prototype={};prototype.__defineGetter__('value',getter);\
+         prototype.__defineSetter__('value',setter);\
+         let descriptor=Object.getOwnPropertyDescriptor(prototype,'value');\
+         let child=Object.create(prototype);\
+         let found=child.__lookupGetter__('value')===getter&&\
+           child.__lookupSetter__('value')===setter&&getterCalls===0&&setterCalls===0;\
+         child.value=9;let read=child.value;\
+         let symbol=Symbol('legacy');prototype.__defineGetter__(symbol,getter);\
+         return found&&descriptor.get===getter&&descriptor.set===setter&&\
+           descriptor.enumerable&&descriptor.configurable&&child.seen===9&&read===7&&\
+           child.__lookupGetter__(symbol)===getter&&\
+           Object.defineProperty(child,'value',{value:1}).__lookupGetter__('value')===undefined;"
+    ));
+}
+
+#[test]
+fn legacy_accessor_lookup_preserves_nested_proxy_abrupt_completions() {
+    assert_eq!(
+        text(
+            "let error={};let root=Object.defineProperty({},'target',{get:function(){}});\
+         function caught(subject){try{subject.__lookupGetter__('target');}\
+           catch(reason){return reason===error?'same':typeof reason+':'+reason;}return 'none';}\
+         let own=new Proxy(root,{getOwnPropertyDescriptor:function(){throw error;}});\
+         let descriptorProxy=new Proxy(Object.create(root),\
+           {getOwnPropertyDescriptor:function(){throw error;}});\
+         let prototypeProxy=new Proxy(Object.create(root),\
+           {getPrototypeOf:function(){throw error;}});\
+         return [caught(own),caught(Object.create(descriptorProxy)),\
+           caught(Object.create(prototypeProxy))].join('|');"
+        ),
+        "same|same|same"
+    );
+}
+
+#[test]
+fn object_prototype_proto_getter_coerces_and_observes_proxy_receivers() {
+    assert!(boolean(
+        "var descriptor=Object.getOwnPropertyDescriptor(Object.prototype,'__proto__');\
+         var expected={},log='';var proxy=new Proxy({},\
+           {getPrototypeOf:function getPrototypeOf(){log=log+'g';return expected;}});\
+         var {__proto__: numberPrototype}=42;\
+         return descriptor.get.call({})===Object.prototype&&\
+           descriptor.get.call(42)===Number.prototype&&numberPrototype===Number.prototype&&\
+           descriptor.get.call(proxy)===expected&&log==='g';"
+    ));
+    assert_eq!(
+        type_error_message(
+            "var get=Object.getOwnPropertyDescriptor(Object.prototype,'__proto__').get;\
+             return get.call(null);"
+        ),
+        "cannot convert to object"
+    );
+}
+
+#[test]
+fn object_prototype_proto_setter_follows_legacy_noop_and_internal_method_rules() {
+    assert!(boolean(
+        "var set=Object.getOwnPropertyDescriptor(Object.prototype,'__proto__').set;\
+         var original=Object.prototype,prototype={marker:1},target={};\
+         var result=set.call(target,prototype);set.call(target,7);\
+         return result===undefined&&Object.getPrototypeOf(target)===prototype&&\
+           target.marker===1&&set.call(42,prototype)===undefined&&\
+           Object.getPrototypeOf(target)===prototype&&Object.getPrototypeOf(target)!==original;"
+    ));
+    assert_eq!(
+        type_error_message(
+            "var set=Object.getOwnPropertyDescriptor(Object.prototype,'__proto__').set;\
+             return set.call(null,{});"
+        ),
+        "cannot convert to object"
+    );
+    assert_eq!(
+        type_error_message(
+            "var set=Object.getOwnPropertyDescriptor(Object.prototype,'__proto__').set;\
+             var target=Object.preventExtensions({});return set.call(target,null);"
+        ),
+        "object is not extensible"
+    );
+    assert!(boolean(
+        "var set=Object.getOwnPropertyDescriptor(Object.prototype,'__proto__').set;\
+         var log='',expected={};var proxy=new Proxy({},\
+           {setPrototypeOf:function setPrototypeOf(target,prototype){\
+             log=log+(prototype===expected?'s':'x');return true;}});\
+         return set.call(proxy,expected)===undefined&&log==='s';"
+    ));
 }
 
 #[test]
@@ -474,6 +581,20 @@ fn a_primitive_is_vacuously_sealed_and_frozen() {
     assert!(boolean("return Object.isSealed(5);"));
     assert!(boolean("return Object.isFrozen(5);"));
     assert!(boolean("return Object.isSealed(true);"));
+}
+
+#[test]
+fn object_integrity_statics_preserve_every_primitive_boundary() {
+    assert!(boolean(
+        "var symbol=Symbol('primitive');\
+         function check(value){\
+           return Object.freeze(value)===value&&Object.seal(value)===value&&\
+             Object.preventExtensions(value)===value&&Object.isFrozen(value)&&\
+             Object.isSealed(value)&&!Object.isExtensible(value);\
+         }\
+         return check(undefined)&&check(null)&&check(false)&&check(3)&&\
+           check(4n)&&check('text')&&check(symbol);"
+    ));
 }
 
 /// Oracle: `keys order => [0,2,b,a]`. `[[OwnPropertyKeys]]` reports array
@@ -1220,6 +1341,17 @@ fn object_assign_uses_strict_resumable_set_semantics() {
     ));
 }
 
+#[test]
+fn object_assign_reports_a_type_error_for_an_anonymous_frozen_symbol_property() {
+    assert!(boolean(
+        "var key=Symbol(),target={};target[key]=1;Object.freeze(target);\
+         var source={};source[key]=2;\
+         try{Object.assign(target,source);}catch(error){\
+           return error instanceof TypeError&&target[key]===1;\
+         }return false;"
+    ));
+}
+
 /// Assigning an enumerable `length` key to an Array uses the existing
 /// resumable Array length write path, including the two observable numeric
 /// conversions required for an object-valued length.
@@ -1596,6 +1728,31 @@ fn proxy_get_drives_operator_and_property_key_conversion() {
 }
 
 #[test]
+fn object_prototype_to_string_uses_the_regexp_matcher_builtin_tag() {
+    assert_eq!(
+        text("return Object.prototype.toString.call(/./);"),
+        "[object RegExp]"
+    );
+}
+
+#[test]
+fn object_prototype_to_string_ignores_non_string_tags_without_inventing_brands() {
+    assert_eq!(
+        text(
+            "var tag=Object.prototype.toString,promise=Promise.resolve();\
+             Object.defineProperty(BigInt.prototype,Symbol.toStringTag,{value:null});\
+             delete Symbol.prototype[Symbol.toStringTag];\
+             Object.defineProperty(Math,Symbol.toStringTag,{value:Symbol()});\
+             delete JSON[Symbol.toStringTag];delete Promise.prototype[Symbol.toStringTag];\
+             return [tag.call(1n),tag.call(Object(1n)),tag.call(Symbol()),\
+               tag.call(Math),tag.call(JSON),tag.call(promise)].join('|');"
+        ),
+        "[object Object]|[object Object]|[object Object]|[object Object]|\
+[object Object]|[object Object]"
+    );
+}
+
+#[test]
 fn proxy_get_drives_intrinsic_tags_and_wrapper_new_target_prototypes() {
     assert_eq!(
         text(
@@ -1615,15 +1772,27 @@ fn proxy_get_drives_intrinsic_tags_and_wrapper_new_target_prototypes() {
              var boolean=Reflect.construct(Boolean,[true],newTarget);\
              var number=Reflect.construct(Number,[7],newTarget);\
              var string=Reflect.construct(String,['x'],newTarget);\
+             var object=Reflect.construct(Object,[{ignored:true}],newTarget);\
              return Boolean.prototype.valueOf.call(boolean)+'|'+\
                     Number.prototype.valueOf.call(number)+'|'+\
                     String.prototype.valueOf.call(string)+'|'+\
                     (Object.getPrototypeOf(boolean)===proto)+'|'+\
                     (Object.getPrototypeOf(number)===proto)+'|'+\
-                    (Object.getPrototypeOf(string)===proto)+'|'+log;"
+                    (Object.getPrototypeOf(string)===proto)+'|'+\
+                    (Object.getPrototypeOf(object)===proto)+'|'+log;"
         ),
-        "true|7|x|true|true|true|ppp"
+        "true|7|x|true|true|true|true|pppp"
     );
+    assert!(boolean(
+        "var newTarget=new Proxy(function(){},{get(target,key,receiver){\
+           if(key==='prototype')return 1;return Reflect.get(target,key,receiver);}});\
+         var value=Reflect.construct(Object,[],newTarget);\
+         return Object.getPrototypeOf(value)===Object.prototype;"
+    ));
+    assert!(boolean(
+        "var newTarget=new Proxy(function(){},{get(){throw 42;}});\
+         try{Reflect.construct(Object,[],newTarget);}catch(error){return error===42;}return false;"
+    ));
     assert_eq!(
         text(
             "var log='';function construct(Target,args){\

@@ -298,6 +298,38 @@ fn the_searches_accept_an_array_like_receiver() {
     ]);
 }
 
+#[test]
+fn includes_observes_length_and_position_conversion_boundaries() {
+    assert_all(&[
+        (
+            "(function(){\
+                let calls=0;\
+                const fromIndex={valueOf(){calls+=1;return 0;}};\
+                const result=Array.prototype.includes.call(\
+                    {length:0},'x',fromIndex\
+                );\
+                return result+'|'+calls;\
+            })()",
+            "false|0",
+        ),
+        (
+            "(function(){\
+                const fromIndex={valueOf(){return 1;}};\
+                return [42,43].includes(42,fromIndex)+'|'\
+                    +[42,43].includes(43,fromIndex);\
+            })()",
+            "false|true",
+        ),
+        (
+            "Array.prototype.includes.call({\
+                length:9007199254740991,\
+                '9007199254740990':'found'\
+            },'found',9007199254740990)",
+            "true",
+        ),
+    ]);
+}
+
 /// The loop stops at the first match and reads `length` exactly once.
 #[test]
 fn the_loop_stops_at_the_first_match() {

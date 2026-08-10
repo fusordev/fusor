@@ -62,14 +62,14 @@ pub(in crate::lowering) enum StatementWork<'statement, 'arena> {
     ForInAssignment(&'statement ForStatementLeft<'arena>),
     ForOfHead(&'statement ForStatementLeft<'arena>),
     ForOfAssignment(&'statement ForStatementLeft<'arena>),
-    ForOfRotate(ScopeId),
+    IterationRotate(ScopeId),
     Declaration(&'statement VariableDeclaration<'arena>),
     CatchBinding {
         handler: &'statement CatchClause<'arena>,
         body_scope: ScopeId,
     },
     Expression(&'statement Expression<'arena>),
-    InitializeInstanceFields,
+    InitializeInstanceFields(Span),
     Emit(PlannedInstruction),
     Branch {
         kind: BranchKind,
@@ -311,8 +311,8 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 &state.abrupt_markers,
                 flow,
             )?,
-            StatementWork::ForOfRotate(scope) => {
-                self.plan_for_of_rotation(planning.executable, scope, planning.layout, flow)?;
+            StatementWork::IterationRotate(scope) => {
+                self.plan_iteration_rotation(planning.executable, scope, planning.layout, flow)?;
             }
             StatementWork::Expression(expression) => self.plan_expression_with_abrupt_markers(
                 expression,
@@ -322,12 +322,11 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 &state.abrupt_markers,
                 flow,
             )?,
-            StatementWork::InitializeInstanceFields => {
-                ExpressionPlanner::new(self).plan_instance_field_initializations(
+            StatementWork::InitializeInstanceFields(span) => {
+                ExpressionPlanner::new(self).plan_call_instance_initializer(
                     planning.executable,
                     planning.layout,
-                    planning.tree_layout,
-                    planning.constants,
+                    span,
                     flow,
                 )?;
             }
@@ -462,13 +461,15 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 let return_opcode = if async_generator
                     || matches!(
                         executable.kind(),
-                        ExecutableKind::Function {
-                            asynchronous: true,
-                            generator: false,
-                        } | ExecutableKind::Function {
-                            asynchronous: false,
-                            generator: true,
-                        }
+                        ExecutableKind::Arrow { asynchronous: true }
+                            | ExecutableKind::Function {
+                                asynchronous: true,
+                                generator: false,
+                            }
+                            | ExecutableKind::Function {
+                                asynchronous: false,
+                                generator: true,
+                            }
                     ) {
                     FinalOpcode::ReturnAsync
                 } else {
@@ -1346,9 +1347,6 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         flow: &mut PlannedControlFlow,
         state: &mut StatementPlanningState<'statement, 'arena>,
     ) -> Result<(), LeafCompilationError> {
-        if statement.r#await {
-            return unsupported(UnsupportedLeafFeature::UnsupportedBody, statement.span);
-        }
         let scope = self.created_scope(
             statement.scope_id.get(),
             statement.node_id.get(),
@@ -1655,7 +1653,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             loop_scope_depth,
         );
 
-        work.try_reserve(25)
+        work.try_reserve(26)
             .map_err(|_| LeafCompilationError::CapacityExceeded {
                 domain: "statement work stack",
             })?;
@@ -1710,6 +1708,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             Operands::None,
             statement.span,
         )));
+        work.push(StatementWork::IterationRotate(scope));
         work.push(StatementWork::Bind(next));
         work.push(StatementWork::Emit(PlannedInstruction::new(
             FinalOpcode::ForInStart,
@@ -1725,6 +1724,31 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             span: statement.span,
         });
         Ok(())
+    }
+
+    fn push_for_of_step<'statement>(
+        statement: &'statement ForOfStatement<'arena>,
+        work: &mut Vec<StatementWork<'statement, 'arena>>,
+    ) {
+        if statement.r#await {
+            for opcode in [
+                FinalOpcode::IteratorGetValueDone,
+                FinalOpcode::Await,
+                FinalOpcode::ForAwaitOfNext,
+            ] {
+                work.push(StatementWork::Emit(PlannedInstruction::new(
+                    opcode,
+                    Operands::None,
+                    statement.span,
+                )));
+            }
+        } else {
+            work.push(StatementWork::Emit(PlannedInstruction::new(
+                FinalOpcode::ForOfNext,
+                Operands::U8(0),
+                statement.span,
+            )));
+        }
     }
 
     fn schedule_for_of_statement<'statement>(
@@ -1801,15 +1825,15 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             target: assign,
             span: statement.span,
         });
-        work.push(StatementWork::Emit(PlannedInstruction::new(
-            FinalOpcode::ForOfNext,
-            Operands::U8(0),
-            statement.span,
-        )));
-        work.push(StatementWork::ForOfRotate(scope));
+        Self::push_for_of_step(statement, work);
+        work.push(StatementWork::IterationRotate(scope));
         work.push(StatementWork::Bind(next));
         work.push(StatementWork::Emit(PlannedInstruction::new(
-            FinalOpcode::ForOfStart,
+            if statement.r#await {
+                FinalOpcode::ForAwaitOfStart
+            } else {
+                FinalOpcode::ForOfStart
+            },
             Operands::None,
             statement.right.span(),
         )));

@@ -123,6 +123,46 @@ fn eval_in_parameter_expression_uses_argument_scope_sentinel() {
 }
 
 #[test]
+fn direct_eval_arguments_prelude_precedes_function_instantiation_initializers() {
+    let compiled = compile(
+        "function invoke(eval){function nested(){}eval('nested');return nested;}",
+        "invoke",
+    );
+    let root = compiled.root();
+    let boundary = root.function_initializer_prefix_start();
+    assert_eq!(root.parameter_initialization_end(), None);
+    assert_eq!(
+        compiled
+            .verified_bytecode()
+            .root()
+            .function()
+            .function_initializer_prefix_start(),
+        boundary
+    );
+    let instructions = root.control_flow().instructions();
+    let arguments_object = instructions
+        .iter()
+        .position(|instruction| {
+            let instruction = instruction.decoded().instruction();
+            instruction.opcode() == FinalOpcode::SpecialObject
+                && instruction.operands() == Operands::U8(1)
+        })
+        .expect("direct eval retains an arguments object");
+    let function_initializer = instructions
+        .iter()
+        .position(|instruction| {
+            matches!(
+                instruction.decoded().instruction().opcode(),
+                FinalOpcode::FClosure8 | FinalOpcode::FClosure
+            )
+        })
+        .expect("nested declaration initializer");
+
+    assert!(u32::try_from(arguments_object).expect("instruction index") < boundary);
+    assert!(boundary <= u32::try_from(function_initializer).expect("instruction index"));
+}
+
+#[test]
 fn spread_bare_eval_uses_apply_eval_without_a_receiver_slot() {
     let compiled = compile(
         "function invoke(eval, values) { return eval(...values); }",

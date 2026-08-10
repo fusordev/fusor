@@ -32,12 +32,7 @@
 //! which keeps the decision testable in isolation and lets exotic objects reuse
 //! it after their own pre-checks.
 
-use crate::{
-    ids::FunctionId,
-    object::OwnProperty,
-    property::{PropertyLayout, PropertyLayoutKind},
-    value::StoredValue,
-};
+use crate::{ids::FunctionId, object::OwnProperty, property::PropertyLayout, value::StoredValue};
 
 /// One requested descriptor field.
 ///
@@ -349,6 +344,8 @@ pub(crate) fn validate_and_apply_new(
 ///
 /// - a non-configurable property rejects a request to become configurable,
 ///   to change `enumerable`, or to change between data and accessor kinds;
+/// - a non-configurable accessor rejects a present getter or setter unless it
+///   is `SameValue` to the current accessor;
 /// - a non-configurable, non-writable data property rejects a request to
 ///   become writable, and rejects a new value unless it is `SameValue`;
 /// - every other field request is applied, leaving unspecified fields at their
@@ -367,18 +364,10 @@ pub(crate) fn validate_and_apply_existing(
         {
             return DefinitionDecision::Rejected;
         }
-        if definition.has_slot_fields() {
-            let is_accessor = current.kind() == PropertyLayoutKind::Accessor;
-            if definition.is_accessor() != is_accessor {
-                return DefinitionDecision::Rejected;
-            }
-            if !is_accessor
-                && current.writable() != Some(true)
-                && let DefinitionFields::Data { writable, .. } = &definition.fields
-                && writable.unwrap_or(false)
-            {
-                return DefinitionDecision::Rejected;
-            }
+        if definition.has_slot_fields()
+            && !non_configurable_slot_fields_are_compatible(definition, existing)
+        {
+            return DefinitionDecision::Rejected;
         }
     }
 
@@ -477,6 +466,31 @@ pub(crate) fn validate_and_apply_existing(
     }
 }
 
+fn non_configurable_slot_fields_are_compatible(
+    definition: &PropertyDefinition,
+    existing: &OwnProperty,
+) -> bool {
+    match (&definition.fields, existing) {
+        (
+            DefinitionFields::Accessor { getter, setter },
+            OwnProperty::Accessor {
+                getter: read_hook,
+                setter: write_hook,
+                ..
+            },
+        ) => {
+            getter.unwrap_or(*read_hook) == *read_hook
+                && setter.unwrap_or(*write_hook) == *write_hook
+        }
+        (DefinitionFields::Data { writable, .. }, OwnProperty::Data { layout, .. }) => {
+            layout.writable() == Some(true) || !writable.unwrap_or(false)
+        }
+        (DefinitionFields::Generic, _) => true,
+        (DefinitionFields::Data { .. }, OwnProperty::Accessor { .. })
+        | (DefinitionFields::Accessor { .. }, OwnProperty::Data { .. }) => false,
+    }
+}
+
 /// Returns `Unchanged` when the requested data slot already matches, so a
 /// no-op define never marks the heap as mutated.
 fn decide_data(
@@ -529,6 +543,8 @@ mod tests {
     };
     use crate::{
         JsNumber,
+        arena::{Arena, RuntimeIdentity},
+        ids::FunctionMarker,
         object::OwnProperty,
         property::{PropertyLayout, PropertyLayoutKind},
         value::StoredValue,
@@ -693,6 +709,49 @@ mod tests {
         assert!(matches!(
             validate_and_apply_existing(&to_data, &accessor(false, false)),
             DefinitionDecision::Rejected
+        ));
+    }
+
+    #[test]
+    fn a_non_configurable_accessor_accepts_only_the_same_getter_and_setter() {
+        let mut functions = Arena::<FunctionMarker, ()>::new(RuntimeIdentity::from_address(1));
+        let getter = functions.try_insert(()).expect("getter");
+        let setter = functions.try_insert(()).expect("setter");
+        let replacements = [
+            functions.try_insert(()).expect("replacement getter"),
+            functions.try_insert(()).expect("replacement setter"),
+        ];
+        let existing = OwnProperty::Accessor {
+            layout: PropertyLayout::accessor(false, false),
+            getter: Some(getter),
+            setter: Some(setter),
+        };
+
+        for definition in [
+            PropertyDefinition::accessor(
+                Requested::Present(Some(replacements[0])),
+                Requested::Absent,
+            ),
+            PropertyDefinition::accessor(Requested::Present(None), Requested::Absent),
+            PropertyDefinition::accessor(
+                Requested::Absent,
+                Requested::Present(Some(replacements[1])),
+            ),
+            PropertyDefinition::accessor(Requested::Absent, Requested::Present(None)),
+        ] {
+            assert!(matches!(
+                validate_and_apply_existing(&definition, &existing),
+                DefinitionDecision::Rejected
+            ));
+        }
+
+        let same = PropertyDefinition::accessor(
+            Requested::Present(Some(getter)),
+            Requested::Present(Some(setter)),
+        );
+        assert!(matches!(
+            validate_and_apply_existing(&same, &existing),
+            DefinitionDecision::Unchanged
         ));
     }
 
