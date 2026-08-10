@@ -325,6 +325,24 @@ fn caught_engine_errors_are_branded_and_freeze_a_throw_site_stack() {
 }
 
 #[test]
+fn tail_elided_native_origins_use_the_newest_surviving_stack_location() {
+    let stack = call(
+        "\
+            function tail(){'use strict';return JSON.stringify(0n,()=>0n);}\
+            try{tail();}catch(error){return error.stack;}",
+        string,
+    );
+    assert!(
+        stack.starts_with("    at anonymous ("),
+        "surviving caller frame first: {stack:?}"
+    );
+    assert!(
+        !stack.contains("    at tail ("),
+        "PrepareForTailCall must elide the tail caller: {stack:?}"
+    );
+}
+
+#[test]
 fn call_native_frames_appear_between_target_and_caller_in_error_stacks() {
     let stack = call(
         "\
