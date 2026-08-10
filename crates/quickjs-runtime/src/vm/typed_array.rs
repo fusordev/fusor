@@ -167,10 +167,10 @@ enum TypedArrayPrototypeSubarrayStage {
 
 /// Resumable `%TypedArray%.prototype.subarray` construction.
 ///
-/// The initial validation witness fixes source length and byte offset before
-/// either relative-index conversion can run user code. Species lookup and
-/// construction then follow the same observable ordering as
-/// `TypedArraySpeciesCreate`.
+/// The initial witness fixes source length before either relative-index
+/// conversion can run user code; an out-of-bounds source contributes zero
+/// while retaining its internal byte offset. Species lookup and construction
+/// then follow the same observable ordering as `TypedArraySpeciesCreate`.
 pub(super) struct TypedArrayPrototypeSubarrayState {
     source: ObjectId,
     buffer: ObjectId,
@@ -178,6 +178,7 @@ pub(super) struct TypedArrayPrototypeSubarrayState {
     source_length: usize,
     begin: usize,
     new_length: usize,
+    length_tracking: bool,
     end: StoredValue,
     element: TypedArrayElementType,
     realm: RealmId,
@@ -1815,8 +1816,7 @@ pub(super) fn dispatch_typed_array_prototype(
     }
     if matches!(
         method,
-        TypedArrayPrototypeMethod::Subarray
-            | TypedArrayPrototypeMethod::At
+        TypedArrayPrototypeMethod::At
             | TypedArrayPrototypeMethod::Includes
             | TypedArrayPrototypeMethod::IndexOf
             | TypedArrayPrototypeMethod::LastIndexOf
@@ -3054,14 +3054,9 @@ fn begin_typed_array_prototype_subarray(
     let Some(source_state) = runtime.typed_array_state(source)?.copied() else {
         return typed_array_type_error(realm, &origin, "not a TypedArray");
     };
-    let TypedArrayView::InBounds {
-        buffer,
-        byte_offset,
-        length,
-        ..
-    } = runtime.typed_array_view(source)?
-    else {
-        return typed_array_type_error(realm, &origin, "TypedArray is out of bounds");
+    let source_length = match runtime.typed_array_view(source)? {
+        TypedArrayView::InBounds { length, .. } => length,
+        TypedArrayView::Detached | TypedArrayView::OutOfBounds => 0,
     };
     begin_operator_primitive_conversion(
         runtime,
@@ -3070,11 +3065,12 @@ fn begin_typed_array_prototype_subarray(
         OperatorPrimitiveTarget::TypedArrayPrototypeSubarrayBegin(Box::new(
             TypedArrayPrototypeSubarrayState {
                 source,
-                buffer,
-                source_byte_offset: byte_offset,
-                source_length: length,
+                buffer: source_state.buffer(),
+                source_byte_offset: source_state.byte_offset(),
+                source_length,
                 begin: 0,
                 new_length: 0,
+                length_tracking: matches!(source_state.length(), TypedArrayLength::Auto),
                 end,
                 element: source_state.element(),
                 realm,
@@ -3308,16 +3304,21 @@ fn begin_typed_array_subarray_construct(
             message: "TypedArray subarray byte offset overflowed after relative bounds",
         })?;
     state.stage = TypedArrayPrototypeSubarrayStage::AwaitConstruct;
+    let preserves_length_tracking =
+        state.length_tracking && matches!(state.end, StoredValue::Undefined);
+    let argument_count = if preserves_length_tracking { 2 } else { 3 };
     let mut arguments = Vec::new();
     arguments
-        .try_reserve_exact(3)
+        .try_reserve_exact(argument_count)
         .map_err(|_| ExecutionError::AllocationFailed {
             resource: RuntimeResource::FrameValues,
-            additional: 3,
+            additional: argument_count,
         })?;
     arguments.push(StoredValue::Object(state.buffer));
     arguments.push(typed_array_usize_number(byte_offset));
-    arguments.push(typed_array_usize_number(state.new_length));
+    if !preserves_length_tracking {
+        arguments.push(typed_array_usize_number(state.new_length));
+    }
     let origin = state.origin.clone();
     let mut continuations = Vec::new();
     continuations

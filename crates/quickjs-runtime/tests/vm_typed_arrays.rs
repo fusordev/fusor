@@ -384,11 +384,37 @@ fn typed_array_subarray_uses_relative_bounds_shared_storage_and_species() {
         ExceptionKind::TypeError
     );
     assert_eq!(
-        thrown(
+        rendered(
             "var buffer=new ArrayBuffer(8,{maxByteLength:8}),source=new Uint8Array(buffer);\
+             var view=source.subarray({valueOf(){buffer.resize(2);return 1}});\
+             return [view.byteOffset,view.length].join('|');"
+        ),
+        "1|1"
+    );
+    assert_eq!(
+        thrown(
+            "var buffer=new ArrayBuffer(8,{maxByteLength:8}),source=new Uint8Array(buffer,0,8);\
              source.subarray({valueOf(){buffer.resize(2);return 1}});"
         ),
         ExceptionKind::RangeError
+    );
+    assert_eq!(
+        rendered(
+            "var buffer=new ArrayBuffer(4,{maxByteLength:8}),source=new Uint8Array(buffer),seen;\
+             source.constructor={[Symbol.species]:function(bufferArg,offset){seen=arguments;return new Uint8Array(bufferArg,offset)}};\
+             var view=source.subarray(1);\
+             return [seen.length,seen[0]===buffer,seen[1],view.length].join('|');"
+        ),
+        "2|true|1|3"
+    );
+    assert_eq!(
+        rendered(
+            "var buffer=new ArrayBuffer(10,{maxByteLength:10}),source=new Int8Array(buffer,4,2);\
+             buffer.resize(0);\
+             var view=source.subarray({valueOf:function(){buffer.resize(10);return 1}});\
+             return [view.byteOffset,view.length].join('|');"
+        ),
+        "4|0"
     );
 }
 
