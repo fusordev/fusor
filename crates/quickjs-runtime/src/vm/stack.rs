@@ -190,6 +190,12 @@ pub(super) fn pop(frame: &mut Frame) -> Result<StoredValue, EngineFault> {
                 message: "verified JavaScript value operation consumed an internal catch marker",
             })
         }
+        Some(
+            OperandStackEntry::CapturedReference { .. }
+            | OperandStackEntry::CapturedReferenceAnchor,
+        ) => Err(EngineFault::RuntimeInvariant {
+            message: "verified JavaScript value operation consumed an internal captured reference",
+        }),
         Some(OperandStackEntry::FinallyReturn { .. }) => Err(EngineFault::RuntimeInvariant {
             message: "verified JavaScript value operation consumed an internal finally return address",
         }),
@@ -210,6 +216,12 @@ pub(super) fn peek(frame: &Frame) -> Result<&StoredValue, EngineFault> {
                 message: "verified JavaScript value operation inspected an internal catch marker",
             })
         }
+        Some(
+            OperandStackEntry::CapturedReference { .. }
+            | OperandStackEntry::CapturedReferenceAnchor,
+        ) => Err(EngineFault::RuntimeInvariant {
+            message: "verified JavaScript value operation inspected an internal captured reference",
+        }),
         Some(OperandStackEntry::FinallyReturn { .. }) => Err(EngineFault::RuntimeInvariant {
             message: "verified JavaScript value operation inspected an internal finally return address",
         }),
@@ -230,6 +242,12 @@ pub(super) fn stack_value_at(frame: &Frame, index: usize) -> Result<&StoredValue
                 message: "verified JavaScript value operation indexed an internal catch marker",
             })
         }
+        Some(
+            OperandStackEntry::CapturedReference { .. }
+            | OperandStackEntry::CapturedReferenceAnchor,
+        ) => Err(EngineFault::RuntimeInvariant {
+            message: "verified JavaScript value operation indexed an internal captured reference",
+        }),
         Some(OperandStackEntry::FinallyReturn { .. }) => Err(EngineFault::RuntimeInvariant {
             message: "verified JavaScript value operation indexed an internal finally return address",
         }),
@@ -247,6 +265,8 @@ pub(super) fn pop_finally_continuation(frame: &mut Frame) -> Result<InstructionI
         Some(OperandStackEntry::FinallyReturn { continuation }) => Ok(continuation),
         Some(
             OperandStackEntry::JavaScript(_)
+            | OperandStackEntry::CapturedReference { .. }
+            | OperandStackEntry::CapturedReferenceAnchor
             | OperandStackEntry::Catch { .. }
             | OperandStackEntry::ForOfCatch { .. },
         ) => Err(EngineFault::RuntimeInvariant {
@@ -391,6 +411,8 @@ pub(super) fn deactivate_for_of_record(
         Some(OperandStackEntry::JavaScript(StoredValue::Undefined)) if allow_return_dummy => {}
         Some(
             OperandStackEntry::JavaScript(_)
+            | OperandStackEntry::CapturedReference { .. }
+            | OperandStackEntry::CapturedReferenceAnchor
             | OperandStackEntry::Catch { .. }
             | OperandStackEntry::ForOfCatch { .. }
             | OperandStackEntry::FinallyReturn { .. },
@@ -448,6 +470,8 @@ pub(super) fn finish_for_of_step(
         }
         Some(
             OperandStackEntry::JavaScript(_)
+            | OperandStackEntry::CapturedReference { .. }
+            | OperandStackEntry::CapturedReferenceAnchor
             | OperandStackEntry::Catch { .. }
             | OperandStackEntry::ForOfCatch { .. }
             | OperandStackEntry::FinallyReturn { .. },
@@ -540,6 +564,8 @@ pub(super) fn take_for_of_record_at(
         }) => (active, asynchronous),
         Some(
             OperandStackEntry::JavaScript(_)
+            | OperandStackEntry::CapturedReference { .. }
+            | OperandStackEntry::CapturedReferenceAnchor
             | OperandStackEntry::Catch { .. }
             | OperandStackEntry::FinallyReturn { .. },
         )

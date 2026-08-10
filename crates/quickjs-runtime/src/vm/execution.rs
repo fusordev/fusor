@@ -1134,35 +1134,121 @@ pub(super) fn execute_one(
             };
             return native_step(dispatch, return_to);
         }
-        FinalOpcode::PutRefValue => {
-            let value = pop(frame)?;
-            let key = pop(frame)?;
-            let object = pop(frame)?;
-            let property = computed_property_operand(runtime, &key)?;
-            let return_to =
-                CallReturn::discard(verified_instruction.successors().fallthrough().ok_or(
-                    EngineFault::InvalidSuccessor {
-                        function: frame.template,
-                        pc: source_pc,
-                    },
-                )?);
-            let realm = code(runtime, frame.code)?.realm;
-            let origin = instruction_location(runtime, frame, source_pc)?;
-            return native_step(
-                begin_with_reference_put(
+        FinalOpcode::MakeVarRefRef => {
+            let Operands::AtomU16 { value, .. } = operands else {
+                return unsupported_dispatch(opcode);
+            };
+            let index = u32::from(value);
+            let Some(cell) = resolve_environment_cell(runtime, frame, index)? else {
+                return Ok(Step::Abrupt(binding_not_defined_exception(
                     runtime,
-                    object,
-                    property.key,
-                    property.name,
-                    value,
-                    strict,
-                    realm,
-                    Some(return_to),
-                    origin,
-                    execution_budget,
-                ),
-                return_to,
-            );
+                    frame,
+                    BindingName::Closure(index),
+                    source_pc,
+                )?));
+            };
+            frame
+                .stack
+                .push(OperandStackEntry::CapturedReference { index, cell });
+            frame.stack.push(OperandStackEntry::CapturedReferenceAnchor);
+        }
+        FinalOpcode::GetRefValue => {
+            let Some(base) = frame.stack.len().checked_sub(2) else {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "verified get_ref_value has no captured reference",
+                }
+                .into());
+            };
+            let (index, cell) = match (&frame.stack[base], &frame.stack[base + 1]) {
+                (
+                    OperandStackEntry::CapturedReference { index, cell },
+                    OperandStackEntry::CapturedReferenceAnchor,
+                ) => (*index, *cell),
+                _ => {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "verified get_ref_value has an invalid captured reference",
+                    }
+                    .into());
+                }
+            };
+            let value = match duplicate_binding(runtime, &FrameBinding::Captured(cell), true, frame)
+            {
+                Ok(value) => value,
+                Err(BindingAccessError::Uninitialized) => {
+                    return Ok(Step::Abrupt(tdz_exception(
+                        runtime,
+                        frame,
+                        BindingName::Closure(index),
+                        source_pc,
+                    )?));
+                }
+                Err(BindingAccessError::Missing) => {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "resolved captured reference became missing",
+                    }
+                    .into());
+                }
+                Err(BindingAccessError::Fault(fault)) => return Err(fault.into()),
+            };
+            push(frame, value);
+        }
+        FinalOpcode::PutRefValue => {
+            let captured = frame.stack.len().checked_sub(3).and_then(|base| {
+                match (&frame.stack[base], &frame.stack[base + 1]) {
+                    (
+                        OperandStackEntry::CapturedReference { index, cell },
+                        OperandStackEntry::CapturedReferenceAnchor,
+                    ) => Some((base, *index, *cell)),
+                    _ => None,
+                }
+            });
+            if let Some((base, index, cell)) = captured {
+                let value = pop(frame)?;
+                frame.stack.truncate(base);
+                match captured_write_action(runtime, frame, strict, index)? {
+                    BindingWriteAction::Throw => {
+                        return Ok(Step::Abrupt(immutable_binding_exception(
+                            runtime,
+                            frame,
+                            BindingName::Closure(index),
+                            source_pc,
+                        )?));
+                    }
+                    BindingWriteAction::Ignore => {}
+                    BindingWriteAction::Write => {
+                        write_binding_cell(runtime, cell, SlotValue::Value(value))?;
+                    }
+                }
+            } else {
+                let value = pop(frame)?;
+                let key = pop(frame)?;
+                let object = pop(frame)?;
+                let property = computed_property_operand(runtime, &key)?;
+                let return_to =
+                    CallReturn::discard(verified_instruction.successors().fallthrough().ok_or(
+                        EngineFault::InvalidSuccessor {
+                            function: frame.template,
+                            pc: source_pc,
+                        },
+                    )?);
+                let realm = code(runtime, frame.code)?.realm;
+                let origin = instruction_location(runtime, frame, source_pc)?;
+                return native_step(
+                    begin_with_reference_put(
+                        runtime,
+                        object,
+                        property.key,
+                        property.name,
+                        value,
+                        strict,
+                        realm,
+                        Some(return_to),
+                        origin,
+                        execution_budget,
+                    ),
+                    return_to,
+                );
+            }
         }
         FinalOpcode::Rest => {
             let Operands::U16(first_argument) = operands else {
@@ -1577,13 +1663,41 @@ pub(super) fn execute_one(
             push(frame, right);
         }
         FinalOpcode::Insert3 => {
-            let third = pop(frame)?;
-            let second = pop(frame)?;
-            let first = pop(frame)?;
-            push(frame, third.duplicate());
-            push(frame, first);
-            push(frame, second);
-            push(frame, third);
+            let captured = frame.stack.len().checked_sub(3).is_some_and(|base| {
+                matches!(
+                    (
+                        &frame.stack[base],
+                        &frame.stack[base + 1],
+                        &frame.stack[base + 2]
+                    ),
+                    (
+                        OperandStackEntry::CapturedReference { .. },
+                        OperandStackEntry::CapturedReferenceAnchor,
+                        OperandStackEntry::JavaScript(_),
+                    )
+                )
+            });
+            if captured {
+                let third = pop(frame)?;
+                let anchor = frame.stack.pop().ok_or(EngineFault::RuntimeInvariant {
+                    message: "verified insert3 lost its captured-reference anchor",
+                })?;
+                let reference = frame.stack.pop().ok_or(EngineFault::RuntimeInvariant {
+                    message: "verified insert3 lost its captured reference",
+                })?;
+                push(frame, third.duplicate());
+                frame.stack.push(reference);
+                frame.stack.push(anchor);
+                push(frame, third);
+            } else {
+                let third = pop(frame)?;
+                let second = pop(frame)?;
+                let first = pop(frame)?;
+                push(frame, third.duplicate());
+                push(frame, first);
+                push(frame, second);
+                push(frame, third);
+            }
         }
         FinalOpcode::Insert4 => {
             let fourth = pop(frame)?;
@@ -3630,6 +3744,8 @@ pub(super) fn execute_one(
                         | StoredValue::Function(_)
                         | StoredValue::Object(_),
                     )
+                    | OperandStackEntry::CapturedReference { .. }
+                    | OperandStackEntry::CapturedReferenceAnchor
                     | OperandStackEntry::Catch { .. }
                     | OperandStackEntry::ForOfCatch { .. }
                     | OperandStackEntry::FinallyReturn { .. },

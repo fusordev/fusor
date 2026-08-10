@@ -499,6 +499,27 @@ pub enum BytecodeVerificationErrorKind {
         pc: BytecodePc,
     },
     /// An opcode forged, consumed, copied, stored, called, returned, or
+    /// reordered an internal captured-binding Reference.
+    CapturedReferenceStackMismatch {
+        /// Final bytecode position.
+        pc: BytecodePc,
+        /// Opcode whose typed inputs were invalid.
+        opcode: FinalOpcode,
+    },
+    /// Control flow merged distinct captured-binding References or mixed a
+    /// Reference component with an ordinary JavaScript value.
+    CapturedReferenceJoinMismatch {
+        /// Join target.
+        target: BytecodePc,
+        /// Incoming edge that disagreed with the established typed stack.
+        incoming_from: BytecodePc,
+    },
+    /// A terminal path retained an internal captured-binding Reference.
+    CapturedReferenceMarkerAtExit {
+        /// Terminal bytecode position.
+        pc: BytecodePc,
+    },
+    /// An opcode forged, consumed, copied, stored, called, returned, or
     /// reordered an internal `for-in` iterator marker.
     ForInIteratorStackMismatch {
         /// Final bytecode position.
@@ -948,6 +969,21 @@ impl fmt::Display for BytecodeVerificationErrorKind {
             Self::FinallyReturnMarkerAtExit { pc } => write!(
                 formatter,
                 "terminal at PC {pc} retains a malformed finally return-address marker"
+            ),
+            Self::CapturedReferenceStackMismatch { pc, opcode } => write!(
+                formatter,
+                "opcode {opcode:?} at PC {pc} violates the typed captured-binding reference stack"
+            ),
+            Self::CapturedReferenceJoinMismatch {
+                target,
+                incoming_from,
+            } => write!(
+                formatter,
+                "typed captured-binding reference stack at PC {target} disagrees with the edge from PC {incoming_from}"
+            ),
+            Self::CapturedReferenceMarkerAtExit { pc } => write!(
+                formatter,
+                "terminal at PC {pc} retains an internal captured-binding reference"
             ),
             Self::ForInIteratorStackMismatch { pc, opcode } => write!(
                 formatter,

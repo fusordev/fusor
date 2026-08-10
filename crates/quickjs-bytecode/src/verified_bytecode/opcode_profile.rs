@@ -422,6 +422,8 @@ const fn supported_compiler_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::WithDeleteVar
             | FinalOpcode::WithMakeRef
             | FinalOpcode::WithGetRef
+            | FinalOpcode::MakeVarRefRef
+            | FinalOpcode::GetRefValue
             | FinalOpcode::PutRefValue
             | FinalOpcode::ArrayFrom
             | FinalOpcode::CheckCtorReturn

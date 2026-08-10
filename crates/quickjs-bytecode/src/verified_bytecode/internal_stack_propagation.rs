@@ -321,6 +321,12 @@ fn verify_internal_stack_exit(
             BytecodeVerificationErrorKind::FinallyReturnMarkerAtExit { pc: decoded.pc() },
         ));
     }
+    if !is_throw && state.iter().any(|value| value.is_captured_reference()) {
+        return Err(BytecodeVerificationError::function(
+            id,
+            BytecodeVerificationErrorKind::CapturedReferenceMarkerAtExit { pc: decoded.pc() },
+        ));
+    }
     if tail_transfer {
         if state.iter().any(|value| value.is_for_of_value()) {
             return Err(BytecodeVerificationError::function(
@@ -471,7 +477,9 @@ fn internal_stack_error(
     opcode: FinalOpcode,
     state: &[InternalStackValue],
 ) -> BytecodeVerificationError {
-    if opcode == FinalOpcode::Gosub
+    if state.iter().any(|value| value.is_captured_reference()) {
+        captured_reference_stack_error(id, pc, opcode)
+    } else if opcode == FinalOpcode::Gosub
         || opcode == FinalOpcode::Ret
         || state.iter().any(|value| value.is_finally_value())
     {
@@ -496,6 +504,17 @@ fn internal_stack_error(
     } else {
         for_in_stack_error(id, pc, opcode)
     }
+}
+
+fn captured_reference_stack_error(
+    id: FunctionTemplateId,
+    pc: BytecodePc,
+    opcode: FinalOpcode,
+) -> BytecodeVerificationError {
+    BytecodeVerificationError::function(
+        id,
+        BytecodeVerificationErrorKind::CapturedReferenceStackMismatch { pc, opcode },
+    )
 }
 
 fn finally_stack_error(
@@ -595,6 +614,15 @@ fn internal_join_error(
     incoming: &[InternalStackValue],
 ) -> BytecodeVerificationError {
     let kind = if established
+        .iter()
+        .chain(incoming)
+        .any(|value| value.is_captured_reference())
+    {
+        BytecodeVerificationErrorKind::CapturedReferenceJoinMismatch {
+            target,
+            incoming_from,
+        }
+    } else if established
         .iter()
         .chain(incoming)
         .any(|value| value.is_finally_value())

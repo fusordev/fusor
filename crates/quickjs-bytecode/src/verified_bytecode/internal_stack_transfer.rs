@@ -19,6 +19,109 @@ fn transfer_internal_operand_stack(
     let instruction = decoded.instruction();
     let opcode = instruction.opcode();
     match opcode {
+        FinalOpcode::MakeVarRefRef => {
+            state.try_reserve(2).map_err(|_| {
+                BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::AllocationFailed {
+                        resource: BytecodeGraphResource::FrameStateEntries,
+                        requested: 2,
+                    },
+                )
+            })?;
+            state.push(InternalStackValue::CapturedReference(decoded.pc()));
+            state.push(InternalStackValue::CapturedReferenceAnchor(decoded.pc()));
+            return Ok(InternalStackTransfer {
+                normal_completion: true,
+                iteration_branch_value: None,
+                ret_finalizer: None,
+            });
+        }
+        FinalOpcode::GetRefValue => {
+            let Some(base) = state.len().checked_sub(2) else {
+                if !effectively_reachable {
+                    return Ok(InternalStackTransfer {
+                        normal_completion: false,
+                        iteration_branch_value: None,
+                        ret_finalizer: None,
+                    });
+                }
+                return Err(captured_reference_stack_error(id, decoded.pc(), opcode));
+            };
+            let (
+                InternalStackValue::CapturedReference(reference),
+                InternalStackValue::CapturedReferenceAnchor(anchor),
+            ) = (state[base], state[base + 1])
+            else {
+                return Err(captured_reference_stack_error(id, decoded.pc(), opcode));
+            };
+            if reference != anchor {
+                return Err(captured_reference_stack_error(id, decoded.pc(), opcode));
+            }
+            state.try_reserve(1).map_err(|_| {
+                BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::AllocationFailed {
+                        resource: BytecodeGraphResource::FrameStateEntries,
+                        requested: 1,
+                    },
+                )
+            })?;
+            state.push(InternalStackValue::Ordinary);
+            return Ok(InternalStackTransfer {
+                normal_completion: true,
+                iteration_branch_value: None,
+                ret_finalizer: None,
+            });
+        }
+        FinalOpcode::Insert3 => {
+            if let Some(base) = state.len().checked_sub(3)
+                && let (
+                    InternalStackValue::CapturedReference(reference),
+                    InternalStackValue::CapturedReferenceAnchor(anchor),
+                    value,
+                ) = (state[base], state[base + 1], state[base + 2])
+                && reference == anchor
+                && value.is_javascript_value()
+            {
+                state.try_reserve(1).map_err(|_| {
+                    BytecodeVerificationError::function(
+                        id,
+                        BytecodeVerificationErrorKind::AllocationFailed {
+                            resource: BytecodeGraphResource::FrameStateEntries,
+                            requested: 1,
+                        },
+                    )
+                })?;
+                state[base] = value;
+                state[base + 1] = InternalStackValue::CapturedReference(reference);
+                state[base + 2] = InternalStackValue::CapturedReferenceAnchor(anchor);
+                state.push(value);
+                return Ok(InternalStackTransfer {
+                    normal_completion: true,
+                    iteration_branch_value: None,
+                    ret_finalizer: None,
+                });
+            }
+        }
+        FinalOpcode::PutRefValue => {
+            if let Some(base) = state.len().checked_sub(3)
+                && let (
+                    InternalStackValue::CapturedReference(reference),
+                    InternalStackValue::CapturedReferenceAnchor(anchor),
+                    value,
+                ) = (state[base], state[base + 1], state[base + 2])
+                && reference == anchor
+                && value.is_javascript_value()
+            {
+                state.truncate(base);
+                return Ok(InternalStackTransfer {
+                    normal_completion: true,
+                    iteration_branch_value: None,
+                    ret_finalizer: None,
+                });
+            }
+        }
         FinalOpcode::SpecialObject => {
             let Operands::U8(selector) = instruction.operands() else {
                 return Err(internal_stack_error(id, decoded.pc(), opcode, state));

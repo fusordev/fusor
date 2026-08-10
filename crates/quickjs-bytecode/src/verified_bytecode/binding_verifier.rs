@@ -296,6 +296,12 @@ fn verify_closure_opcode(
 
     let slot = BindingSlot::Closure(closure);
     let policy = definition.policy();
+    if opcode == FinalOpcode::MakeVarRefRef {
+        // Reference creation fixes the environment cell but does not read or
+        // write it. `get_ref_value` performs the mandatory TDZ check, while
+        // `put_ref_value` applies the retained declaration policy at runtime.
+        return Ok(());
+    }
     let checked = matches!(
         opcode,
         FinalOpcode::GetVarRefCheck | FinalOpcode::PutVarRefCheck

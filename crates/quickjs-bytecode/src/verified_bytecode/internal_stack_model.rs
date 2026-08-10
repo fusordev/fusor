@@ -6,6 +6,8 @@ enum InternalStackValue {
     DerivedSuperNewTarget(BytecodePc),
     DerivedSuperResult(BytecodePc),
     DerivedSuperCompletion(BytecodePc),
+    CapturedReference(BytecodePc),
+    CapturedReferenceAnchor(BytecodePc),
     ForInIterator(BytecodePc),
     ForInKey(BytecodePc),
     ForInDone(BytecodePc),
@@ -93,6 +95,8 @@ impl JavaScriptStackValue {
             | InternalStackValue::DerivedSuperConstructor(_)
             | InternalStackValue::DerivedSuperNewTarget(_)
             | InternalStackValue::DerivedSuperCompletion(_)
+            | InternalStackValue::CapturedReference(_)
+            | InternalStackValue::CapturedReferenceAnchor(_)
             | InternalStackValue::ForOfIterator(_)
             | InternalStackValue::ForOfNextMethod(_)
             | InternalStackValue::ForOfCatch(_)
@@ -153,6 +157,8 @@ impl InternalStackValue {
                 | Self::DerivedSuperConstructor(_)
                 | Self::DerivedSuperNewTarget(_)
                 | Self::DerivedSuperCompletion(_)
+                | Self::CapturedReference(_)
+                | Self::CapturedReferenceAnchor(_)
                 | Self::ForOfIterator(_)
                 | Self::ForOfNextMethod(_)
                 | Self::ForOfCatch(_)
@@ -177,6 +183,13 @@ impl InternalStackValue {
 
     const fn is_catch_value(self) -> bool {
         matches!(self, Self::CatchMarker { .. } | Self::CatchException(_))
+    }
+
+    const fn is_captured_reference(self) -> bool {
+        matches!(
+            self,
+            Self::CapturedReference(_) | Self::CapturedReferenceAnchor(_)
+        )
     }
 
     const fn is_finally_value(self) -> bool {

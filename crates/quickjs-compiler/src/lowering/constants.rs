@@ -15,11 +15,12 @@ use super::atoms::{
 use super::{
     ArrayExpression, ArrayExpressionElement, AssignmentTargetProperty, AstKind, BindingPattern,
     CompilationContext, CompiledConstant, CompiledFunctionConstant, Executable, Expression,
-    ExpressionPlanner, FunctionTreeLayoutSeed, GetSpan, LeafCompilationError, NodeId,
-    OxcPropertyKey, ParsedUnit, PlannedInstruction, PropertyKind, RegExpLiteral, StoragePlacement,
-    UnaryOperator, checked_function_entry_count, compiled_static_property_key,
-    compiler_identifier_string, decode_compiler_string, exact_i32, exact_negated_i32,
-    record_property_candidate, record_property_candidate_for, record_string_candidate,
+    ExpressionPlanner, FunctionTreeLayoutSeed, GetSpan, LeafCompilationError, NativeReferenceId,
+    NodeId, OxcPropertyKey, ParsedUnit, PlannedInstruction, PropertyKind, ReferenceId,
+    RegExpLiteral, StoragePlacement, UnaryOperator, checked_function_entry_count,
+    compiled_static_property_key, compiler_identifier_string, decode_compiler_string, exact_i32,
+    exact_negated_i32, record_property_candidate, record_property_candidate_for,
+    record_string_candidate,
 };
 
 impl<'arena> CompilationContext<'_, 'arena, '_> {
@@ -423,21 +424,28 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                     atom_candidates,
                 )?;
             }
-            AstKind::IdentifierReference(identifier)
-                if has_direct_eval_with
+            AstKind::IdentifierReference(identifier) => {
+                let with_visible = has_direct_eval_with
                     || !self
                         .with_object_bindings_for_reference(
                             identifier.reference_id.get(),
                             identifier.span,
                         )?
-                        .is_empty() =>
-            {
-                record_property_candidate(
-                    owner,
-                    compiler_identifier_string(identifier.name.as_str(), identifier.span)?,
-                    identifier.span,
-                    atom_candidates,
-                )?;
+                        .is_empty();
+                if with_visible
+                    || self.captured_mutation_requires_reference_atom(
+                        owner,
+                        identifier.reference_id.get(),
+                        identifier.span,
+                    )?
+                {
+                    record_property_candidate(
+                        owner,
+                        compiler_identifier_string(identifier.name.as_str(), identifier.span)?,
+                        identifier.span,
+                        atom_candidates,
+                    )?;
+                }
             }
             AstKind::BindingIdentifier(identifier) => {
                 let AstKind::VariableDeclarator(declarator) = nodes.parent_kind(node_id) else {
@@ -719,6 +727,58 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             _ => {}
         }
         Ok(())
+    }
+
+    fn captured_mutation_requires_reference_atom(
+        &self,
+        owner: ExecutableId,
+        reference_id: Option<ReferenceId>,
+        span: Span,
+    ) -> Result<bool, LeafCompilationError> {
+        let reference_id = reference_id.ok_or(LeafCompilationError::SemanticInvariant {
+            invariant: "identifier reference has Oxc reference identity",
+            span: Some(span),
+        })?;
+        let native = self
+            .planned
+            .identities
+            .reference_by_id
+            .get(reference_id.index())
+            .copied()
+            .flatten()
+            .ok_or(LeafCompilationError::SemanticInvariant {
+                invariant: "Oxc reference has compiler identity",
+                span: Some(span),
+            })?;
+        let NativeReferenceId::Resolved(reference) = native else {
+            return Ok(false);
+        };
+        let reference = self.planned.plan.resolved_reference(reference).ok_or(
+            LeafCompilationError::SemanticInvariant {
+                invariant: "resolved compiler reference exists",
+                span: Some(span),
+            },
+        )?;
+        if reference.span() != span {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "resolved compiler reference retains its Oxc span",
+                span: Some(span),
+            });
+        }
+        if !reference.access().reads() || !reference.access().writes() {
+            return Ok(false);
+        }
+        let binding = self.planned.plan.binding(reference.binding()).ok_or(
+            LeafCompilationError::SemanticInvariant {
+                invariant: "resolved compiler binding exists",
+                span: Some(span),
+            },
+        )?;
+        Ok(binding.executable() != owner
+            && matches!(
+                binding.placement(),
+                StoragePlacement::Argument { .. } | StoragePlacement::Local
+            ))
     }
 
     fn class_instance_initializer_owner(

@@ -5840,6 +5840,8 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::WithDeleteVar
             | FinalOpcode::WithMakeRef
             | FinalOpcode::WithGetRef
+            | FinalOpcode::MakeVarRefRef
+            | FinalOpcode::GetRefValue
             | FinalOpcode::PutRefValue
             | FinalOpcode::CopyDataProperties
             | FinalOpcode::DefineField

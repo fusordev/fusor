@@ -575,7 +575,10 @@ pub(super) fn dispatch_pending_exception(
                         marker,
                     },
                     Some(
-                        OperandStackEntry::JavaScript(_) | OperandStackEntry::FinallyReturn { .. },
+                        OperandStackEntry::JavaScript(_)
+                        | OperandStackEntry::CapturedReference { .. }
+                        | OperandStackEntry::CapturedReferenceAnchor
+                        | OperandStackEntry::FinallyReturn { .. },
                     )
                     | None => {
                         return Err(EngineFault::RuntimeInvariant {
@@ -1042,6 +1045,8 @@ pub(super) fn dispatch_pending_exception(
             Some(OperandStackEntry::Catch { handler }) => *handler,
             Some(
                 OperandStackEntry::JavaScript(_)
+                | OperandStackEntry::CapturedReference { .. }
+                | OperandStackEntry::CapturedReferenceAnchor
                 | OperandStackEntry::ForOfCatch { .. }
                 | OperandStackEntry::FinallyReturn { .. },
             )

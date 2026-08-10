@@ -472,14 +472,6 @@ fn compiler_make_reference_opcodes_remain_fail_closed() {
             FunctionIndexDomains::new(1, 0, 1, 0, 0),
         ),
         (
-            FinalOpcode::MakeVarRefRef,
-            Operands::AtomU16 {
-                atom: AtomPoolIndex::new(0),
-                value: 0,
-            },
-            FunctionIndexDomains::new(1, 0, 0, 0, 1),
-        ),
-        (
             FinalOpcode::MakeVarRef,
             Operands::Atom(AtomPoolIndex::new(0)),
             FunctionIndexDomains::new(1, 0, 0, 0, 0),
@@ -503,4 +495,33 @@ fn compiler_make_reference_opcodes_remain_fail_closed() {
             "{opcode}"
         );
     }
+}
+
+#[test]
+fn compiler_captured_reference_transaction_is_structurally_admitted() {
+    let verified = verify_compiler_control_flow(
+        compiler_body(
+            encode(&[
+                (
+                    FinalOpcode::MakeVarRefRef,
+                    Operands::AtomU16 {
+                        atom: AtomPoolIndex::new(0),
+                        value: 0,
+                    },
+                ),
+                (FinalOpcode::GetRefValue, Operands::None),
+                (FinalOpcode::Push1, Operands::NoneInt),
+                (FinalOpcode::Mul, Operands::None),
+                (FinalOpcode::Insert3, Operands::None),
+                (FinalOpcode::PutRefValue, Operands::None),
+                (FinalOpcode::Return, Operands::None),
+            ]),
+            FunctionIndexDomains::new(1, 0, 0, 1, 1),
+            &[CompilerCapturedBinding::FunctionLocal(0)],
+        ),
+        VerificationLimits::default(),
+    )
+    .expect("compiler-owned captured reference transaction is structurally valid");
+
+    assert_eq!(verified.computed_stack_size(), 4);
 }

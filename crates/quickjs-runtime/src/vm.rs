@@ -329,6 +329,8 @@ enum FrameBinding {
 
 enum OperandStackEntry {
     JavaScript(StoredValue),
+    CapturedReference { index: u32, cell: BindingCellId },
+    CapturedReferenceAnchor,
     Catch { handler: InstructionIndex },
     ForOfCatch { active: bool, asynchronous: bool },
     FinallyReturn { continuation: InstructionIndex },
@@ -4306,8 +4308,15 @@ pub(crate) fn trace_frame_roots(frame: &Frame, mark: &mut dyn FnMut(CollectionRo
         });
     }
     for entry in &frame.stack {
-        if let OperandStackEntry::JavaScript(value) = entry {
-            trace_stored_value_root(value, mark);
+        match entry {
+            OperandStackEntry::JavaScript(value) => trace_stored_value_root(value, mark),
+            OperandStackEntry::CapturedReference { cell, .. } => {
+                mark(CollectionRoot::BindingCell(*cell));
+            }
+            OperandStackEntry::CapturedReferenceAnchor
+            | OperandStackEntry::Catch { .. }
+            | OperandStackEntry::ForOfCatch { .. }
+            | OperandStackEntry::FinallyReturn { .. } => {}
         }
     }
     for continuation in &frame.native_returns {

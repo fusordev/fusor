@@ -5098,17 +5098,23 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             identifier,
             reference,
             inferred_name,
+            constants,
             flow,
             work,
         )
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "identifier assignment carries its resolved storage, inferred name, atom pool, and reverse expression schedule explicitly"
+    )]
     fn plan_lowered_identifier_assignment<'expression>(
         &self,
         assignment: &'expression AssignmentExpression<'arena>,
         identifier: &'expression IdentifierReference<'arena>,
         reference: LoweredReference,
         inferred_name: Option<PlannedInstruction>,
+        constants: &CompiledConstantPool,
         flow: &mut PlannedControlFlow,
         work: &mut Vec<ExpressionWork<'expression, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
@@ -5191,6 +5197,11 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                         span: Some(assignment.span),
                     },
                 )?;
+                if let FrameSlot::Capture(slot) = frame_slot {
+                    return Self::push_captured_identifier_compound_assignment(
+                        assignment, identifier, slot, binary, constants, work,
+                    );
+                }
                 self.push_slot_write(binding, frame_slot, true, identifier.span, work)?;
                 work.push(ExpressionWork::Emit(PlannedInstruction::new(
                     binary_opcode(binary),
@@ -5205,6 +5216,44 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 )?));
             }
         }
+        Ok(())
+    }
+
+    fn push_captured_identifier_compound_assignment<'expression>(
+        assignment: &'expression AssignmentExpression<'arena>,
+        identifier: &'expression IdentifierReference<'arena>,
+        slot: u16,
+        binary: BinaryOperator,
+        constants: &CompiledConstantPool,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        let atom = constants.property_atom_index(identifier.span)?;
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::PutRefValue,
+            Operands::None,
+            identifier.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Insert3,
+            Operands::None,
+            assignment.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            binary_opcode(binary),
+            Operands::None,
+            assignment.span,
+        )));
+        work.push(ExpressionWork::Visit(&assignment.right));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::GetRefValue,
+            Operands::None,
+            identifier.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::MakeVarRefRef,
+            Operands::AtomU16 { atom, value: slot },
+            identifier.span,
+        )));
         Ok(())
     }
 
@@ -5284,6 +5333,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             identifier,
             reference,
             inferred_name,
+            constants,
             flow,
             work,
         )

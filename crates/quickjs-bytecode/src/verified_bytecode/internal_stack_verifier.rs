@@ -45,6 +45,9 @@ fn verify_internal_operand_stack(
                 | FinalOpcode::WithDeleteVar
                 | FinalOpcode::WithMakeRef
                 | FinalOpcode::WithGetRef
+                | FinalOpcode::MakeVarRefRef
+                | FinalOpcode::GetRefValue
+                | FinalOpcode::PutRefValue
         )
     }) {
         return Ok(InternalStackCertificate::default());
