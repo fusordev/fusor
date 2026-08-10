@@ -644,7 +644,7 @@ fn anonymous_base_class_formal_parameter_defaults_respect_the_binding_shape() {
 #[test]
 fn anonymous_base_class_assignment_defaults_use_their_target_names() {
     let tree = compile(
-        "function make(){let ArrayName;[ArrayName=class{}]=[];let ObjectName;({value:ObjectName=class{}}={});return [ArrayName,ObjectName];}",
+        "function make(){let ArrayName;[ArrayName=class{}]=[];let ObjectName;({value:ObjectName=class{}}={});let ShorthandName;({ShorthandName=class{}}={});return [ArrayName,ObjectName,ShorthandName];}",
         "make",
     );
     assert_eq!(
@@ -655,8 +655,8 @@ fn anonymous_base_class_assignment_defaults_use_their_target_names() {
             .filter(|instruction| instruction.decoded().instruction().opcode()
                 == FinalOpcode::DefineClass)
             .count(),
-        2,
-        "both defaults receive their inferred name through define_class"
+        3,
+        "array, explicit object, and shorthand object defaults receive their inferred name through define_class"
     );
     assert!(
         !tree

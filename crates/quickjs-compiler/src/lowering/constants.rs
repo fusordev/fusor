@@ -851,6 +851,11 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 AstKind::AssignmentTargetWithDefault(assignment) => {
                     return Self::direct_class_assignment_default_name(node_id, class, assignment);
                 }
+                AstKind::AssignmentTargetPropertyIdentifier(property) => {
+                    return Self::direct_class_assignment_property_default_name(
+                        node_id, class, property,
+                    );
+                }
                 AstKind::FormalParameter(parameter) => {
                     return Self::class_formal_parameter_default_name(node_id, class, parameter);
                 }
@@ -1089,6 +1094,38 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         Ok((
             compiler_identifier_string(identifier.name.as_str(), identifier.span)?,
             identifier.span,
+        ))
+    }
+
+    fn direct_class_assignment_property_default_name(
+        node_id: NodeId,
+        class: &super::Class<'arena>,
+        property: &super::AssignmentTargetPropertyIdentifier<'arena>,
+    ) -> Result<(CompilerString, Span), LeafCompilationError> {
+        let Some(mut initializer) = property.init.as_ref() else {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "anonymous class shorthand assignment property has a default initializer",
+                span: Some(class.span),
+            });
+        };
+        while let Expression::ParenthesizedExpression(parenthesized) = initializer {
+            initializer = &parenthesized.expression;
+        }
+        let Expression::ClassExpression(initializer) = initializer else {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "anonymous class remains the direct shorthand assignment property initializer",
+                span: Some(class.span),
+            });
+        };
+        if initializer.node_id() != node_id {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "anonymous class name is inferred from its shorthand assignment property",
+                span: Some(class.span),
+            });
+        }
+        Ok((
+            compiler_identifier_string(property.binding.name.as_str(), property.binding.span)?,
+            property.binding.span,
         ))
     }
 

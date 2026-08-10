@@ -584,7 +584,7 @@ fn anonymous_base_class_binding_defaults_infer_their_identifier_names() {
 #[test]
 fn anonymous_base_class_assignment_defaults_infer_their_identifier_names() {
     run_with(
-        "function run(){let ArrayName;[ArrayName=class{}]=[];let ObjectName;({value:ObjectName=class{}}={});return ArrayName.name==='ArrayName'&&ObjectName.name==='ObjectName';}",
+        "function run(){let ArrayName;[ArrayName=class{}]=[];let ObjectName;({value:ObjectName=class{}}={});let ShorthandName;({ShorthandName=class{}}={});let LoopName;for({LoopName=class{}}of[{}]){}return ArrayName.name==='ArrayName'&&ObjectName.name==='ObjectName'&&ShorthandName.name==='ShorthandName'&&LoopName.name==='LoopName';}",
         |result| {
             let value = result.expect("anonymous class assignment default execution");
             assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
