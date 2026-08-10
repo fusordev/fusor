@@ -21,6 +21,37 @@ fn capture_names_follow_match_capture_indices() {
     );
 }
 
+#[test]
+fn capture_names_and_references_share_the_cooked_identifier() {
+    let source = r"(?:(?<𝑓>a)|(?<\u{1D453}>b))\k<\uD835\uDC53>";
+    let expression = CompiledRegExp::compile_utf16(
+        &source.encode_utf16().collect::<Vec<_>>(),
+        &[],
+        CompileLimits::default(),
+    )
+    .expect("disjoint duplicate names with mixed spellings are valid");
+    assert_eq!(
+        expression.capture_names(),
+        [None, Some("𝑓".to_owned()), Some("𝑓".to_owned())]
+    );
+    assert_eq!(
+        expression
+            .execute(
+                &"aa".encode_utf16().collect::<Vec<_>>(),
+                0,
+                ExecLimits::default(),
+            )
+            .expect("bounded execution")
+            .expect("cooked backreference matches")
+            .range(),
+        0..2
+    );
+    assert!(matches!(
+        CompiledRegExp::compile(r"(?<A>a)(?<\u0041>b)", "", CompileLimits::default()),
+        Err(CompileError::Syntax(_))
+    ));
+}
+
 fn ranges(pattern: &str, flags: &str, input: &str) -> Vec<Option<(usize, usize)>> {
     compile(pattern, flags)
         .execute(

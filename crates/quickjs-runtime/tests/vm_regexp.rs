@@ -329,6 +329,18 @@ fn regexp_escape_follows_the_spec_scalar_and_punctuator_rules() {
 }
 
 #[test]
+fn regexp_named_capture_names_use_cooked_unicode_identifiers() {
+    assert_eq!(
+        rendered(
+            "var bmp=/(?<π>a)/du.exec('bab');var astral=/(?<𝑓>a)/d.exec('bab');\
+             return [bmp[0],bmp.groups.π,Object.keys(bmp.groups)[0],\
+                     bmp.indices.groups.π.join(','),astral.groups.𝑓,Object.keys(astral.groups)[0]].join('|');"
+        ),
+        "a|a|π|1,2|a|𝑓"
+    );
+}
+
+#[test]
 fn regexp_match_undefined_falls_back_to_the_internal_brand() {
     assert_eq!(
         rendered(
