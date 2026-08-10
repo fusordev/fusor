@@ -368,16 +368,7 @@ fn begin_date_utc(
 ) -> Result<NativeDispatch, NativeFailure> {
     let mut values = arguments.into_remaining_values();
     values.truncate(7);
-    let conversion_count = values.len().max(2);
-    values
-        .try_reserve(conversion_count.saturating_sub(values.len()))
-        .map_err(|_| ExecutionError::AllocationFailed {
-            resource: RuntimeResource::FrameValues,
-            additional: conversion_count.saturating_sub(values.len()),
-        })?;
-    while values.len() < conversion_count {
-        values.push(StoredValue::Undefined);
-    }
+    let conversion_count = values.len();
     let mut converted = Vec::new();
     converted.try_reserve_exact(conversion_count).map_err(|_| {
         ExecutionError::AllocationFailed {
@@ -1153,7 +1144,6 @@ pub(super) fn time_clip(value: f64) -> JsNumber {
 fn date_utc_from_components(values: &[JsNumber]) -> JsNumber {
     let mut components = [0.0; 7];
     components[0] = f64::NAN;
-    components[1] = f64::NAN;
     components[2] = 1.0;
     for (index, value) in values.iter().enumerate() {
         components[index] = value.as_f64();

@@ -157,9 +157,10 @@ fn date_utc_converts_arguments_left_to_right_and_normalizes_calendar_fields() {
             "var log=[];function value(label,value){return {valueOf:function(){log.push(label);return value}}}
              var result=Date.UTC(value('year',2020),value('month',12),value('date',1),
                value('hour',2),value('minute',3),value('second',4),value('ms',5));
-             return result+'|'+log.join(',')+'|'+Date.UTC(99,0,1)+'|'+String(Date.UTC(NaN,0));"
+             return result+'|'+log.join(',')+'|'+Date.UTC(99,0,1)+'|'+String(Date.UTC(NaN,0))+
+               '|'+Date.UTC(1970)+'|'+String(Date.UTC());"
         ),
-        "1609466584005|year,month,date,hour,minute,second,ms|915148800000|NaN"
+        "1609466584005|year,month,date,hour,minute,second,ms|915148800000|NaN|0|NaN"
     );
 }
 
