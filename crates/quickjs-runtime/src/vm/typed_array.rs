@@ -4558,10 +4558,7 @@ pub(super) fn finish_typed_array_prototype_set_offset(
     let Ok(offset) = usize::try_from(offset) else {
         return typed_array_range_error(state.realm, &state.origin, "invalid TypedArray offset");
     };
-    if !matches!(
-        state.source,
-        StoredValue::Object(_) | StoredValue::Function(_)
-    ) {
+    if matches!(state.source, StoredValue::Undefined | StoredValue::Null) {
         return typed_array_type_error(
             state.realm,
             &state.origin,
@@ -4870,7 +4867,7 @@ fn typed_array_prototype_set_read(
     return_to: Option<CallReturn>,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
-    charge_heap_property_lookup(runtime, &state.source, execution_budget)?;
+    charge_typed_array_set_property_lookup(runtime, state.realm, &state.source, execution_budget)?;
     let dispatch = begin_value_get(
         runtime,
         &state.source,
@@ -4896,6 +4893,33 @@ fn typed_array_prototype_set_read(
         },
         "TypedArray.prototype.set source Get produced a structured result",
     )
+}
+
+fn charge_typed_array_set_property_lookup(
+    runtime: &Runtime,
+    realm: RealmId,
+    base: &StoredValue,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<(), NativeFailure> {
+    let prototype = match base {
+        StoredValue::Boolean(_) => Some(runtime.realm_boolean_prototype(realm)?),
+        StoredValue::Number(_) => Some(runtime.realm_number_prototype(realm)?),
+        StoredValue::BigInt(_) => Some(runtime.realm_bigint_prototype(realm)?),
+        StoredValue::String(_) => Some(runtime.realm_string_prototype(realm)?),
+        StoredValue::Symbol(_) => Some(runtime.realm_symbol_prototype(realm)?),
+        StoredValue::Function(_) | StoredValue::Object(_) => None,
+        StoredValue::Undefined | StoredValue::Null => {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "TypedArray.prototype.set property lookup received a nullish source",
+            }
+            .into());
+        }
+    };
+    if let Some(prototype) = prototype {
+        charge_heap_property_lookup(runtime, &StoredValue::Object(prototype), execution_budget)
+    } else {
+        charge_heap_property_lookup(runtime, base, execution_budget)
+    }
 }
 
 fn typed_array_prototype_set_continuation(

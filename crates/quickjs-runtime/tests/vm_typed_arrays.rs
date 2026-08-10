@@ -313,6 +313,25 @@ fn typed_array_set_copies_typed_and_array_like_sources_with_fresh_target_indices
 }
 
 #[test]
+fn typed_array_set_boxes_non_nullish_primitive_sources_after_offset_conversion() {
+    assert_eq!(
+        rendered(
+            "var target=new Int32Array(4),caught;\
+             try{target.set(null,{valueOf:function(){throw 'offset'}})}catch(error){caught=error}\
+             target.set('123');\
+             Number.prototype.length=4;Number.prototype[3]=-1;\
+             try{target.set(456)}finally{delete Number.prototype.length;delete Number.prototype[3]}\
+             return [caught,target[0],target[1],target[2],target[3]].join('|');"
+        ),
+        "offset|0|0|0|-1"
+    );
+    assert_eq!(
+        thrown("return new Int32Array(1).set(null);"),
+        ExceptionKind::TypeError
+    );
+}
+
+#[test]
 fn typed_array_subarray_uses_relative_bounds_shared_storage_and_species() {
     assert_eq!(
         rendered(
