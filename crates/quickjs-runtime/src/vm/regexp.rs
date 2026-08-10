@@ -4820,17 +4820,17 @@ pub(super) fn begin_string_regexp_protocol(
         stage: StringRegExpProtocolStage::AwaitMethod,
         origin,
     };
-    if matches!(state.regexp, StoredValue::Undefined | StoredValue::Null) {
-        begin_string_regexp_fallback(runtime, state, return_to, execution_budget)
-    } else if matches!(method, RegExpSymbolMethod::MatchAll)
-        && matches!(
-            state.regexp,
-            StoredValue::Function(_) | StoredValue::Object(_)
-        )
-    {
-        read_string_match_all_match_property(runtime, state, return_to, execution_budget)
+    if matches!(
+        state.regexp,
+        StoredValue::Function(_) | StoredValue::Object(_)
+    ) {
+        if matches!(method, RegExpSymbolMethod::MatchAll) {
+            read_string_match_all_match_property(runtime, state, return_to, execution_budget)
+        } else {
+            read_string_regexp_method(runtime, state, false, return_to, execution_budget)
+        }
     } else {
-        read_string_regexp_method(runtime, state, false, return_to, execution_budget)
+        begin_string_regexp_fallback(runtime, state, return_to, execution_budget)
     }
 }
 

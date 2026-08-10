@@ -361,9 +361,11 @@ fn replace_dispatches_the_symbol_protocol_before_fallback_coercion() {
             "(function(){const search={[Symbol.replace]:null,toString(){return 'b';}};return 'abc'.replace(search,'X');})()",
             "aXc",
         ),
+        // Primitive search values enter the fallback directly; inherited
+        // protocol properties on their wrappers are not observed.
         (
-            "(function(){String.prototype[Symbol.replace]=function(receiver,replacement){return this+'|'+receiver+'|'+replacement;};return 'abc'.replace('b','X');})()",
-            "b|abc|X",
+            "(function(){Object.defineProperty(String.prototype,Symbol.replace,{get(){throw 1;}});return 'abc'.replace('b','X');})()",
+            "aXc",
         ),
     ]);
     assert_throws(
@@ -446,8 +448,8 @@ fn replace_all_preserves_match_flags_replace_and_fallback_order() {
             "XbX#match,replace,recv,search,replacement",
         ),
         (
-            "(function(){String.prototype[Symbol.replace]=function(receiver,replacement){return this+'|'+receiver+'|'+replacement;};return 'aba'.replaceAll('a','X');})()",
-            "a|aba|X",
+            "(function(){Object.defineProperty(String.prototype,Symbol.replace,{get(){throw 1;}});return 'aba'.replaceAll('a','X');})()",
+            "XbX",
         ),
         (
             "(function(){let touched=false;let search={get [Symbol.match](){touched=true;return true;}};try{String.prototype.replaceAll.call(null,search,'X');}catch(error){}return touched;})()",
@@ -526,10 +528,11 @@ fn split_dispatches_symbol_protocol_before_fallback_coercion() {
             "(function(){let log=[];const receiver={toString(){log.push('receiver');return 'a,b';}};const limit={valueOf(){log.push('limit');return 1;}};const separator={get [Symbol.split](){log.push('get');return undefined;},toString(){log.push('separator');return ',';}};const result=String.prototype.split.call(receiver,separator,limit);return result.join('|')+'#'+log.join(',');})()",
             "a#get,receiver,limit,separator",
         ),
-        // ES2025 GetMethod applies to non-null primitives as well as objects.
+        // Primitive separators enter the fallback directly; inherited
+        // protocol properties on their wrappers are not observed.
         (
-            "(function(){String.prototype[Symbol.split]=function(receiver,limit){return this+'|'+receiver+'|'+limit;};return 'abc'.split('b',2);})()",
-            "b|abc|2",
+            "(function(){Object.defineProperty(String.prototype,Symbol.split,{get(){throw 1;}});return 'abc'.split('b',2).join('|');})()",
+            "a|c",
         ),
         (
             "(function(){const separator={[Symbol.split]:null,toString(){return ',';}};return 'a,b'.split(separator).join('|');})()",
@@ -937,14 +940,16 @@ fn match_and_search_fallback_construct_regexp_and_invoke_the_protocol() {
 }
 
 #[test]
-fn match_and_search_observe_primitive_wrapper_protocols_per_es2025() {
+fn string_regexp_protocols_ignore_primitive_wrapper_properties() {
     assert_eq!(
         rendered(
-            "(function(){String.prototype[Symbol.match]=function(value){return 'match:'+this+':'+value};\
-              String.prototype[Symbol.search]=function(value){return 'search:'+this+':'+value};\
-              return String.prototype.match.call('abc','b')+'|'+String.prototype.search.call('abc','b');})()"
+            "(function(){Object.defineProperty(String.prototype,Symbol.match,{get(){throw 1;}});\
+              Object.defineProperty(String.prototype,Symbol.search,{get(){throw 2;}});\
+              Object.defineProperty(String.prototype,Symbol.matchAll,{get(){throw 3;}});\
+              var indices=[];for(var match of 'aba'.matchAll('a'))indices.push(match.index);\
+              return 'abc'.match('b')[0]+'|'+String.prototype.search.call('abc','b')+'|'+indices.join(',');})()"
         ),
-        "match:b:abc|search:b:abc"
+        "b|1|0,2"
     );
 }
 
