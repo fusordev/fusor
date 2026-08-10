@@ -155,6 +155,7 @@ pub(super) const fn is_declarative_object(id: IntrinsicObjectId) -> bool {
             | IntrinsicObjectId::BigIntPrototype
             | IntrinsicObjectId::StringPrototype
             | IntrinsicObjectId::ArrayPrototype
+            | IntrinsicObjectId::ArrayUnscopables
             | IntrinsicObjectId::ArrayBufferPrototype
             | IntrinsicObjectId::SharedArrayBufferPrototype
             | IntrinsicObjectId::DataViewPrototype
@@ -681,6 +682,7 @@ const fn is_array_identity(id: IntrinsicIdentity) -> bool {
     match id {
         IntrinsicIdentity::Object(
             IntrinsicObjectId::ArrayPrototype
+            | IntrinsicObjectId::ArrayUnscopables
             | IntrinsicObjectId::ArrayBufferPrototype
             | IntrinsicObjectId::SharedArrayBufferPrototype
             | IntrinsicObjectId::DataViewPrototype

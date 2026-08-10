@@ -144,6 +144,43 @@ fn array_call_new_and_intrinsic_metadata_cover_the_core_vertical() {
 }
 
 #[test]
+fn array_unscopables_has_the_normative_null_prototype_table() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = dynamic_function(
+        &mut context,
+        "let table=Array.prototype[Symbol.unscopables];\
+         let outer=Object.getOwnPropertyDescriptor(Array.prototype,Symbol.unscopables);\
+         let names=[\
+             'at','copyWithin','entries','fill','find','findIndex',\
+             'findLast','findLastIndex','flat','flatMap','includes','keys',\
+             'toReversed','toSorted','toSpliced','values'\
+         ];\
+         if(Object.getPrototypeOf(table)!==null||\
+             outer.value!==table||outer.writable!==false||\
+             outer.enumerable!==false||outer.configurable!==true||\
+             Object.prototype.hasOwnProperty.call(table,'with')){\
+             return false;\
+         }\
+         for(let index=0;index<names.length;index+=1){\
+             let descriptor=Object.getOwnPropertyDescriptor(table,names[index]);\
+             if(descriptor.value!==true||descriptor.writable!==true||\
+                 descriptor.enumerable!==true||descriptor.configurable!==true){\
+                 return false;\
+             }\
+         }\
+         return true;",
+    );
+
+    let value = context
+        .call(&run, &[], ExecutionLimits::default())
+        .expect("inspect Array.prototype[Symbol.unscopables]");
+
+    assert!(boolean(&value));
+}
+
+#[test]
 fn one_primitive_number_creates_a_sparse_exact_uint32_length() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");

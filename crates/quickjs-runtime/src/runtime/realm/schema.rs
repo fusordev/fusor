@@ -43,6 +43,7 @@ pub(in crate::runtime) enum IntrinsicObjectId {
     BigIntPrototype,
     StringPrototype,
     ArrayPrototype,
+    ArrayUnscopables,
     ArrayBufferPrototype,
     SharedArrayBufferPrototype,
     DataViewPrototype,
@@ -103,7 +104,7 @@ pub(in crate::runtime) enum IntrinsicObjectId {
 }
 
 impl IntrinsicObjectId {
-    pub(in crate::runtime) const ALL: [Self; 84] = [
+    pub(in crate::runtime) const ALL: [Self; 85] = [
         Self::ObjectPrototype,
         Self::GlobalObject,
         Self::ErrorPrototype(ErrorIntrinsicKind::Error),
@@ -120,6 +121,7 @@ impl IntrinsicObjectId {
         Self::BigIntPrototype,
         Self::StringPrototype,
         Self::ArrayPrototype,
+        Self::ArrayUnscopables,
         Self::ArrayBufferPrototype,
         Self::SharedArrayBufferPrototype,
         Self::DataViewPrototype,
