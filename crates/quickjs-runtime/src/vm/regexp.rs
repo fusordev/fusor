@@ -3048,6 +3048,14 @@ pub(super) fn begin_regexp_string_iterator_next(
     let StoredValue::Object(iterator) = receiver else {
         return regexp_type_error(realm, origin, "not a RegExp String Iterator");
     };
+    if runtime
+        .objects
+        .get(iterator)
+        .and_then(crate::object::HeapObject::regexp_string_iterator_state)
+        .is_none()
+    {
+        return regexp_type_error(realm, origin, "not a RegExp String Iterator");
+    }
     let snapshot = runtime.regexp_string_iterator_snapshot(iterator)?;
     match snapshot.phase {
         crate::object::RegExpStringIteratorPhase::Done => {

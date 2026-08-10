@@ -647,6 +647,26 @@ fn regexp_symbol_match_all_clones_last_index_and_exposes_the_exact_iterator_surf
 }
 
 #[test]
+fn regexp_string_iterator_next_rejects_incompatible_objects_as_type_errors() {
+    assert_eq!(
+        thrown(
+            "var iterator=/./[Symbol.matchAll]('');\
+             return Object.create(iterator).next();"
+        )
+        .0,
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown(
+            "var iterator=/./[Symbol.matchAll]('');\
+             return iterator.next.call({});"
+        )
+        .0,
+        ExceptionKind::TypeError
+    );
+}
+
+#[test]
 fn regexp_symbol_match_all_is_lazy_and_preserves_species_construction_order() {
     assert_eq!(
         rendered(
