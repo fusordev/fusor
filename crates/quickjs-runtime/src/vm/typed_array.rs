@@ -139,13 +139,14 @@ enum TypedArrayPrototypeSetStage {
 /// Resumable `%TypedArray%.prototype.set` from an array-like source.
 ///
 /// A typed-array source follows the non-observable copy path. Every other
-/// object uses the array-like algorithm: it reads `length`, validates the
-/// target's fresh buffer witness, then reads and converts one source element
-/// at a time.
+/// source uses the array-like algorithm: it snapshots the target length before
+/// reading `length`, then reads and converts one source element before taking
+/// that store's fresh buffer witness.
 pub(super) struct TypedArrayPrototypeSetState {
     target: ObjectId,
     source: StoredValue,
     target_offset: usize,
+    target_length: usize,
     source_length: usize,
     source_index: usize,
     realm: RealmId,
@@ -1814,8 +1815,7 @@ pub(super) fn dispatch_typed_array_prototype(
     }
     if matches!(
         method,
-        TypedArrayPrototypeMethod::Set
-            | TypedArrayPrototypeMethod::Subarray
+        TypedArrayPrototypeMethod::Subarray
             | TypedArrayPrototypeMethod::At
             | TypedArrayPrototypeMethod::Includes
             | TypedArrayPrototypeMethod::IndexOf
@@ -4523,6 +4523,7 @@ fn begin_typed_array_prototype_set(
                 target,
                 source,
                 target_offset: 0,
+                target_length: 0,
                 source_length: 0,
                 source_index: 0,
                 realm,
@@ -4558,19 +4559,22 @@ pub(super) fn finish_typed_array_prototype_set_offset(
     let Ok(offset) = usize::try_from(offset) else {
         return typed_array_range_error(state.realm, &state.origin, "invalid TypedArray offset");
     };
-    if matches!(state.source, StoredValue::Undefined | StoredValue::Null) {
-        return typed_array_type_error(
-            state.realm,
-            &state.origin,
-            "TypedArray set source is not an object",
-        );
-    }
     state.target_offset = offset;
 
     if let StoredValue::Object(source) = state.source
         && runtime.typed_array_state(source)?.is_some()
     {
         return typed_array_set_from_typed_array(runtime, &state, source);
+    }
+    let (_, target_length) =
+        typed_array_require_in_bounds(runtime, state.target, state.realm, &state.origin)?;
+    state.target_length = target_length;
+    if matches!(state.source, StoredValue::Undefined | StoredValue::Null) {
+        return typed_array_type_error(
+            state.realm,
+            &state.origin,
+            "TypedArray set source is not an object",
+        );
     }
     state.stage = TypedArrayPrototypeSetStage::AwaitSourceLength;
     typed_array_prototype_set_read(
@@ -4646,8 +4650,6 @@ pub(super) fn finish_typed_array_prototype_set_source_length(
             "TypedArray source length exceeds implementation range",
         );
     };
-    let (_, target_length) =
-        typed_array_require_in_bounds(runtime, state.target, state.realm, &state.origin)?;
     let Some(end) = state.target_offset.checked_add(length) else {
         return typed_array_range_error(
             state.realm,
@@ -4655,7 +4657,7 @@ pub(super) fn finish_typed_array_prototype_set_source_length(
             "TypedArray source does not fit",
         );
     };
-    if end > target_length {
+    if end > state.target_length {
         return typed_array_range_error(
             state.realm,
             &state.origin,
@@ -4675,14 +4677,19 @@ pub(super) fn finish_typed_array_prototype_set_element(
     return_to: Option<CallReturn>,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
-    let (target_state, _) =
-        typed_array_require_in_bounds(runtime, state.target, state.realm, &state.origin)?;
+    let element = runtime
+        .typed_array_state(state.target)?
+        .copied()
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "TypedArray.prototype.set target lost its internal slots",
+        })?
+        .element();
     let index = state.target_offset.checked_add(state.source_index).ok_or(
         EngineFault::RuntimeInvariant {
             message: "TypedArray.prototype.set target index overflowed after range validation",
         },
     )?;
-    let stored = if target_state.element().is_bigint() {
+    let stored = if element.is_bigint() {
         let value = to_bigint_from_primitive(&value, state.realm, &state.origin)?;
         runtime.typed_array_store_index(
             state.target,
@@ -4697,12 +4704,21 @@ pub(super) fn finish_typed_array_prototype_set_element(
             TypedArrayElementValue::Number(value),
         )?
     };
-    if stored != TypedArrayStoreOutcome::Stored {
-        return typed_array_type_error(
-            state.realm,
-            &state.origin,
-            "TypedArray target is out of bounds",
-        );
+    match stored {
+        TypedArrayStoreOutcome::Stored | TypedArrayStoreOutcome::Missing => {}
+        TypedArrayStoreOutcome::Immutable => {
+            return typed_array_type_error(
+                state.realm,
+                &state.origin,
+                "TypedArray backing buffer is immutable",
+            );
+        }
+        TypedArrayStoreOutcome::ContentTypeMismatch => {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "TypedArray.prototype.set target content type changed during conversion",
+            }
+            .into());
+        }
     }
     state.source_index = state.source_index.saturating_add(1);
     typed_array_prototype_set_next_element(runtime, state, return_to, execution_budget)

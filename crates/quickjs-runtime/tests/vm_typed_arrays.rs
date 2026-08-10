@@ -304,11 +304,12 @@ fn typed_array_set_copies_typed_and_array_like_sources_with_fresh_target_indices
         ExceptionKind::TypeError
     );
     assert_eq!(
-        thrown(
+        rendered(
             "var buffer=new ArrayBuffer(4,{maxByteLength:4}),target=new Uint8Array(buffer);\
-             var source={length:1,get 0(){buffer.resize(0);return 1}};target.set(source);"
+             var source={length:1,get 0(){buffer.resize(0);return 1}};\
+             target.set(source);return String(buffer.byteLength);"
         ),
-        ExceptionKind::TypeError
+        "0"
     );
 }
 
@@ -328,6 +329,39 @@ fn typed_array_set_boxes_non_nullish_primitive_sources_after_offset_conversion()
     assert_eq!(
         thrown("return new Int32Array(1).set(null);"),
         ExceptionKind::TypeError
+    );
+    assert_eq!(
+        rendered(
+            "var buffer=new ArrayBuffer(2,{maxByteLength:2}),target=new Uint8Array(buffer,1,1);\
+             buffer.resize(0);\
+             target.set([7],{valueOf:function(){buffer.resize(2);return 0}});\
+             return String(target[0]);"
+        ),
+        "7"
+    );
+}
+
+#[test]
+fn typed_array_set_snapshots_length_and_refreshes_each_post_conversion_witness() {
+    assert_eq!(
+        rendered(
+            "var buffer=new ArrayBuffer(4,{maxByteLength:6}),target=new Uint8Array(buffer),caught;\
+             var source={get length(){buffer.resize(6);return 6}};\
+             try{target.set(source)}catch(error){caught=error.name}\
+             return caught+'|'+buffer.byteLength;"
+        ),
+        "RangeError|6"
+    );
+    assert_eq!(
+        rendered(
+            "var buffer=new ArrayBuffer(5,{maxByteLength:10}),target=new Int8Array(buffer),log=[];\
+             var down=0,up=0;\
+             var shrink={valueOf:function(){log.push('shrink');buffer.resize(buffer.byteLength-1);return ++down}};\
+             var grow={valueOf:function(){log.push('grow');buffer.resize(buffer.byteLength+1);return --up}};\
+             target.set({0:shrink,1:shrink,2:shrink,3:grow,4:grow,length:5});\
+             return log.join(',')+'|'+target.join(',');"
+        ),
+        "shrink,shrink,shrink,grow,grow|1,2,0,0"
     );
 }
 
