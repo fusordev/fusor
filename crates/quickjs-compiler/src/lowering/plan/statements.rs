@@ -36,6 +36,10 @@ pub(in crate::lowering) enum StatementWork<'statement, 'arena> {
         statements: &'statement [Statement<'arena>],
         next: usize,
     },
+    EnterDisconnectedAbruptContext,
+    ExitDisconnectedAbruptContext {
+        span: Span,
+    },
     VisitDirectiveList {
         directives: &'statement [Directive<'arena>],
         next: usize,
@@ -104,6 +108,9 @@ pub(in crate::lowering) struct StatementPlanningState<'statement, 'arena> {
     pub(in crate::lowering) active_scopes: Vec<ScopeId>,
     pub(in crate::lowering) controls: StatementControlStack<'statement>,
     pub(in crate::lowering) abrupt_markers: Vec<AbruptMarker>,
+    /// Marker prefixes owned by an earlier effective component. Source-mapped
+    /// dead tails remain lowered, but cannot consume markers they cannot reach.
+    pub(in crate::lowering) disconnected_abrupt_floors: Vec<usize>,
     pub(in crate::lowering) completion: StatementCompletion,
 }
 
@@ -111,6 +118,19 @@ pub(in crate::lowering) struct StatementPlanningState<'statement, 'arena> {
 pub(in crate::lowering) enum StatementCompletion {
     Discard,
     Script(LocalSlot),
+}
+
+impl StatementPlanningState<'_, '_> {
+    fn executable_abrupt_marker_floor(&self, span: Span) -> Result<usize, LeafCompilationError> {
+        let floor = self.disconnected_abrupt_floors.last().copied().unwrap_or(0);
+        if floor > self.abrupt_markers.len() {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "disconnected abrupt-context floor is active",
+                span: Some(span),
+            });
+        }
+        Ok(floor)
+    }
 }
 
 impl<'arena> CompilationContext<'_, 'arena, '_> {
@@ -129,11 +149,60 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         match task {
             StatementWork::VisitList { statements, next } => {
                 if let Some(statement) = statements.get(next) {
-                    state.work.push(StatementWork::VisitList {
-                        statements,
-                        next: next + 1,
+                    let next =
+                        next.checked_add(1)
+                            .ok_or(LeafCompilationError::CapacityExceeded {
+                                domain: "statement-list index",
+                            })?;
+                    if flow.current_path_can_fall_through() {
+                        state
+                            .work
+                            .push(StatementWork::VisitList { statements, next });
+                        state.work.push(StatementWork::Visit(statement));
+                    } else {
+                        state.work.try_reserve(4).map_err(|_| {
+                            LeafCompilationError::CapacityExceeded {
+                                domain: "statement work stack",
+                            }
+                        })?;
+                        state
+                            .work
+                            .push(StatementWork::ExitDisconnectedAbruptContext {
+                                span: statement.span(),
+                            });
+                        state
+                            .work
+                            .push(StatementWork::VisitList { statements, next });
+                        state.work.push(StatementWork::Visit(statement));
+                        state
+                            .work
+                            .push(StatementWork::EnterDisconnectedAbruptContext);
+                    }
+                }
+            }
+            StatementWork::EnterDisconnectedAbruptContext => {
+                state
+                    .disconnected_abrupt_floors
+                    .try_reserve(1)
+                    .map_err(|_| LeafCompilationError::CapacityExceeded {
+                        domain: "disconnected abrupt-context stack",
+                    })?;
+                state
+                    .disconnected_abrupt_floors
+                    .push(state.abrupt_markers.len());
+            }
+            StatementWork::ExitDisconnectedAbruptContext { span } => {
+                let Some(floor) = state.disconnected_abrupt_floors.pop() else {
+                    return Err(LeafCompilationError::SemanticInvariant {
+                        invariant: "disconnected abrupt-context exit has an active floor",
+                        span: Some(span),
                     });
-                    state.work.push(StatementWork::Visit(statement));
+                };
+                if floor > state.abrupt_markers.len() {
+                    return Err(LeafCompilationError::SemanticInvariant {
+                        invariant: "disconnected abrupt-context preserves outer markers",
+                        span: Some(span),
+                    });
                 }
             }
             StatementWork::VisitDirectiveList { directives, next } => {
@@ -284,44 +353,56 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             StatementWork::SetCompletion(completion) => {
                 state.completion = completion;
             }
-            StatementWork::ForInHead(left) => self.plan_for_in_head(
-                left,
-                planning.layout,
-                planning.tree_layout,
-                planning.constants,
-                &state.abrupt_markers,
-                flow,
-            )?,
+            StatementWork::ForInHead(left) => {
+                let floor = state.executable_abrupt_marker_floor(body_span)?;
+                self.plan_for_in_head(
+                    left,
+                    planning.layout,
+                    planning.tree_layout,
+                    planning.constants,
+                    &state.abrupt_markers[floor..],
+                    flow,
+                )?;
+            }
             StatementWork::ForOfHead(left) => {
                 self.plan_for_of_head(left, planning.layout)?;
             }
-            StatementWork::ForInAssignment(left) => self.plan_for_in_assignment(
-                left,
-                planning.layout,
-                planning.tree_layout,
-                planning.constants,
-                &state.abrupt_markers,
-                flow,
-            )?,
-            StatementWork::ForOfAssignment(left) => self.plan_for_of_assignment(
-                left,
-                planning.layout,
-                planning.tree_layout,
-                planning.constants,
-                &state.abrupt_markers,
-                flow,
-            )?,
+            StatementWork::ForInAssignment(left) => {
+                let floor = state.executable_abrupt_marker_floor(body_span)?;
+                self.plan_for_in_assignment(
+                    left,
+                    planning.layout,
+                    planning.tree_layout,
+                    planning.constants,
+                    &state.abrupt_markers[floor..],
+                    flow,
+                )?;
+            }
+            StatementWork::ForOfAssignment(left) => {
+                let floor = state.executable_abrupt_marker_floor(body_span)?;
+                self.plan_for_of_assignment(
+                    left,
+                    planning.layout,
+                    planning.tree_layout,
+                    planning.constants,
+                    &state.abrupt_markers[floor..],
+                    flow,
+                )?;
+            }
             StatementWork::IterationRotate(scope) => {
                 self.plan_iteration_rotation(planning.executable, scope, planning.layout, flow)?;
             }
-            StatementWork::Expression(expression) => self.plan_expression_with_abrupt_markers(
-                expression,
-                planning.layout,
-                planning.tree_layout,
-                planning.constants,
-                &state.abrupt_markers,
-                flow,
-            )?,
+            StatementWork::Expression(expression) => {
+                let floor = state.executable_abrupt_marker_floor(expression.span())?;
+                self.plan_expression_with_abrupt_markers(
+                    expression,
+                    planning.layout,
+                    planning.tree_layout,
+                    planning.constants,
+                    &state.abrupt_markers[floor..],
+                    flow,
+                )?;
+            }
             StatementWork::InitializeInstanceFields(span) => {
                 ExpressionPlanner::new(self).plan_call_instance_initializer(
                     planning.executable,
@@ -330,23 +411,27 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                     flow,
                 )?;
             }
-            StatementWork::Declaration(declaration) => self.validate_declaration(
-                declaration,
-                planning.layout,
-                planning.tree_layout,
-                planning.constants,
-                &state.abrupt_markers,
-                flow,
-            )?,
+            StatementWork::Declaration(declaration) => {
+                let floor = state.executable_abrupt_marker_floor(declaration.span)?;
+                self.validate_declaration(
+                    declaration,
+                    planning.layout,
+                    planning.tree_layout,
+                    planning.constants,
+                    &state.abrupt_markers[floor..],
+                    flow,
+                )?;
+            }
             StatementWork::CatchBinding {
                 handler,
                 body_scope,
             } => {
+                let floor = state.executable_abrupt_marker_floor(handler.span)?;
                 self.plan_catch_binding(
                     handler,
                     body_scope,
                     planning,
-                    &state.abrupt_markers,
+                    &state.abrupt_markers[floor..],
                     flow,
                 )?;
             }
@@ -425,12 +510,13 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 )?;
             }
             Statement::VariableDeclaration(declaration) => {
+                let floor = state.executable_abrupt_marker_floor(declaration.span)?;
                 self.validate_declaration(
                     declaration,
                     layout,
                     tree_layout,
                     constants,
-                    &state.abrupt_markers,
+                    &state.abrupt_markers[floor..],
                     flow,
                 )?;
             }
@@ -475,9 +561,11 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 } else {
                     FinalOpcode::Return
                 };
+                let floor = state.executable_abrupt_marker_floor(statement.span)?;
                 Self::schedule_return_statement(
                     statement,
-                    &state.abrupt_markers,
+                    &state.abrupt_markers[floor..],
+                    flow.current_path_can_fall_through(),
                     return_opcode,
                     async_generator,
                     flow,
@@ -485,7 +573,13 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 )?;
             }
             Statement::ThrowStatement(statement) => {
-                Self::schedule_throw_statement(statement, &state.abrupt_markers, &mut state.work)?;
+                let floor = state.executable_abrupt_marker_floor(statement.span)?;
+                Self::schedule_throw_statement(
+                    statement,
+                    &state.abrupt_markers[floor..],
+                    flow.current_path_can_fall_through(),
+                    &mut state.work,
+                )?;
             }
             Statement::IfStatement(statement) => {
                 Self::reset_script_completion(state.completion, statement.span, flow)?;
@@ -670,11 +764,17 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
     fn schedule_return_statement<'statement>(
         statement: &'statement ReturnStatement<'arena>,
         abrupt_markers: &[AbruptMarker],
+        cleanup_abrupt_context: bool,
         return_opcode: FinalOpcode,
         await_value: bool,
         flow: &mut PlannedControlFlow,
         work: &mut Vec<StatementWork<'statement, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
+        let abrupt_markers = if cleanup_abrupt_context {
+            abrupt_markers
+        } else {
+            &[]
+        };
         let crosses_finalizer = abrupt_markers
             .iter()
             .any(|marker| matches!(&marker.kind, AbruptMarkerKind::Catch { finalizer: Some(_) }));
@@ -847,8 +947,14 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
     fn schedule_throw_statement<'statement>(
         statement: &'statement ThrowStatement<'arena>,
         abrupt_markers: &[AbruptMarker],
+        cleanup_abrupt_context: bool,
         work: &mut Vec<StatementWork<'statement, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
+        let abrupt_markers = if cleanup_abrupt_context {
+            abrupt_markers
+        } else {
+            &[]
+        };
         let removable_markers = abrupt_markers
             .iter()
             .rposition(|marker| marker.tag() == AbruptMarkerTag::Catch)
@@ -2204,7 +2310,9 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                     invariant: "active statement control has an abrupt-marker depth",
                     span: Some(statement_span),
                 })?;
-        let crossed_markers = state.abrupt_markers.get(abrupt_marker_depth..).ok_or(
+        let executable_floor = state.executable_abrupt_marker_floor(statement_span)?;
+        let crossed_marker_start = abrupt_marker_depth.max(executable_floor);
+        let crossed_markers = state.abrupt_markers.get(crossed_marker_start..).ok_or(
             LeafCompilationError::SemanticInvariant {
                 invariant: "statement control abrupt-marker depth is active",
                 span: Some(statement_span),

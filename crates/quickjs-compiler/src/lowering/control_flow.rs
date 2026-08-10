@@ -184,6 +184,17 @@ impl PlannedControlFlow {
         Ok(())
     }
 
+    /// Whether the next emitted instruction has a local fallthrough entry.
+    /// Bound labels conservatively reopen emission even when their incoming
+    /// edge is later proven unreachable by whole-graph verification.
+    pub(in crate::lowering) const fn current_path_can_fall_through(&self) -> bool {
+        self.label_bound_after_last_instruction
+            || match self.last_instruction_can_fall_through {
+                Some(can_fall_through) => can_fall_through,
+                None => true,
+            }
+    }
+
     pub(in crate::lowering) fn new_label(
         &mut self,
         span: Span,

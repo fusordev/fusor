@@ -2146,6 +2146,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             active_scopes: vec![class.scope_id()],
             controls: StatementControlStack::default(),
             abrupt_markers: Vec::new(),
+            disconnected_abrupt_floors: Vec::new(),
             completion: StatementCompletion::Discard,
         };
         while let Some(task) = state.work.pop() {
@@ -2154,6 +2155,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         if state.active_scopes.as_slice() != [class.scope_id()]
             || !state.controls.is_empty()
             || !state.abrupt_markers.is_empty()
+            || !state.disconnected_abrupt_floors.is_empty()
         {
             return Err(LeafCompilationError::SemanticInvariant {
                 invariant: "static block closes its scope and control regions",

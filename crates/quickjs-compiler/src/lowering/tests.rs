@@ -273,6 +273,7 @@ fn abrupt_cleanup_fixture(
                 active_scopes: vec![function_scope, loop_scope, inner_scope],
                 controls,
                 abrupt_markers: Vec::new(),
+                disconnected_abrupt_floors: Vec::new(),
                 completion: StatementCompletion::Discard,
             };
             context

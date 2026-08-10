@@ -116,6 +116,22 @@ fn yield_return_closes_iterators_active_in_assignment_destructuring() {
 }
 
 #[test]
+fn disconnected_generator_resume_cleanup_uses_only_local_markers() {
+    let compiled = compile(
+        "function* g(){try{yield 1;throw 2;try{yield 3;}catch(error){yield error;}}finally{yield 4;}}",
+        "g",
+    );
+    assert!(
+        compiled
+            .control_flow()
+            .instructions()
+            .iter()
+            .any(|instruction| instruction.entry_stack_depth().is_none()),
+        "the nested try remains structurally disconnected after the source throw"
+    );
+}
+
+#[test]
 fn empty_generator_has_an_explicit_undefined_async_return() {
     let compiled = compile("function* empty() {}", "empty");
     assert_eq!(

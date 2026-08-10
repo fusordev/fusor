@@ -346,6 +346,7 @@ impl<'compiler, 'statement, 'unit, 'arena, 'scope, 'layout>
                 active_scopes: Vec::new(),
                 controls: StatementControlStack::default(),
                 abrupt_markers: Vec::new(),
+                disconnected_abrupt_floors: Vec::new(),
                 completion: StatementCompletion::Discard,
             },
             flow,
@@ -414,6 +415,7 @@ impl<'compiler, 'statement, 'unit, 'arena, 'scope, 'layout>
                 active_scopes: Vec::new(),
                 controls: StatementControlStack::default(),
                 abrupt_markers: Vec::new(),
+                disconnected_abrupt_floors: Vec::new(),
                 completion: StatementCompletion::Discard,
             },
             flow,
@@ -464,6 +466,7 @@ impl<'compiler, 'statement, 'unit, 'arena, 'scope, 'layout>
                 active_scopes: Vec::new(),
                 controls: StatementControlStack::default(),
                 abrupt_markers: Vec::new(),
+                disconnected_abrupt_floors: Vec::new(),
                 completion: StatementCompletion::Script(completion),
             },
             flow: PlannedControlFlow::new(limits),
@@ -484,6 +487,7 @@ impl<'compiler, 'statement, 'unit, 'arena, 'scope, 'layout>
         if !self.state.active_scopes.is_empty()
             || !self.state.controls.is_empty()
             || !self.state.abrupt_markers.is_empty()
+            || !self.state.disconnected_abrupt_floors.is_empty()
         {
             return Err(LeafCompilationError::SemanticInvariant {
                 invariant: match self.terminal {
