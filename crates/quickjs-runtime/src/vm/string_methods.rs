@@ -30,9 +30,11 @@
 //!
 //! 1. `RequireObjectCoercible(this)` rejects `null` and `undefined`.
 //! 2. `ToString(this)` produces the subject and can re-enter the interpreter.
-//! 3. Each declared argument is coerced left to right, and each coercion can
+//! 3. `includes`, `startsWith`, and `endsWith` run the observable `IsRegExp`
+//!    check on their search argument.
+//! 4. Each declared argument is coerced left to right, and each coercion can
 //!    re-enter the interpreter.
-//! 4. The method computes its result from already-converted values.
+//! 5. The method computes its result from already-converted values.
 //!
 //! The pinned oracle fixes that order: for
 //! `String.prototype.indexOf.call(recv, arg, pos)` with side-effecting
@@ -108,9 +110,11 @@ impl ConvertedArgument {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum StringMethodStage {
     /// Awaiting `ToString` of the receiver.
-    AwaitSubject,
+    Subject,
+    /// Awaiting `Get(searchString, %Symbol.match%)` for `IsRegExp`.
+    RegExpMatch,
     /// Awaiting the conversion of the argument at `next_argument`.
-    AwaitArgument,
+    Argument,
 }
 
 /// One in-progress `String.prototype` method call.
@@ -217,7 +221,7 @@ pub(super) fn begin_string_method(
         converted: Vec::new(),
         next_argument: 0,
         realm,
-        stage: StringMethodStage::AwaitSubject,
+        stage: StringMethodStage::Subject,
         origin: origin.clone(),
     };
 
@@ -246,6 +250,10 @@ pub(super) fn begin_string_method(
 }
 
 /// Resumes a String method after an awaited conversion.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one resumable loop keeps the receiver, IsRegExp, and ordered argument conversions in a single auditable state machine"
+)]
 pub(super) fn advance_string_method(
     runtime: &mut Runtime,
     mut state: StringMethodContinuation,
@@ -256,7 +264,7 @@ pub(super) fn advance_string_method(
     let mut completion = completion;
     loop {
         match state.stage {
-            StringMethodStage::AwaitSubject => {
+            StringMethodStage::Subject => {
                 if state.subject.is_none() {
                     let value = take_completion(&mut completion)?;
                     state.subject = Some(operator_primitive_to_string(
@@ -265,9 +273,54 @@ pub(super) fn advance_string_method(
                         &state.origin,
                     )?);
                 }
-                state.stage = StringMethodStage::AwaitArgument;
+                if rejects_regexp_argument(state.method)
+                    && matches!(
+                        state.pending.first(),
+                        Some(StoredValue::Function(_) | StoredValue::Object(_))
+                    )
+                {
+                    return begin_string_method_is_regexp(
+                        runtime,
+                        state,
+                        return_to,
+                        execution_budget,
+                    );
+                }
+                state.stage = StringMethodStage::Argument;
             }
-            StringMethodStage::AwaitArgument => {
+            StringMethodStage::RegExpMatch => {
+                let match_value = take_completion(&mut completion)?;
+                let is_regexp = if matches!(match_value, StoredValue::Undefined) {
+                    match state.pending.first() {
+                        Some(StoredValue::Object(object)) => {
+                            runtime.regexp_state(*object)?.is_some()
+                        }
+                        Some(_) => false,
+                        None => {
+                            return Err(EngineFault::RuntimeInvariant {
+                                message: "a String IsRegExp check lost its search argument",
+                            }
+                            .into());
+                        }
+                    }
+                } else {
+                    runtime.to_boolean(&match_value)?
+                };
+                if is_regexp {
+                    return Err(NativeFailure::Abrupt(PendingException {
+                        realm: state.realm,
+                        payload: PendingExceptionPayload::EngineError {
+                            kind: ExceptionKind::TypeError,
+                            message: JsString::from_utf8(
+                                "regular expressions are forbidden as search strings",
+                            )?,
+                        },
+                        origin: state.origin,
+                    }));
+                }
+                state.stage = StringMethodStage::Argument;
+            }
+            StringMethodStage::Argument => {
                 // Store the argument the previous iteration awaited.
                 if let Some(value) = completion.take() {
                     let shape = argument_shape_at(state.method, state.next_argument);
@@ -347,6 +400,55 @@ pub(super) fn advance_string_method(
             }
         }
     }
+}
+
+fn rejects_regexp_argument(method: StringMethod) -> bool {
+    matches!(
+        method,
+        StringMethod::Includes | StringMethod::StartsWith | StringMethod::EndsWith
+    )
+}
+
+fn begin_string_method_is_regexp(
+    runtime: &mut Runtime,
+    mut state: StringMethodContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    state.stage = StringMethodStage::RegExpMatch;
+    let search = state
+        .pending
+        .first()
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "a String IsRegExp check lost its search argument",
+        })?
+        .duplicate();
+    charge_heap_property_lookup(runtime, &search, execution_budget)?;
+    let key = runtime.predefined_symbol_property_key(PredefinedAtom::SymbolMatch);
+    let name = JsString::from_utf8("Symbol.match")?;
+    let dispatch = begin_value_get(
+        runtime,
+        &search,
+        key,
+        Some(&name),
+        state.realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    )?;
+    continue_get_after(
+        dispatch,
+        state,
+        string_method_continuation,
+        |state, value| {
+            advance_string_method(runtime, state, Some(value), return_to, execution_budget)
+        },
+        "String IsRegExp Get produced a structured result",
+    )
+}
+
+fn string_method_continuation(state: StringMethodContinuation) -> NativeContinuation {
+    NativeContinuation::StringMethod(Box::new(state))
 }
 
 /// Returns the coercion shape of one argument position.

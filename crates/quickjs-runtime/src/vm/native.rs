@@ -1284,6 +1284,13 @@ pub(super) fn resume_native_continuations(
                 return_to,
                 execution_budget,
             )?,
+            NativeContinuation::StringMethod(state) => advance_string_method(
+                runtime,
+                *state,
+                Some(value.duplicate()),
+                return_to,
+                execution_budget,
+            )?,
             NativeContinuation::RegExp(state) => advance_regexp_continuation(
                 runtime,
                 *state,

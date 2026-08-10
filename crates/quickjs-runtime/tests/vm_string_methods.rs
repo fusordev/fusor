@@ -280,6 +280,43 @@ fn the_search_methods_match_the_oracle() {
     ]);
 }
 
+/// The three search predicates reject a value according to observable
+/// `IsRegExp`, after receiver conversion and before either argument coercion.
+#[test]
+fn search_predicates_apply_observable_is_regexp_before_argument_coercion() {
+    for method in ["includes", "startsWith", "endsWith"] {
+        assert_eq!(
+            thrown(&format!("return ''.{method}(/./); ")).0,
+            ExceptionKind::TypeError,
+            "{method}"
+        );
+        assert_eq!(
+            rendered(&format!(
+                "(function(){{try{{''.{method}({{get [Symbol.match](){{throw 7;}}}});}}catch(error){{return error;}}}})()"
+            )),
+            "7",
+            "{method}"
+        );
+        assert_eq!(
+            rendered(&format!(
+                "(function(){{let log=[];const recv={{toString(){{log.push('recv');return 'abc';}}}};const search={{get [Symbol.match](){{log.push('match');return false;}},toString(){{log.push('search');return 'b';}}}};const pos={{valueOf(){{log.push('position');return 0;}}}};String.prototype.{method}.call(recv,search,pos);return log.join(',');}})()"
+            )),
+            "recv,match,search,position",
+            "{method}"
+        );
+        assert_eq!(
+            rendered(&format!(
+                "(function(){{const search=/b/;search[Symbol.match]=false;search.toString=function(){{return 'b';}};return 'abc'.{method}(search);}})()"
+            )),
+            match method {
+                "includes" => "true",
+                _ => "false",
+            },
+            "{method}"
+        );
+    }
+}
+
 /// `slice` and `substring` resolve their endpoints differently.
 ///
 /// `slice` accepts negative endpoints and yields the empty string when they
