@@ -400,6 +400,14 @@ fn array_of_is_generic_and_uses_create_data_property_before_strict_length_set() 
             "(function(){function C(){return Object.preventExtensions({})}try{Array.of.call(C,1);return 'miss'}catch(e){return e instanceof TypeError}})()",
             "true",
         ),
+        (
+            "(function(){const marker={};function C(){return new Proxy({}, {defineProperty(){throw marker}})}try{Array.of.call(C,1);return 'miss'}catch(e){return e===marker}})()",
+            "true",
+        ),
+        (
+            "(function(){function C(){return new Proxy({}, {defineProperty(){return false}})}try{Array.of.call(C,1);return 'miss'}catch(e){return e instanceof TypeError}})()",
+            "true",
+        ),
     ]);
 }
 
@@ -434,6 +442,14 @@ fn array_from_closes_only_mapper_and_definition_abruptions() {
         ),
         (
             "(function(){let closed=0;const items={[Symbol.iterator](){let sent=false;return {next(){if(sent)return {done:true};sent=true;return {done:false,value:1}},return(){closed++;return {done:true}}}}};function C(){return Object.preventExtensions({})}let typed=false;try{Array.from.call(C,items)}catch(e){typed=e instanceof TypeError}return typed+'|'+closed})()",
+            "true|1",
+        ),
+        (
+            "(function(){const marker={};let closed=0,calls=0;const items={[Symbol.iterator](){let sent=false;return {next(){if(sent)return {done:true};sent=true;return {done:false,value:1}},return(){closed++;return {done:true}}}}};function C(){return new Proxy({}, {defineProperty(){calls++;throw marker}})}let same=false;try{Array.from.call(C,items)}catch(e){same=e===marker}return same+'|'+closed+'|'+calls})()",
+            "true|1|1",
+        ),
+        (
+            "(function(){let calls=0;const items={length:1,0:'x',[Symbol.iterator]:undefined};function C(){return new Proxy({}, {defineProperty(){calls++;return false}})}let typed=false;try{Array.from.call(C,items)}catch(e){typed=e instanceof TypeError}return typed+'|'+calls})()",
             "true|1",
         ),
         (

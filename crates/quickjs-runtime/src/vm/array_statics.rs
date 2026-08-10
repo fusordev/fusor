@@ -51,6 +51,7 @@ enum ArrayStaticStage {
     AwaitDone,
     AwaitIteratorValue,
     AwaitIterableMapper,
+    AwaitIterableDefinition,
     AwaitTypedArrayIterableConstruct,
     AwaitTypedArrayIterableMapper,
     AwaitArrayLikeLength,
@@ -58,7 +59,9 @@ enum ArrayStaticStage {
     AwaitArrayLikeConstruct,
     AwaitArrayLikeElement,
     AwaitArrayLikeMapper,
+    AwaitArrayLikeDefinition,
     AwaitOfConstruct,
+    AwaitOfDefinition,
     AwaitLengthSetter,
 }
 
@@ -121,8 +124,23 @@ impl ArrayStaticContinuation {
     }
 
     const fn closes_on_abrupt(&self) -> bool {
-        matches!(self.stage, ArrayStaticStage::AwaitIterableMapper)
+        matches!(
+            self.stage,
+            ArrayStaticStage::AwaitIterableMapper | ArrayStaticStage::AwaitIterableDefinition
+        )
     }
+}
+
+#[allow(
+    clippy::large_enum_variant,
+    reason = "this short-lived carrier avoids allocating once per observable Array element definition"
+)]
+enum ArrayStaticDefinitionDispatch {
+    Ready {
+        state: ArrayStaticContinuation,
+        completion: StoredValue,
+    },
+    Suspended(NativeDispatch),
 }
 
 /// Starts one generic `Array` constructor factory.
@@ -395,35 +413,49 @@ pub(super) fn advance_array_static(
                         state, mapper, receiver, arguments, None, return_to,
                     );
                 }
-                if let Some(pending) =
-                    define_array_static_element(runtime, &mut state, value, execution_budget)?
-                {
-                    return begin_array_static_close(
-                        runtime,
-                        state,
-                        pending,
-                        return_to,
-                        execution_budget,
-                    );
+                state.stage = ArrayStaticStage::AwaitIterableDefinition;
+                match begin_array_static_element_definition(
+                    runtime,
+                    state,
+                    value,
+                    return_to,
+                    execution_budget,
+                )? {
+                    ArrayStaticDefinitionDispatch::Ready {
+                        state: resumed,
+                        completion: value,
+                    } => {
+                        state = resumed;
+                        completion = Some(value);
+                    }
+                    ArrayStaticDefinitionDispatch::Suspended(dispatch) => return Ok(dispatch),
                 }
+            }
+            ArrayStaticStage::AwaitIterableDefinition => {
+                let _ = take_array_static_completion(&mut completion)?;
+                state.index = state.index.saturating_add(1);
                 state.result = None;
                 return call_array_static_next(runtime, state, return_to, execution_budget);
             }
             ArrayStaticStage::AwaitIterableMapper => {
                 let value = take_array_static_completion(&mut completion)?;
-                if let Some(pending) =
-                    define_array_static_element(runtime, &mut state, value, execution_budget)?
-                {
-                    return begin_array_static_close(
-                        runtime,
-                        state,
-                        pending,
-                        return_to,
-                        execution_budget,
-                    );
+                state.stage = ArrayStaticStage::AwaitIterableDefinition;
+                match begin_array_static_element_definition(
+                    runtime,
+                    state,
+                    value,
+                    return_to,
+                    execution_budget,
+                )? {
+                    ArrayStaticDefinitionDispatch::Ready {
+                        state: resumed,
+                        completion: value,
+                    } => {
+                        state = resumed;
+                        completion = Some(value);
+                    }
+                    ArrayStaticDefinitionDispatch::Suspended(dispatch) => return Ok(dispatch),
                 }
-                state.result = None;
-                return call_array_static_next(runtime, state, return_to, execution_budget);
             }
             ArrayStaticStage::AwaitTypedArrayIterableConstruct => {
                 if let Some(value) = completion.take() {
@@ -539,12 +571,23 @@ pub(super) fn advance_array_static(
                         execution_budget,
                     );
                 }
-                if let Some(pending) =
-                    define_array_static_element(runtime, &mut state, value, execution_budget)?
-                {
-                    return Err(NativeFailure::Abrupt(pending));
+                state.stage = ArrayStaticStage::AwaitArrayLikeDefinition;
+                match begin_array_static_element_definition(
+                    runtime,
+                    state,
+                    value,
+                    return_to,
+                    execution_budget,
+                )? {
+                    ArrayStaticDefinitionDispatch::Ready {
+                        state: resumed,
+                        completion: value,
+                    } => {
+                        state = resumed;
+                        completion = Some(value);
+                    }
+                    ArrayStaticDefinitionDispatch::Suspended(dispatch) => return Ok(dispatch),
                 }
-                state.stage = ArrayStaticStage::AwaitArrayLikeConstruct;
             }
             ArrayStaticStage::AwaitArrayLikeMapper => {
                 let value = take_array_static_completion(&mut completion)?;
@@ -558,11 +601,27 @@ pub(super) fn advance_array_static(
                         execution_budget,
                     );
                 }
-                if let Some(pending) =
-                    define_array_static_element(runtime, &mut state, value, execution_budget)?
-                {
-                    return Err(NativeFailure::Abrupt(pending));
+                state.stage = ArrayStaticStage::AwaitArrayLikeDefinition;
+                match begin_array_static_element_definition(
+                    runtime,
+                    state,
+                    value,
+                    return_to,
+                    execution_budget,
+                )? {
+                    ArrayStaticDefinitionDispatch::Ready {
+                        state: resumed,
+                        completion: value,
+                    } => {
+                        state = resumed;
+                        completion = Some(value);
+                    }
+                    ArrayStaticDefinitionDispatch::Suspended(dispatch) => return Ok(dispatch),
                 }
+            }
+            ArrayStaticStage::AwaitArrayLikeDefinition => {
+                let _ = take_array_static_completion(&mut completion)?;
+                state.index = state.index.saturating_add(1);
                 state.stage = ArrayStaticStage::AwaitArrayLikeConstruct;
             }
             ArrayStaticStage::AwaitOfConstruct => {
@@ -585,20 +644,36 @@ pub(super) fn advance_array_static(
                         execution_budget,
                     );
                 }
-                while state.index < state.length {
-                    let index = usize::try_from(state.index).map_err(|_| {
-                        EngineFault::RuntimeInvariant {
-                            message: "Array.of item index does not fit usize",
-                        }
-                    })?;
-                    let value = state.items[index].duplicate();
-                    if let Some(pending) =
-                        define_array_static_element(runtime, &mut state, value, execution_budget)?
-                    {
-                        return Err(NativeFailure::Abrupt(pending));
-                    }
+                if state.index >= state.length {
+                    return finish_array_static_length(runtime, state, return_to, execution_budget);
                 }
-                return finish_array_static_length(runtime, state, return_to, execution_budget);
+                let index =
+                    usize::try_from(state.index).map_err(|_| EngineFault::RuntimeInvariant {
+                        message: "Array.of item index does not fit usize",
+                    })?;
+                let value = state.items[index].duplicate();
+                state.stage = ArrayStaticStage::AwaitOfDefinition;
+                match begin_array_static_element_definition(
+                    runtime,
+                    state,
+                    value,
+                    return_to,
+                    execution_budget,
+                )? {
+                    ArrayStaticDefinitionDispatch::Ready {
+                        state: resumed,
+                        completion: value,
+                    } => {
+                        state = resumed;
+                        completion = Some(value);
+                    }
+                    ArrayStaticDefinitionDispatch::Suspended(dispatch) => return Ok(dispatch),
+                }
+            }
+            ArrayStaticStage::AwaitOfDefinition => {
+                let _ = take_array_static_completion(&mut completion)?;
+                state.index = state.index.saturating_add(1);
+                state.stage = ArrayStaticStage::AwaitOfConstruct;
             }
             ArrayStaticStage::AwaitLengthSetter => {
                 let _ = take_array_static_completion(&mut completion)?;
@@ -773,28 +848,57 @@ pub(super) fn finish_typed_array_static_element(
     advance_array_static(runtime, state, None, return_to, execution_budget)
 }
 
-fn define_array_static_element(
+fn begin_array_static_element_definition(
     runtime: &mut Runtime,
-    state: &mut ArrayStaticContinuation,
+    state: ArrayStaticContinuation,
     value: StoredValue,
+    return_to: Option<CallReturn>,
     execution_budget: &mut ExecutionBudget,
-) -> Result<Option<PendingException>, NativeFailure> {
+) -> Result<ArrayStaticDefinitionDispatch, NativeFailure> {
     let key = array_static_index_key(runtime, state.index)?;
-    let target = array_static_target(state)?;
-    charge_heap_property_lookup(runtime, target, execution_budget)?;
-    match define_static_property(runtime, target, key, value, execution_budget)? {
-        PropertyWriteOutcome::Complete => {
-            state.index = state.index.saturating_add(1);
-            Ok(None)
+    let target = array_static_target(&state)?;
+    let reference = target
+        .heap_reference()
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "Array factory element-definition target is not an object",
+        })?;
+    let definition = PropertyDefinition::data(Requested::Present(value), Requested::Present(true))
+        .with_enumerable(Requested::Present(true))
+        .with_configurable(Requested::Present(true));
+    let dispatch = match begin_internal_define_own_property(
+        runtime,
+        reference,
+        key,
+        definition,
+        state.realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+        DefinePropertyResult::Target,
+    ) {
+        Ok(dispatch) => dispatch,
+        Err(NativeFailure::Abrupt(pending) | NativeFailure::AbruptAfterTransient(pending)) => {
+            return Ok(ArrayStaticDefinitionDispatch::Suspended(
+                resume_array_static_abrupt(runtime, state, pending, return_to, execution_budget)?,
+            ));
         }
-        PropertyWriteOutcome::Failed(failure) => {
-            let pending = property_exception_at(state.realm, state.origin.clone(), None, failure)?;
-            Ok(Some(pending))
+        Err(failure) => return Err(failure),
+    };
+    match continue_get_state_after(
+        dispatch,
+        state,
+        array_static_continuation,
+        "Array factory [[DefineOwnProperty]] produced a structured result",
+    )? {
+        GetContinuationDispatch::Ready { state, value } => {
+            Ok(ArrayStaticDefinitionDispatch::Ready {
+                state,
+                completion: value,
+            })
         }
-        PropertyWriteOutcome::Setter { .. } => Err(EngineFault::RuntimeInvariant {
-            message: "CreateDataPropertyOrThrow attempted to call a setter",
+        GetContinuationDispatch::Suspended(dispatch) => {
+            Ok(ArrayStaticDefinitionDispatch::Suspended(dispatch))
         }
-        .into()),
     }
 }
 
