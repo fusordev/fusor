@@ -1498,6 +1498,52 @@ pub(super) fn write_static_property(
     Ok(PropertyWriteOutcome::Complete)
 }
 
+fn define_static_array_property(
+    runtime: &mut Runtime,
+    object: ObjectId,
+    key: PropertyKey,
+    definition: &PropertyDefinition,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<PropertyWriteOutcome, ExecutionError> {
+    if key.as_atom().and_then(crate::Atom::predefined_atom) == Some(PredefinedAtom::Length) {
+        return Ok(PropertyWriteOutcome::Failed(
+            PropertyFailure::NotConfigurable,
+        ));
+    }
+    let exists = runtime.array_own_property(object, &key)?;
+    let extensible = runtime
+        .object_record(HeapReference::Object(object))?
+        .is_extensible();
+    let decision = match &exists {
+        Some(existing) => validate_and_apply_existing(definition, existing),
+        None => validate_and_apply_new(definition, extensible),
+    };
+    match decision {
+        DefinitionDecision::Unchanged => Ok(PropertyWriteOutcome::Complete),
+        DefinitionDecision::Rejected if exists.is_some() => Ok(PropertyWriteOutcome::Failed(
+            PropertyFailure::NotConfigurable,
+        )),
+        DefinitionDecision::Rejected => {
+            Ok(PropertyWriteOutcome::Failed(PropertyFailure::NonExtensible))
+        }
+        DefinitionDecision::Replace(property) | DefinitionDecision::Create(property) => {
+            let work = runtime.preview_array_data_property_work(object, &key)?;
+            execution_budget.charge_instructions(work)?;
+            Ok(
+                match runtime.define_array_own_property(object, key, property)? {
+                    ArrayDefineOutcome::Complete => PropertyWriteOutcome::Complete,
+                    ArrayDefineOutcome::ReadOnlyLength => {
+                        PropertyWriteOutcome::Failed(PropertyFailure::ReadOnly)
+                    }
+                    ArrayDefineOutcome::NonExtensible => {
+                        PropertyWriteOutcome::Failed(PropertyFailure::NonExtensible)
+                    }
+                },
+            )
+        }
+    }
+}
+
 pub(super) fn define_static_property(
     runtime: &mut Runtime,
     base: &StoredValue,
@@ -1518,6 +1564,9 @@ pub(super) fn define_static_property(
             return Ok(PropertyWriteOutcome::Failed(PropertyFailure::NotObject));
         }
     };
+    let definition = PropertyDefinition::data(Requested::Present(value), Requested::Present(true))
+        .with_enumerable(Requested::Present(true))
+        .with_configurable(Requested::Present(true));
     let mapped_cell = match reference {
         HeapReference::Object(object) => runtime.mapped_arguments_cell(object, &key)?,
         HeapReference::Function(_) => None,
@@ -1525,29 +1574,7 @@ pub(super) fn define_static_property(
     if let HeapReference::Object(object) = reference
         && runtime.is_array_object(object)?
     {
-        if key.as_atom().and_then(crate::Atom::predefined_atom) == Some(PredefinedAtom::Length) {
-            return Ok(PropertyWriteOutcome::Failed(
-                PropertyFailure::NotConfigurable,
-            ));
-        }
-        let work = runtime.preview_array_data_property_work(object, &key)?;
-        execution_budget.charge_instructions(work)?;
-        return Ok(
-            match runtime.define_array_data_property(
-                object,
-                key,
-                PropertyLayout::data(true, true, true),
-                value,
-            )? {
-                ArrayDefineOutcome::Complete => PropertyWriteOutcome::Complete,
-                ArrayDefineOutcome::ReadOnlyLength => {
-                    PropertyWriteOutcome::Failed(PropertyFailure::ReadOnly)
-                }
-                ArrayDefineOutcome::NonExtensible => {
-                    PropertyWriteOutcome::Failed(PropertyFailure::NonExtensible)
-                }
-            },
-        );
+        return define_static_array_property(runtime, object, key, &definition, execution_budget);
     }
     let (exists, extensible) = {
         (
@@ -1561,9 +1588,6 @@ pub(super) fn define_static_property(
     // `ValidateAndApplyPropertyDescriptor` keeps one authority for the
     // compatibility rules, so redefining a non-configurable property is
     // rejected here exactly as it is for an explicit `defineProperty`.
-    let definition = PropertyDefinition::data(Requested::Present(value), Requested::Present(true))
-        .with_enumerable(Requested::Present(true))
-        .with_configurable(Requested::Present(true));
     let decision = match &exists {
         Some(existing) => validate_and_apply_existing(&definition, existing),
         None => validate_and_apply_new(&definition, extensible),
