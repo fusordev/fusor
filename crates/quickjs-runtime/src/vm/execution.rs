@@ -2250,7 +2250,7 @@ pub(super) fn execute_one(
             let name = computed_function_name(stack_value_at(frame, key_index)?)?;
             set_inferred_function_name(runtime, function, name)?;
         }
-        FinalOpcode::GetArrayEl | FinalOpcode::GetArrayEl2 => {
+        FinalOpcode::GetArrayEl | FinalOpcode::GetArrayEl2 | FinalOpcode::GetArrayEl3 => {
             let realm = code(runtime, frame.code)?.realm;
             let key = pop(frame)?;
             let base = if opcode == FinalOpcode::GetArrayEl {
@@ -2282,11 +2282,16 @@ pub(super) fn execute_one(
                         pc: source_pc,
                     },
                 )?);
+            let target = if opcode == FinalOpcode::GetArrayEl3 {
+                PropertyKeyTarget::ReadRetain { base, realm }
+            } else {
+                PropertyKeyTarget::Read { base, realm }
+            };
             return native_step(
                 begin_property_key_conversion(
                     runtime,
                     key,
-                    PropertyKeyTarget::Read { base, realm },
+                    target,
                     realm,
                     Some(return_to),
                     origin,

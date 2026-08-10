@@ -1001,7 +1001,7 @@ fn logical_static_property_class_assignments_use_the_typed_empty_name_path() {
 }
 
 #[test]
-fn logical_computed_property_class_assignments_preserve_the_raw_key_for_read_and_write() {
+fn logical_computed_property_class_assignments_reuse_one_converted_key() {
     let tree = compile(
         "function make(holder,orKey,andKey,nullishKey){holder[orKey]||=class{static answer(){return 3;}};holder[andKey]&&=class{static answer(){return 4;}};holder[nullishKey]??=class{static answer(){return 5;}};return holder;}",
         "make",
@@ -1020,7 +1020,8 @@ fn logical_computed_property_class_assignments_preserve_the_raw_key_for_read_and
         root.control_flow()
             .instructions()
             .iter()
-            .filter(|instruction| instruction.decoded().instruction().opcode() == FinalOpcode::Dup2)
+            .filter(|instruction| instruction.decoded().instruction().opcode()
+                == FinalOpcode::GetArrayEl3)
             .count(),
         3,
     );
@@ -1029,9 +1030,9 @@ fn logical_computed_property_class_assignments_preserve_the_raw_key_for_read_and
             .instructions()
             .iter()
             .filter(|instruction| instruction.decoded().instruction().opcode()
-                == FinalOpcode::GetArrayEl)
+                == FinalOpcode::ToPropKey)
             .count(),
-        3,
+        0,
     );
 }
 

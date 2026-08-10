@@ -145,6 +145,7 @@ fn collect_requirements(
             }
             FinalOpcode::GetArrayEl
             | FinalOpcode::GetArrayEl2
+            | FinalOpcode::GetArrayEl3
             | FinalOpcode::PutArrayEl
             | FinalOpcode::ToPropKey
             | FinalOpcode::DefineArrayEl

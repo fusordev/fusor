@@ -5827,6 +5827,7 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::PrivateIn
             | FinalOpcode::GetArrayEl
             | FinalOpcode::GetArrayEl2
+            | FinalOpcode::GetArrayEl3
             | FinalOpcode::PutField
             | FinalOpcode::PutPrivateField
             | FinalOpcode::PutArrayEl

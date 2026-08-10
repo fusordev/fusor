@@ -6138,9 +6138,10 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             }
         };
 
-        // `dup2; get_array_el` preserves the raw base/key pair for the
-        // possible write while reading the old value. The key conversion is
-        // deliberately observable once for the read and again for the write.
+        // `get_array_el3` checks the base before converting the key, then
+        // preserves the base and converted PropertyKey for the possible write.
+        // `GetValue(leftRef)` performs this conversion once, so
+        // `PutValue(leftRef, value)` must reuse it.
         // The short-circuit and write paths both leave exactly one completion.
         work.push(ExpressionWork::Bind(done.clone()));
         work.push(ExpressionWork::Emit(PlannedInstruction::new(
@@ -6203,12 +6204,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             member.span,
         )));
         work.push(ExpressionWork::Emit(PlannedInstruction::new(
-            FinalOpcode::GetArrayEl,
-            Operands::None,
-            member.span,
-        )));
-        work.push(ExpressionWork::Emit(PlannedInstruction::new(
-            FinalOpcode::Dup2,
+            FinalOpcode::GetArrayEl3,
             Operands::None,
             member.span,
         )));
@@ -6254,12 +6250,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         )));
         work.push(ExpressionWork::Visit(&assignment.right));
         work.push(ExpressionWork::Emit(PlannedInstruction::new(
-            FinalOpcode::GetArrayEl,
-            Operands::None,
-            member.span,
-        )));
-        work.push(ExpressionWork::Emit(PlannedInstruction::new(
-            FinalOpcode::Dup2,
+            FinalOpcode::GetArrayEl3,
             Operands::None,
             member.span,
         )));
@@ -6404,9 +6395,10 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 update.argument.span(),
             );
         }
-        // `dup2; get_array_el` preserves the base and raw key for the write.
-        // A prefix update keeps its new value as the completion; a postfix
-        // update moves the old value below the saved reference triple.
+        // `get_array_el3` checks the base, converts the key once, and preserves
+        // the base and PropertyKey for the write. A prefix update keeps its new
+        // value as the completion; a postfix update moves the old value below
+        // the saved reference triple.
         work.push(ExpressionWork::Emit(PlannedInstruction::new(
             FinalOpcode::PutArrayEl,
             Operands::None,
@@ -6427,12 +6419,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             update.span,
         )));
         work.push(ExpressionWork::Emit(PlannedInstruction::new(
-            FinalOpcode::GetArrayEl,
-            Operands::None,
-            member.span,
-        )));
-        work.push(ExpressionWork::Emit(PlannedInstruction::new(
-            FinalOpcode::Dup2,
+            FinalOpcode::GetArrayEl3,
             Operands::None,
             member.span,
         )));

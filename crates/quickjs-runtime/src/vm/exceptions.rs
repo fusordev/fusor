@@ -480,6 +480,7 @@ fn exception_caller_frames(
                 | FinalOpcode::PutField
                 | FinalOpcode::GetArrayEl
                 | FinalOpcode::GetArrayEl2
+                | FinalOpcode::GetArrayEl3
                 | FinalOpcode::PutArrayEl
                 | FinalOpcode::Apply
                 | FinalOpcode::Append

@@ -3706,6 +3706,18 @@ fn property_key_continuations_charge_every_suspended_javascript_value() {
         2
     );
     assert_eq!(
+        continuation(PropertyKeyTarget::ReadRetain {
+            base: StoredValue::Undefined,
+            realm,
+        })
+        .retained_values(),
+        2
+    );
+    assert_eq!(
+        NativeContinuation::RetainedPropertyKey(StoredValue::Undefined).retained_values(),
+        1
+    );
+    assert_eq!(
         continuation(PropertyKeyTarget::Write {
             base: StoredValue::Undefined,
             value: StoredValue::Undefined,

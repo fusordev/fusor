@@ -112,7 +112,7 @@ fn compound_member_assignments_preserve_the_member_reference_for_the_write() {
         let object={staticValue:4,computed:3};\
         let staticCompletion=(object.staticValue+=2);\
         let computedCompletion=(object[key]*=5);\
-        return staticCompletion===6&&computedCompletion===15&&object.staticValue===6&&object.computed===15&&conversions===2;\
+        return staticCompletion===6&&computedCompletion===15&&object.staticValue===6&&object.computed===15&&conversions===1;\
     }";
     let authority = compile(source, "run");
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
@@ -123,6 +123,28 @@ fn compound_member_assignments_preserve_the_member_reference_for_the_write() {
     let completion = context
         .call(&run, &[], ExecutionLimits::default())
         .expect("compound member assignment");
+    assert_boolean(&completion, true);
+}
+
+#[test]
+fn logical_computed_assignments_convert_the_key_once_on_both_paths() {
+    let source = "function run(){\
+        let events=[];\
+        function key(name){return {toString(){events.push(name);return name;}};}\
+        let object={kept:1,written:0};\
+        let kept=(object[key('kept')]||=2);\
+        let written=(object[key('written')]||=3);\
+        return kept===1&&written===3&&object.written===3&&events.join(',')==='kept,written';\
+    }";
+    let authority = compile(source, "run");
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = context.instantiate(authority).expect("run");
+
+    let completion = context
+        .call(&run, &[], ExecutionLimits::default())
+        .expect("logical computed assignment");
     assert_boolean(&completion, true);
 }
 

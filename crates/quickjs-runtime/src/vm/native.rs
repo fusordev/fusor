@@ -461,6 +461,7 @@ pub(super) fn resume_native_continuations(
                 return_to,
                 execution_budget,
             )?,
+            NativeContinuation::RetainedPropertyKey(key) => NativeDispatch::Pair(key, value),
             NativeContinuation::OperatorPrimitive(state) => {
                 let operation = match &state.target {
                     OperatorPrimitiveTarget::ArrayFromAsyncLength { operation } => Some(*operation),

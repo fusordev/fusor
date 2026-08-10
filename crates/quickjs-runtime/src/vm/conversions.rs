@@ -4316,6 +4316,58 @@ fn finish_property_key_target(
                 )),
             }
         }
+        PropertyKeyTarget::ReadRetain { base, realm } => {
+            let outcome = read_observable_static_property(runtime, realm, &base, &property.key)?;
+            if let ObservablePropertyReadOutcome::Proxy {
+                reference,
+                receiver,
+            } = outcome
+            {
+                let dispatch = begin_internal_get(
+                    runtime,
+                    reference,
+                    receiver,
+                    property.key,
+                    realm,
+                    return_to,
+                    origin.clone(),
+                    execution_budget,
+                )?;
+                return continue_get_after(
+                    dispatch,
+                    value,
+                    NativeContinuation::RetainedPropertyKey,
+                    |key, result| Ok(NativeDispatch::Pair(key, result)),
+                    "retained computed property read produced a structured result",
+                );
+            }
+            let ObservablePropertyReadOutcome::Complete(outcome) = outcome else {
+                unreachable!("observable computed property read classification is exhaustive")
+            };
+            match outcome {
+                PropertyReadOutcome::Value(result) => Ok(NativeDispatch::Pair(value, result)),
+                PropertyReadOutcome::Getter { function, receiver } => continue_get_after(
+                    NativeDispatch::Call(NativeCall {
+                        function,
+                        receiver,
+                        arguments: CallArguments::empty(),
+                        return_to,
+                        origin: origin.clone(),
+                        continuations: Vec::new(),
+                        pre_call: None,
+                        new_target: None,
+                        native_caller: None,
+                    }),
+                    value,
+                    NativeContinuation::RetainedPropertyKey,
+                    |key, result| Ok(NativeDispatch::Pair(key, result)),
+                    "retained computed property getter produced a structured result",
+                ),
+                PropertyReadOutcome::Failed(failure) => Err(NativeFailure::Abrupt(
+                    property_exception_at(realm, origin.clone(), Some(&property.name), failure)?,
+                )),
+            }
+        }
         PropertyKeyTarget::Write {
             base,
             value,

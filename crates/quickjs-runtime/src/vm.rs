@@ -943,6 +943,7 @@ enum NativeContinuation {
     FunctionApply(FunctionApplyContinuation),
     FunctionBind(FunctionBindContinuation),
     PropertyKey(PropertyKeyContinuation),
+    RetainedPropertyKey(StoredValue),
     OperatorPrimitive(OperatorPrimitiveContinuation),
     ArrayBufferConstructor(Box<ArrayBufferConstructorContinuation>),
     ArrayBufferSlice(Box<ArrayBufferSliceContinuation>),
@@ -1386,7 +1387,7 @@ impl NativeContinuation {
             | Self::ReflectSet
             | Self::ProxyWrite
             | Self::FunctionCall => 0,
-            Self::AsyncGeneratorReturnAwait { .. } => 1,
+            Self::RetainedPropertyKey(_) | Self::AsyncGeneratorReturnAwait { .. } => 1,
         }
     }
 
@@ -2149,6 +2150,10 @@ enum PropertyKeyTarget {
         base: StoredValue,
         realm: RealmId,
     },
+    ReadRetain {
+        base: StoredValue,
+        realm: RealmId,
+    },
     Write {
         base: StoredValue,
         value: StoredValue,
@@ -2238,6 +2243,7 @@ impl PropertyKeyTarget {
         match self {
             Self::ToKey => 0,
             Self::Read { .. }
+            | Self::ReadRetain { .. }
             | Self::Delete { .. }
             | Self::OwnPropertyDescriptor { .. }
             | Self::HasOwnProperty { .. }
@@ -3328,6 +3334,7 @@ fn trace_property_key_target_roots(
     match target {
         PropertyKeyTarget::ToKey => {}
         PropertyKeyTarget::Read { base, .. }
+        | PropertyKeyTarget::ReadRetain { base, .. }
         | PropertyKeyTarget::Delete { base, .. }
         | PropertyKeyTarget::OwnPropertyDescriptor { target: base, .. }
         | PropertyKeyTarget::HasOwnProperty { target: base, .. }
@@ -3844,6 +3851,7 @@ fn trace_native_continuation_roots(
             trace_stored_value_root(&state.receiver, mark);
             trace_property_key_target_roots(&state.target, mark);
         }
+        NativeContinuation::RetainedPropertyKey(key) => trace_stored_value_root(key, mark),
         NativeContinuation::OperatorPrimitive(state) => {
             trace_stored_value_root(&state.receiver, mark);
             trace_operator_primitive_target_roots(&state.target, mark);
