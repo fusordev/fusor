@@ -136,14 +136,14 @@ fn validates_and_canonicalizes_es2025_flags() {
 }
 
 #[test]
-fn literal_validation_is_syntax_only_and_does_not_require_executor_support() {
+fn literal_validation_and_execution_accept_rgi_emoji_properties() {
     assert!(validate_literal("[z-a]", "u", usize::MAX).is_err());
     assert!(validate_literal("a", "gg", usize::MAX).is_err());
     assert!(validate_literal(r"\p{RGI_Emoji_ZWJ_Sequence}", "v", usize::MAX).is_ok());
-    assert!(matches!(
-        CompiledRegExp::compile(r"\p{RGI_Emoji_ZWJ_Sequence}", "v", CompileLimits::default()),
-        Err(CompileError::Unsupported(_))
-    ));
+    assert!(
+        CompiledRegExp::compile(r"\p{RGI_Emoji_ZWJ_Sequence}", "v", CompileLimits::default())
+            .is_ok()
+    );
 }
 
 #[test]
