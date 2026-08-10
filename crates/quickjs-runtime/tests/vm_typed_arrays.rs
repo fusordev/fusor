@@ -226,11 +226,15 @@ fn typed_array_constructors_initialize_iterable_and_array_like_inputs_in_their_d
 fn typed_array_constructors_expose_the_shared_species_getter() {
     assert_eq!(
         rendered(
-            "return [Int8Array[Symbol.species]===Int8Array,\
+            "var TypedArray=Object.getPrototypeOf(Int8Array);\
+             var descriptor=Object.getOwnPropertyDescriptor(TypedArray,Symbol.species);\
+             return [Int8Array[Symbol.species]===Int8Array,\
              BigInt64Array[Symbol.species]===BigInt64Array,\
-             Object.getOwnPropertyDescriptor(Int8Array,Symbol.species).get.name].join('|');"
+             descriptor.get.name,descriptor.get.length,descriptor.set===undefined,\
+             descriptor.enumerable,descriptor.configurable,\
+             Object.hasOwn(Int8Array,Symbol.species)].join('|');"
         ),
-        "true|true|get [Symbol.species]"
+        "true|true|get [Symbol.species]|0|true|false|true|false"
     );
 }
 

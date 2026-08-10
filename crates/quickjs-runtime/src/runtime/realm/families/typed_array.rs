@@ -116,6 +116,15 @@ fn visit_abstract_constructor_properties(visit: PropertySink<'_>) {
             NativeFunctionKind::TypedArrayStatic(method_id),
         ));
     }
+    visit(accessor(
+        abstract_constructor,
+        IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolSpecies),
+        PropertyLayout::accessor(false, true),
+        Some(IntrinsicFunctionId(
+            NativeFunctionKind::TypedArraySpeciesGetter,
+        )),
+        None,
+    ));
     visit(data(
         prototype,
         IntrinsicKeySpec::PredefinedString(PredefinedAtom::Constructor),
@@ -202,15 +211,6 @@ fn visit_concrete_typed_array_properties(visit: PropertySink<'_>, element: Typed
         IntrinsicKeySpec::InternedString(RealmNameId::TypedArrayBytesPerElement),
         PropertyLayout::data(false, false, false),
         width,
-    ));
-    visit(accessor(
-        constructor,
-        IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolSpecies),
-        PropertyLayout::accessor(false, true),
-        Some(IntrinsicFunctionId(
-            NativeFunctionKind::TypedArraySpeciesGetter,
-        )),
-        None,
     ));
     visit(method(
         prototype,
