@@ -801,15 +801,22 @@ impl JsBigInt {
         if trimmed.is_empty() {
             return Ok(Self::zero());
         }
-        let (negative, unsigned) = match trimmed.strip_prefix('-') {
-            Some(rest) => (true, rest),
-            None => (false, trimmed.strip_prefix('+').unwrap_or(trimmed)),
+        let (negative, explicit_sign, unsigned) = match trimmed.strip_prefix('-') {
+            Some(rest) => (true, true, rest),
+            None => match trimmed.strip_prefix('+') {
+                Some(rest) => (false, true, rest),
+                None => (false, false, trimmed),
+            },
         };
-        let (radix, digits) = if radix == 10 {
+        let requested_radix = radix;
+        let (radix, digits) = if requested_radix == 10 {
             detect_radix_prefix(unsigned)
         } else {
-            (radix, unsigned)
+            (requested_radix, unsigned)
         };
+        if explicit_sign && radix != requested_radix {
+            return Err(BigIntError::InvalidLiteral);
+        }
         if digits.is_empty() {
             return Err(BigIntError::InvalidLiteral);
         }
@@ -1422,7 +1429,9 @@ mod tests {
         assert_eq!(decimal(&parse("-7")), "-7");
         assert_eq!(decimal(&parse("+7")), "7");
 
-        for malformed in ["1.5", "12x", "0x", "abc", "--1", "1 2"] {
+        for malformed in [
+            "1.5", "12x", "0x", "abc", "--1", "1 2", "-0x1", "+0x1", "-0b1", "+0o1",
+        ] {
             assert_eq!(
                 JsBigInt::from_str_radix(malformed, 10),
                 Err(BigIntError::InvalidLiteral),

@@ -4084,12 +4084,14 @@ pub(super) fn begin_abstract_equality(
         // A `BigInt` compares across the domains by mathematical value, so the
         // Boolean-to-Number rewrite below must not reach it: `0n == false` is
         // `true` through the BigInt comparison, not through a rounded Number.
-        let comparison = bigint_relational_ordering(&left, &right, realm, &origin)?;
-        if comparison != BigIntComparison::NotApplicable {
-            let equal = comparison == BigIntComparison::Ordered(Ordering::Equal);
-            return Ok(NativeDispatch::Immediate(StoredValue::Boolean(
-                equal ^ invert,
-            )));
+        if !is_object_value(&left) && !is_object_value(&right) {
+            let comparison = bigint_relational_ordering(&left, &right, realm, &origin)?;
+            if comparison != BigIntComparison::NotApplicable {
+                let equal = comparison == BigIntComparison::Ordered(Ordering::Equal);
+                return Ok(NativeDispatch::Immediate(StoredValue::Boolean(
+                    equal ^ invert,
+                )));
+            }
         }
 
         match (&left, &right) {
@@ -4154,7 +4156,10 @@ const fn is_object_value(value: &StoredValue) -> bool {
 const fn is_equality_conversion_primitive(value: &StoredValue) -> bool {
     matches!(
         value,
-        StoredValue::Number(_) | StoredValue::String(_) | StoredValue::Symbol(_)
+        StoredValue::Number(_)
+            | StoredValue::BigInt(_)
+            | StoredValue::String(_)
+            | StoredValue::Symbol(_)
     )
 }
 
