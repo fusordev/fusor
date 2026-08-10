@@ -298,6 +298,18 @@ fn fill_writes_across_its_resolved_range() {
     ]);
 }
 
+#[test]
+fn fill_reaches_the_first_observable_write_without_materializing_a_safe_integer_range() {
+    assert_all(&[(
+        "(function(){\
+            const object={length:Infinity,set 0(value){throw 'invoked';}};\
+            try{Array.prototype.fill.call(object,0)}catch(error){return error;}\
+            return 'miss';\
+        })()",
+        "invoked",
+    )]);
+}
+
 /// `copyWithin` copies a resolved range in place and returns its receiver.
 #[test]
 fn copy_within_copies_in_place() {

@@ -495,6 +495,14 @@ pub(super) fn advance_array_mutator(
                         continue;
                     };
                     state.moves.push(step);
+                } else if matches!(state.mutator, ArrayMutator::Fill) {
+                    state.moves.clear();
+                    state.next_move = 0;
+                    let Some(step) = next_fill_step(&mut state) else {
+                        state.stage = ArrayMutatorStage::AwaitLengthWrite;
+                        continue;
+                    };
+                    state.moves.push(step);
                 }
                 let Some(step) = state.moves.get(state.next_move).copied() else {
                     state.stage = ArrayMutatorStage::AwaitLengthWrite;
@@ -848,11 +856,11 @@ pub(super) fn advance_array_mutator(
 /// Plans the element moves each mutator performs.
 ///
 /// Planning up front lets one driver serve the finite mutators. `unshift`,
-/// `reverse`, and `copyWithin` instead keep constant-space cursors because
-/// their `ToLength` inputs can be as large as `2^53 - 1`; each completed step
-/// prepares only its immediate successor, so instruction fuel bounds the scan
-/// without an attacker-sized allocation before the first observable element
-/// operation.
+/// `unshift`, `reverse`, `fill`, and `copyWithin` instead keep constant-space
+/// cursors because their `ToLength` inputs can be as large as `2^53 - 1`; each
+/// completed step prepares only its immediate successor, so instruction fuel
+/// bounds the scan without an attacker-sized allocation before the first
+/// observable element operation.
 fn plan_moves(state: &mut ArrayMutatorContinuation) -> Result<(), NativeFailure> {
     let length = state.length;
     match state.mutator {
@@ -925,13 +933,7 @@ fn plan_moves(state: &mut ArrayMutatorContinuation) -> Result<(), NativeFailure>
             // Crossed bounds fill nothing, which is why `[1,2,3].fill(0,2,1)` is
             // unchanged.
             let span = state.fill_end.saturating_sub(state.fill_start);
-            let count = usize::try_from(span).map_err(|_| EngineFault::RuntimeInvariant {
-                message: "array fill span exceeded the addressable step plan",
-            })?;
-            reserve_moves(state, count)?;
-            for index in state.fill_start..state.fill_end {
-                state.moves.push(ElementStep::Store { index });
-            }
+            reserve_moves(state, usize::from(span > 0))?;
             state.final_length = length;
         }
         ArrayMutator::CopyWithin => plan_copy_within(state, length)?,
@@ -1012,6 +1014,16 @@ fn next_reverse_step(state: &mut ArrayMutatorContinuation) -> Option<ElementStep
     state.reverse_next = state.reverse_next.saturating_add(1);
     state.reverse_remaining -= 1;
     Some(ElementStep::Swap { left, right })
+}
+
+/// Produces the next `fill` write without materializing the requested range.
+fn next_fill_step(state: &mut ArrayMutatorContinuation) -> Option<ElementStep> {
+    if state.fill_start >= state.fill_end {
+        return None;
+    }
+    let index = state.fill_start;
+    state.fill_start = state.fill_start.saturating_add(1);
+    Some(ElementStep::Store { index })
 }
 
 /// Reserves the move plan's storage fallibly.

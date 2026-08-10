@@ -117,7 +117,7 @@ fn evaluate<T>(body: &str, project: impl FnOnce(Result<JsValue, ExecutionError>)
 fn rendered(expression: &str) -> String {
     evaluate(&format!("return String({expression});"), |result| {
         result
-            .expect("completed")
+            .unwrap_or_else(|error| panic!("{expression}: {error:?}"))
             .as_string()
             .expect("live value")
             .expect("String")
@@ -195,6 +195,29 @@ fn the_results_match_the_oracle() {
             "undefined",
         ),
         ("[1].findLastIndex(function(){return false;})", "-1"),
+    ]);
+}
+
+#[test]
+fn backward_find_uses_maximum_safe_integer_property_keys() {
+    assert_all(&[
+        (
+            "(function(){\
+                let object={length:Number.MAX_VALUE};\
+                object['9007199254740990']='last';\
+                return Array.prototype.findLast.call(object,function(value,index){\
+                    return value==='last'&&index===9007199254740990;\
+                });\
+            })()",
+            "last",
+        ),
+        (
+            "Array.prototype.findLastIndex.call(\
+                {length:Number.MAX_VALUE},\
+                function(value,index){return value===undefined&&index===9007199254740990;}\
+            )",
+            "9007199254740990",
+        ),
     ]);
 }
 

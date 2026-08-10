@@ -185,6 +185,22 @@ fn reduce_right_folds_in_reverse() {
     ]);
 }
 
+#[test]
+fn reduce_right_uses_maximum_safe_integer_property_keys() {
+    assert_all(&[(
+        "(function(){\
+            const object={\
+                length:Number.MAX_VALUE,\
+                '9007199254740990':'seed',\
+                '9007199254740989':'value'\
+            };\
+            try{Array.prototype.reduceRight.call(object,function(accumulator,value,index){throw index;})}\
+            catch(error){return error;}\
+        })()",
+        "9007199254740989",
+    )]);
+}
+
 /// A hole is skipped: the callback never sees it, and it seeds the accumulator
 /// only when it is present.
 #[test]
