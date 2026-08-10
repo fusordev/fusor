@@ -114,18 +114,17 @@ fn compiles_the_complete_ordinary_dynamic_function_wrapper() {
             .defined_argument_count(),
         2
     );
-    let self_binding = tree
+    let wrapper_metadata = tree
         .verified_bytecode()
         .function(FunctionTemplateId::new(1))
         .expect("verified wrapper")
-        .metadata()
-        .variables()
-        .iter()
-        .find(|definition| definition.policy().kind() == CompilerBindingKind::FunctionName)
-        .expect("named wrapper self binding");
-    assert_eq!(
-        self_binding.policy().initialization(),
-        CompilerInitializationPolicy::FunctionName
+        .metadata();
+    assert!(wrapper_metadata.function_name().is_some());
+    assert!(
+        wrapper_metadata
+            .variables()
+            .iter()
+            .all(|definition| definition.policy().kind() != CompilerBindingKind::FunctionName)
     );
 }
 
@@ -226,11 +225,24 @@ fn do_while_resets_script_completion_on_every_iteration() {
 }
 
 #[test]
-fn named_wrapper_self_reference_is_compiled() {
+fn dynamic_wrapper_name_reference_uses_the_constructor_realm() {
     let tree = compile_dynamic_function(&[], SourceFragment::new("return anonymous;"))
-        .expect("named Function expression");
+        .expect("dynamic Function wrapper");
+    let root = tree.root();
     let wrapper = &tree.functions()[1];
 
+    assert_eq!(root.realm_globals().len(), 1);
+    assert_eq!(root.realm_globals()[0].name(), "anonymous");
+    assert_eq!(
+        root.realm_globals()[0].source(),
+        CompiledRealmGlobalSource::ConstructorRealm
+    );
+    assert_eq!(wrapper.realm_globals().len(), 1);
+    assert_eq!(wrapper.realm_globals()[0].name(), "anonymous");
+    assert_eq!(
+        wrapper.realm_globals()[0].source(),
+        CompiledRealmGlobalSource::ParentClosure(0)
+    );
     assert_eq!(
         wrapper
             .control_flow()
@@ -238,32 +250,31 @@ fn named_wrapper_self_reference_is_compiled() {
             .iter()
             .map(|instruction| instruction.decoded().instruction().opcode())
             .collect::<Vec<_>>(),
-        [FinalOpcode::GetLoc0, FinalOpcode::Return]
+        [FinalOpcode::GetVar, FinalOpcode::Return]
     );
 }
 
 #[test]
-fn strict_named_wrapper_retains_its_immutable_self_binding() {
+fn strict_dynamic_wrapper_still_has_no_lexical_self_binding() {
     let tree = compile_dynamic_function(
         &[],
-        SourceFragment::new("\"use strict\"; return anonymous;"),
+        SourceFragment::new("\"use strict\"; return typeof anonymous;"),
     )
-    .expect("strict named Function expression");
+    .expect("strict dynamic Function wrapper");
     let wrapper = tree
         .verified_bytecode()
         .function(FunctionTemplateId::new(1))
         .expect("verified wrapper");
-    let self_binding = wrapper
-        .metadata()
-        .variables()
-        .iter()
-        .find(|definition| definition.policy().kind() == CompilerBindingKind::FunctionName)
-        .expect("strict wrapper self binding");
 
-    assert_eq!(
-        self_binding.policy().writes(),
-        quickjs_bytecode::CompilerWritePolicy::Immutable
+    assert!(wrapper.metadata().function_name().is_some());
+    assert!(
+        wrapper
+            .metadata()
+            .variables()
+            .iter()
+            .all(|definition| definition.policy().kind() != CompilerBindingKind::FunctionName)
     );
+    assert_eq!(tree.functions()[1].realm_globals()[0].name(), "anonymous");
 }
 
 #[test]

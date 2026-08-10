@@ -19,7 +19,7 @@ fn storage_result(
 }
 
 #[test]
-fn ordinary_dynamic_function_is_a_synchronous_script_with_a_named_child() {
+fn ordinary_dynamic_function_keeps_its_name_without_a_lexical_self_binding() {
     let plan = storage_result(DynamicFunctionKind::Function, "return anonymous;")
         .expect("ordinary dynamic Function storage");
 
@@ -36,6 +36,77 @@ fn ordinary_dynamic_function_is_a_synchronous_script_with_a_named_child() {
         Some(plan.executables()[0].id())
     );
     assert_eq!(plan.executables()[1].name(), Some("anonymous"));
+    let wrapper = plan.executables()[1].id();
+    assert!(
+        plan.bindings_for(wrapper)
+            .expect("wrapper bindings")
+            .iter()
+            .all(|binding| binding.policy().kind() != DeclarationKind::FunctionName)
+    );
+    let global = plan
+        .unresolved_globals_for(wrapper)
+        .expect("wrapper globals")
+        .iter()
+        .find(|global| global.name() == "anonymous")
+        .expect("constructor-realm anonymous reference");
+    assert!(global.access().reads());
+    assert!(!global.access().writes());
+}
+
+#[test]
+fn every_dynamic_function_family_omits_the_synthetic_name_binding() {
+    for kind in [
+        DynamicFunctionKind::Function,
+        DynamicFunctionKind::GeneratorFunction,
+        DynamicFunctionKind::AsyncFunction,
+        DynamicFunctionKind::AsyncGeneratorFunction,
+    ] {
+        let plan = storage_result(kind, "return typeof anonymous;")
+            .expect("dynamic Function-family storage");
+        let wrapper = plan.executables()[1].id();
+
+        assert_eq!(plan.executables()[1].name(), Some("anonymous"), "{kind:?}");
+        assert!(
+            plan.bindings_for(wrapper)
+                .expect("wrapper bindings")
+                .iter()
+                .all(|binding| binding.policy().kind() != DeclarationKind::FunctionName),
+            "{kind:?}"
+        );
+        assert!(
+            plan.unresolved_globals_for(wrapper)
+                .expect("wrapper globals")
+                .iter()
+                .any(|global| global.name() == "anonymous" && global.access().reads()),
+            "{kind:?}"
+        );
+    }
+}
+
+#[test]
+fn nested_direct_eval_cannot_observe_a_dynamic_wrapper_name_binding() {
+    let plan = storage_result(
+        DynamicFunctionKind::Function,
+        "return function inner(){ eval(''); return typeof anonymous; };",
+    )
+    .expect("nested dynamic Function storage");
+    let child = plan
+        .executables()
+        .iter()
+        .find(|executable| executable.name() == Some("inner"))
+        .expect("nested function");
+
+    assert!(child.has_direct_eval());
+    let globals = plan
+        .unresolved_globals_for(child.id())
+        .expect("nested globals");
+    assert!(globals.iter().any(|global| global.name() == "eval"));
+    assert!(globals.iter().any(|global| global.name() == "anonymous"));
+    assert!(
+        plan.frame_captures_for(child.id())
+            .expect("nested captures")
+            .is_empty()
+    );
 }
 
 #[test]

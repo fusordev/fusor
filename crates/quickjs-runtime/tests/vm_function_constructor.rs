@@ -582,6 +582,28 @@ fn generated_function_materializes_ordinary_function_properties() {
 }
 
 #[test]
+fn generated_function_name_is_not_a_lexical_binding() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = dynamic_function(
+        &mut context,
+        &[],
+        r"let direct=Function('return typeof anonymous;')();
+           let nested=Function('return function(){return typeof anonymous;}')()();
+           globalThis.anonymous='realm';
+           let resolved=Function('return anonymous;')();
+           return direct+'|'+nested+'|'+resolved;",
+    );
+
+    let result = context
+        .call_with_dynamic_function_compiler(&run, &[], ExecutionLimits::default(), &compiler())
+        .expect("dynamic Function name lookup");
+
+    assert_string(&result, "undefined|undefined|realm");
+}
+
+#[test]
 fn generated_function_executes_as_an_ordinary_constructor() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
