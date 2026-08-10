@@ -286,6 +286,19 @@ fn splice_honors_species_construction_and_result_length_set() {
             })()",
             "true|1|length:1",
         ),
+        (
+            "(function(){\
+                let log='';\
+                const handler=new Proxy({}, {get:function(t,key){log+=key+';';}});\
+                function Species(length){return new Proxy(new Array(length),handler);}\
+                const source=[0,1];\
+                source.constructor={};\
+                source.constructor[Symbol.species]=Species;\
+                source.splice(0);\
+                return log;\
+            })()",
+            "defineProperty;defineProperty;set;getOwnPropertyDescriptor;defineProperty;",
+        ),
     ]);
 
     let (kind, _) = thrown(

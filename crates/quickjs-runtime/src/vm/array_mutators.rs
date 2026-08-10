@@ -1418,6 +1418,8 @@ enum ArraySpliceStage {
     AwaitExtractPresence,
     /// Awaiting an extracted element's read.
     AwaitExtract,
+    /// Awaiting `CreateDataPropertyOrThrow` on the removed-elements result.
+    AwaitExtractDefine,
     /// Ready to perform the next planned step of the shift.
     NextStep,
     /// Awaiting `HasProperty` for the next shifted source.
@@ -1462,6 +1464,8 @@ pub(crate) struct ArraySpliceContinuation {
     final_length: u64,
     /// Whether the argument conversions have completed.
     planned: bool,
+    /// Whether the post-extraction shift steps have been materialized.
+    moves_planned: bool,
     realm: RealmId,
     stage: ArraySpliceStage,
     origin: JsStackFrame,
@@ -1543,6 +1547,7 @@ pub(super) fn begin_array_splice(
         written: 0,
         final_length: 0,
         planned: false,
+        moves_planned: false,
         realm,
         stage: ArraySpliceStage::AwaitLength,
         origin,
@@ -1760,7 +1765,7 @@ pub(super) fn advance_array_splice(
                         // `splice()` with no arguments removes nothing.
                         state.start = 0;
                         state.removed = 0;
-                        plan_splice(&mut state)?;
+                        prepare_splice(&mut state)?;
                         state.stage = ArraySpliceStage::SelectSpecies;
                     }
                 }
@@ -1771,7 +1776,7 @@ pub(super) fn advance_array_splice(
                     let requested = number_to_integer_or_infinity(number);
                     let available = state.length.saturating_sub(state.start);
                     state.removed = clamp_count(requested, available);
-                    plan_splice(&mut state)?;
+                    prepare_splice(&mut state)?;
                     state.stage = ArraySpliceStage::SelectSpecies;
                     continue;
                 }
@@ -1796,7 +1801,7 @@ pub(super) fn advance_array_splice(
                         // An absent count removes everything from `start`, which
                         // is why `[1,2,3].splice(1)` leaves `[1]`.
                         state.removed = state.length.saturating_sub(state.start);
-                        plan_splice(&mut state)?;
+                        prepare_splice(&mut state)?;
                         state.stage = ArraySpliceStage::SelectSpecies;
                     }
                 }
@@ -1862,18 +1867,37 @@ pub(super) fn advance_array_splice(
                         .ok_or(EngineFault::RuntimeInvariant {
                             message: "Array splice lost its ArraySpeciesCreate result",
                         })?;
-                match define_static_property(runtime, destination, key, value, execution_budget)? {
-                    PropertyWriteOutcome::Complete => {}
-                    PropertyWriteOutcome::Failed(failure) => {
-                        return Err(splice_failure(&state, failure));
-                    }
-                    PropertyWriteOutcome::Setter { .. } => {
-                        return Err(EngineFault::RuntimeInvariant {
-                            message: "splice CreateDataPropertyOrThrow attempted to call a setter",
-                        }
-                        .into());
-                    }
-                }
+                let reference =
+                    destination
+                        .heap_reference()
+                        .ok_or(EngineFault::RuntimeInvariant {
+                            message: "Array splice species result is not an object",
+                        })?;
+                let definition =
+                    PropertyDefinition::data(Requested::Present(value), Requested::Present(true))
+                        .with_enumerable(Requested::Present(true))
+                        .with_configurable(Requested::Present(true));
+                state.stage = ArraySpliceStage::AwaitExtractDefine;
+                let dispatch = begin_internal_define_own_property(
+                    runtime,
+                    reference,
+                    key,
+                    definition,
+                    state.realm,
+                    return_to,
+                    state.origin.clone(),
+                    execution_budget,
+                    DefinePropertyResult::Target,
+                )?;
+                await_get!(continue_get_state_after(
+                    dispatch,
+                    state,
+                    array_splice_continuation,
+                    "Array splice extraction [[DefineOwnProperty]] produced a structured result",
+                ));
+            }
+            ArraySpliceStage::AwaitExtractDefine => {
+                let _ = take_completion(&mut completion)?;
                 state.stage = ArraySpliceStage::NextExtract;
             }
             ArraySpliceStage::FinishRemoved => {
@@ -1965,6 +1989,7 @@ pub(super) fn advance_array_splice(
                 state.stage = ArraySpliceStage::NextStep;
             }
             ArraySpliceStage::NextStep => {
+                plan_splice_moves(&mut state)?;
                 let Some(step) = state.moves.get(state.next_move).copied() else {
                     state.stage = ArraySpliceStage::AwaitLengthWrite;
                     continue;
@@ -2273,19 +2298,17 @@ fn begin_array_splice_get(
     )
 }
 
-/// Plans the shift that follows a splice's extraction.
+/// Validates the result length before `ArraySpeciesCreate`.
 ///
-/// The tail moves by `insertions - removed`. Moving it in the correct direction
-/// is what keeps a source from being overwritten before it is read: growing
-/// walks the tail from the end, shrinking walks it from the front.
-fn plan_splice(state: &mut ArraySpliceContinuation) -> Result<(), NativeFailure> {
+/// The potentially large shift plan is deferred until after the removed result
+/// is created and populated, because either observable phase can complete
+/// abruptly before any source mutation.
+fn prepare_splice(state: &mut ArraySpliceContinuation) -> Result<(), NativeFailure> {
     if state.planned {
         return Ok(());
     }
     state.planned = true;
     let inserted = state.insertion_count();
-    let tail_start = state.start.saturating_add(state.removed);
-    let tail_length = state.length.saturating_sub(tail_start);
     let final_length = state
         .length
         .saturating_sub(state.removed)
@@ -2298,6 +2321,29 @@ fn plan_splice(state: &mut ArraySpliceContinuation) -> Result<(), NativeFailure>
         )?));
     }
     state.final_length = final_length;
+    Ok(())
+}
+
+/// Plans the shift that follows a splice's extraction.
+///
+/// The tail moves by `insertions - removed`. Moving it in the correct direction
+/// is what keeps a source from being overwritten before it is read: growing
+/// walks the tail from the end, shrinking walks it from the front.
+fn plan_splice_moves(state: &mut ArraySpliceContinuation) -> Result<(), NativeFailure> {
+    if state.moves_planned {
+        return Ok(());
+    }
+    state.moves_planned = true;
+    if !state.planned {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "splice shift planning preceded result-length validation",
+        }
+        .into());
+    }
+    let inserted = state.insertion_count();
+    let tail_start = state.start.saturating_add(state.removed);
+    let tail_length = state.length.saturating_sub(tail_start);
+    let final_length = state.final_length;
 
     let tail_count = usize::try_from(tail_length).map_err(|_| EngineFault::RuntimeInvariant {
         message: "a splice tail exceeded the addressable step plan",
