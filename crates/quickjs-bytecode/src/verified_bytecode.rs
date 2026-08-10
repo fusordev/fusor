@@ -9684,6 +9684,45 @@ fn merge_trailing_for_of_close_record(
     Some(changed)
 }
 
+fn is_inert_disconnected_finalizer_edge(
+    index: usize,
+    component: u32,
+    target: InternalStackTarget,
+    enters_finally: bool,
+    output: &[InternalStackValue],
+    components: &[Option<u32>],
+) -> bool {
+    // A retained but unreachable loop backedge can target the first
+    // instruction of an already verified enclosing finalizer. Dead components
+    // start marker-free, so they cannot reproduce its live pending/return pair.
+    target.finally_entry
+        && !enters_finally
+        && !target.catch_handler
+        && components
+            .get(index)
+            .copied()
+            .flatten()
+            .is_some_and(|established| established != component)
+        && output
+            .iter()
+            .all(|value| *value == InternalStackValue::Ordinary)
+}
+
+fn has_targeted_finalizer_pair(output: &[InternalStackValue], successor: InstructionIndex) -> bool {
+    matches!(
+        output.get(output.len().saturating_sub(2)..),
+        Some([
+            InternalStackValue::FinallyPending {
+                target: pending_target,
+                ..
+            },
+            InternalStackValue::FinallyReturn {
+                target: return_target
+            }
+        ]) if *pending_target == successor && *return_target == successor
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn propagate_internal_operand_stack(
     id: FunctionTemplateId,
@@ -9702,21 +9741,18 @@ fn propagate_internal_operand_stack(
     usage: &mut BytecodeGraphUsage,
 ) -> Result<(), BytecodeVerificationError> {
     let index = successor.get() as usize;
+    if is_inert_disconnected_finalizer_edge(
+        index,
+        component,
+        target,
+        enters_finally,
+        output,
+        components,
+    ) {
+        return Ok(());
+    }
     if target.finally_entry {
-        if !enters_finally
-            || !matches!(
-                output.get(output.len().saturating_sub(2)..),
-                Some([
-                    InternalStackValue::FinallyPending {
-                        target: pending_target,
-                        ..
-                    },
-                    InternalStackValue::FinallyReturn {
-                        target: return_target
-                    }
-                ]) if *pending_target == successor && *return_target == successor
-            )
-        {
+        if !has_targeted_finalizer_pair(output, successor) {
             return Err(BytecodeVerificationError::function(
                 id,
                 BytecodeVerificationErrorKind::FinallyReturnJoinMismatch {

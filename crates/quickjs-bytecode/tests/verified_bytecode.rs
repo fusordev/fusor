@@ -4430,6 +4430,45 @@ fn marker_free_dead_gosub_can_reuse_an_already_verified_finalizer() {
 }
 
 #[test]
+fn marker_free_dead_loop_backedge_may_target_an_already_verified_finalizer() {
+    let instructions = [
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::Gosub, Operands::Label(6)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::Ret, Operands::None),
+        (FinalOpcode::Push0, Operands::NoneInt),
+        (FinalOpcode::IfTrue8, Operands::Label8(-3)),
+        (FinalOpcode::ReturnUndef, Operands::None),
+    ];
+
+    verify_compiler_bytecode_graph(
+        typed_stack_input(&instructions, &[], &[]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("dead marker-free loop scaffolding cannot re-enter the live finalizer at runtime");
+}
+
+#[test]
+fn live_loop_backedge_may_reenter_a_finalizer_with_its_exact_active_pair() {
+    let instructions = [
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::Gosub, Operands::Label(6)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::Push0, Operands::NoneInt),
+        (FinalOpcode::IfTrue8, Operands::Label8(-2)),
+        (FinalOpcode::Ret, Operands::None),
+    ];
+
+    verify_compiler_bytecode_graph(
+        typed_stack_input(&instructions, &[], &[]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("the target-bound active pair proves a loop backedge stays inside its finalizer");
+}
+
+#[test]
 fn for_in_marker_certificate_rejects_crossed_and_marker_free_nip() {
     let cases = [
         vec![
