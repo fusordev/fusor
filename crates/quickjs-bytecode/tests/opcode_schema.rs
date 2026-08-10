@@ -7,21 +7,24 @@ use quickjs_bytecode::{
     TEMPORARY_OPCODE_START, TemporaryOpcode,
 };
 
-const UPSTREAM_TABLE_FINGERPRINT: u64 = 0x37d5_ab88_5a37_011f;
+const UPSTREAM_TABLE_FINGERPRINT: u64 = 0xf124_7020_c377_e8bf;
 const _: () = assert!(SHORT_OPCODES_ENABLED);
 
 #[test]
-fn compatibility_target_and_opcode_counts_match_the_pinned_header() {
+fn compatibility_target_preserves_the_pinned_prefix_before_extensions() {
     assert_eq!(QUICKJS_COMPATIBILITY_RELEASE, "2026-06-04");
-    assert_eq!(FINAL_OPCODE_COUNT, 244);
+    assert_eq!(FINAL_OPCODE_COUNT, 247);
     assert_eq!(NON_SHORT_FINAL_OPCODE_COUNT, 178);
-    assert_eq!(SHORT_FINAL_OPCODE_COUNT, 66);
+    assert_eq!(SHORT_FINAL_OPCODE_COUNT, 69);
     assert_eq!(TEMPORARY_OPCODE_COUNT, 19);
 
     assert_eq!(FinalOpcode::Invalid.encoded_byte(), 0);
     assert_eq!(FinalOpcode::Nop.encoded_byte(), 177);
     assert_eq!(FinalOpcode::PushMinus1.encoded_byte(), 178);
     assert_eq!(FinalOpcode::TypeofIsFunction.encoded_byte(), 243);
+    assert_eq!(FinalOpcode::TailApply.encoded_byte(), 244);
+    assert_eq!(FinalOpcode::TailEval.encoded_byte(), 245);
+    assert_eq!(FinalOpcode::TailApplyEval.encoded_byte(), 246);
 
     assert_eq!(TEMPORARY_OPCODE_START, 178);
     assert_eq!(TEMPORARY_OPCODE_END_EXCLUSIVE, 197);
@@ -140,12 +143,12 @@ fn checked_final_decoding_rejects_the_sentinel_and_unknown_bytes() {
         "opcode byte 0x00 is the reserved invalid opcode"
     );
 
-    for byte in 1..=243 {
+    for byte in 1..=246 {
         let opcode = FinalOpcode::decode(byte).expect("known final opcode");
         assert_eq!(opcode.encoded_byte(), byte);
     }
 
-    for byte in 244..=u8::MAX {
+    for byte in 247..=u8::MAX {
         let error = FinalOpcode::decode(byte).expect_err("unknown opcode");
         assert_eq!(error, FinalOpcodeDecodeError::Unknown { byte });
         assert_eq!(error.byte(), byte);
@@ -197,6 +200,18 @@ fn dynamic_call_eval_and_array_effects_include_argument_counts() {
         FinalOpcode::Eval.stack_effect(Some(3)),
         Ok(StackEffect::new(4, 1))
     );
+    assert_eq!(
+        FinalOpcode::TailEval.stack_effect(Some(3)),
+        Ok(StackEffect::new(4, 0))
+    );
+    assert_eq!(
+        FinalOpcode::TailApply.stack_effect(None),
+        Ok(StackEffect::new(3, 0))
+    );
+    assert_eq!(
+        FinalOpcode::TailApplyEval.stack_effect(None),
+        Ok(StackEffect::new(2, 0))
+    );
 
     for (opcode, expected_pops) in [
         (FinalOpcode::Call0, 1),
@@ -221,6 +236,10 @@ fn dynamic_call_eval_and_array_effects_include_argument_counts() {
     );
     assert_eq!(
         FinalOpcode::Eval.argument_count_source(),
+        ArgumentCountSource::FirstU16Operand
+    );
+    assert_eq!(
+        FinalOpcode::TailEval.argument_count_source(),
         ArgumentCountSource::FirstU16Operand
     );
     assert_eq!(
@@ -268,7 +287,7 @@ fn dynamic_stack_effect_errors_are_structured() {
 }
 
 #[test]
-fn canonical_table_fingerprint_matches_quickjs_opcode_header() {
+fn canonical_upstream_prefix_fingerprint_matches_quickjs_opcode_header() {
     assert_eq!(table_fingerprint(), UPSTREAM_TABLE_FINGERPRINT);
 }
 
@@ -283,7 +302,14 @@ fn assert_temp_adjacent(left: TemporaryOpcode, right: TemporaryOpcode) {
 fn table_fingerprint() -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325;
 
-    for (&opcode, &metadata) in ALL_FINAL_OPCODES.iter().zip(FINAL_OPCODE_METADATA) {
+    // The three Fusor-only terminal opcodes are appended after the pinned
+    // QuickJS table, so the compatibility fingerprint remains the exact
+    // upstream prefix rather than silently changing its meaning.
+    for (&opcode, &metadata) in ALL_FINAL_OPCODES
+        .iter()
+        .zip(FINAL_OPCODE_METADATA)
+        .take(244)
+    {
         hash_row(&mut hash, b'F', opcode.mnemonic(), metadata);
     }
     for (&opcode, &metadata) in ALL_TEMPORARY_OPCODES.iter().zip(TEMPORARY_OPCODE_METADATA) {

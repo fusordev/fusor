@@ -530,6 +530,9 @@ fn ordinary_and_tail_returns_require_a_normal_function() {
         FinalOpcode::ReturnUndef,
         FinalOpcode::TailCall,
         FinalOpcode::TailCallMethod,
+        FinalOpcode::TailApply,
+        FinalOpcode::TailEval,
+        FinalOpcode::TailApplyEval,
     ] {
         for kind in kinds {
             let (bytecode, expected_stack_size, opcode_pc) = ordinary_terminator_body(opcode);
@@ -723,6 +726,39 @@ fn ordinary_terminator_body(opcode: FinalOpcode) -> (Vec<u8>, u32, BytecodePc) {
                     FinalOpcode::TailCallMethod,
                     Operands::NPop { argument_count: 0 },
                 ),
+            ]),
+            2,
+            BytecodePc::new(2),
+        ),
+        FinalOpcode::TailApply => (
+            encode(&[
+                (FinalOpcode::Push0, Operands::NoneInt),
+                (FinalOpcode::Push0, Operands::NoneInt),
+                (FinalOpcode::Push0, Operands::NoneInt),
+                (FinalOpcode::TailApply, Operands::U16(0)),
+            ]),
+            3,
+            BytecodePc::new(3),
+        ),
+        FinalOpcode::TailEval => (
+            encode(&[
+                (FinalOpcode::Push0, Operands::NoneInt),
+                (
+                    FinalOpcode::TailEval,
+                    Operands::NPopU16 {
+                        argument_count: 0,
+                        scope_index: 0,
+                    },
+                ),
+            ]),
+            1,
+            BytecodePc::new(1),
+        ),
+        FinalOpcode::TailApplyEval => (
+            encode(&[
+                (FinalOpcode::Push0, Operands::NoneInt),
+                (FinalOpcode::Push0, Operands::NoneInt),
+                (FinalOpcode::TailApplyEval, Operands::U16(0)),
             ]),
             2,
             BytecodePc::new(2),

@@ -153,6 +153,9 @@ fn validate_function_kind_opcode(
     let requirement = match decoded.instruction().opcode() {
         FinalOpcode::TailCall
         | FinalOpcode::TailCallMethod
+        | FinalOpcode::TailApply
+        | FinalOpcode::TailEval
+        | FinalOpcode::TailApplyEval
         | FinalOpcode::Return
         | FinalOpcode::ReturnUndef => FunctionKindRequirement::Normal,
         FinalOpcode::InitialYield | FinalOpcode::Yield => FunctionKindRequirement::Generator,

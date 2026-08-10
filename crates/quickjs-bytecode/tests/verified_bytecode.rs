@@ -3156,7 +3156,7 @@ fn final_authority_admits_constructor_calls_and_records_the_requirement() {
 }
 
 #[test]
-fn final_authority_keeps_tail_call_families_fail_closed() {
+fn final_authority_rejects_sloppy_tail_call_families() {
     assert_final_authority_rejects_call_family(
         &[
             (FinalOpcode::Undefined, Operands::None),
@@ -3177,6 +3177,104 @@ fn final_authority_keeps_tail_call_families_fail_closed() {
         FinalOpcode::TailCallMethod,
         &[0, 1, 2],
     );
+}
+
+#[test]
+fn final_authority_admits_only_strict_verified_tail_transfer_families() {
+    let cases = [
+        vec![
+            (FinalOpcode::Undefined, Operands::None),
+            (FinalOpcode::TailCall, Operands::NPop { argument_count: 0 }),
+        ],
+        vec![
+            (FinalOpcode::Undefined, Operands::None),
+            (FinalOpcode::Undefined, Operands::None),
+            (
+                FinalOpcode::TailCallMethod,
+                Operands::NPop { argument_count: 0 },
+            ),
+        ],
+        vec![
+            (FinalOpcode::Undefined, Operands::None),
+            (FinalOpcode::Undefined, Operands::None),
+            (FinalOpcode::Undefined, Operands::None),
+            (FinalOpcode::TailApply, Operands::U16(0)),
+        ],
+        vec![
+            (FinalOpcode::Undefined, Operands::None),
+            (
+                FinalOpcode::TailEval,
+                Operands::NPopU16 {
+                    argument_count: 0,
+                    scope_index: 1,
+                },
+            ),
+        ],
+        vec![
+            (FinalOpcode::Undefined, Operands::None),
+            (FinalOpcode::Undefined, Operands::None),
+            (FinalOpcode::TailApplyEval, Operands::U16(1)),
+        ],
+    ];
+
+    for instructions in cases {
+        let rejected = instructions
+            .last()
+            .expect("tail-transfer fixture has a terminal")
+            .0;
+        let error = verify_compiler_bytecode_graph(
+            typed_stack_input(&instructions, &[], &[]),
+            BytecodeGraphVerificationLimits::default(),
+        )
+        .expect_err("sloppy bytecode cannot claim a tail transfer");
+        assert!(matches!(
+            error.kind(),
+            BytecodeVerificationErrorKind::UnsupportedCompilerOpcode { opcode, .. }
+                if *opcode == rejected
+        ));
+
+        verify_compiler_bytecode_graph(
+            typed_strict_stack_input(&instructions),
+            BytecodeGraphVerificationLimits::default(),
+        )
+        .expect("a strict ordinary function may end in a verified tail transfer");
+    }
+
+    let error = verify_compiler_bytecode_graph(
+        typed_strict_stack_input(&[
+            (FinalOpcode::Undefined, Operands::None),
+            (FinalOpcode::Undefined, Operands::None),
+            (FinalOpcode::Undefined, Operands::None),
+            (FinalOpcode::TailApply, Operands::U16(1)),
+        ]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("the spread tail-transfer operand has no construction modes");
+    assert!(matches!(
+        error.kind(),
+        BytecodeVerificationErrorKind::UnsupportedCompilerOpcode {
+            opcode: FinalOpcode::TailApply,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn verified_tail_transfer_rejects_a_live_for_of_iterator_record() {
+    let error = verify_compiler_bytecode_graph(
+        typed_strict_stack_input(&[
+            (FinalOpcode::Undefined, Operands::None),
+            (FinalOpcode::ForOfStart, Operands::None),
+            (FinalOpcode::Undefined, Operands::None),
+            (FinalOpcode::TailCall, Operands::NPop { argument_count: 0 }),
+        ]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("PrepareForTailCall cannot bypass IteratorClose");
+    assert!(matches!(
+        error.kind(),
+        BytecodeVerificationErrorKind::ForOfIteratorMarkerAtExit { .. }
+    ));
 }
 
 #[track_caller]
@@ -3223,7 +3321,7 @@ fn assert_final_authority_rejects_call_family(
             &mappings,
         ),
     )
-    .expect_err("non-direct call families remain outside final authority");
+    .expect_err("sloppy tail-call families remain outside final authority");
     assert!(
         matches!(
             error.kind(),
@@ -3257,13 +3355,19 @@ fn typed_stack_input_with_captures(
     variables: &[VariableDefinition],
     captures: &[CompilerCapturedBinding],
 ) -> UnverifiedCompilerBytecodeGraph {
-    typed_stack_input_with_profile(instructions, atoms, variables, captures, false)
+    typed_stack_input_with_profile(instructions, atoms, variables, captures, false, false)
+}
+
+fn typed_strict_stack_input(
+    instructions: &[(FinalOpcode, Operands)],
+) -> UnverifiedCompilerBytecodeGraph {
+    typed_stack_input_with_profile(instructions, &[], &[], &[], false, true)
 }
 
 fn typed_async_stack_input(
     instructions: &[(FinalOpcode, Operands)],
 ) -> UnverifiedCompilerBytecodeGraph {
-    typed_stack_input_with_profile(instructions, &[], &[], &[], true)
+    typed_stack_input_with_profile(instructions, &[], &[], &[], true, false)
 }
 
 fn typed_stack_input_with_profile(
@@ -3272,16 +3376,28 @@ fn typed_stack_input_with_profile(
     variables: &[VariableDefinition],
     captures: &[CompilerCapturedBinding],
     asynchronous: bool,
+    strict: bool,
 ) -> UnverifiedCompilerBytecodeGraph {
-    let has_direct_eval = instructions
-        .iter()
-        .any(|(opcode, _)| matches!(opcode, FinalOpcode::Eval | FinalOpcode::ApplyEval));
+    let has_direct_eval = instructions.iter().any(|(opcode, _)| {
+        matches!(
+            opcode,
+            FinalOpcode::Eval
+                | FinalOpcode::ApplyEval
+                | FinalOpcode::TailEval
+                | FinalOpcode::TailApplyEval
+        )
+    });
     let parameter_initialization_end = instructions
         .iter()
         .enumerate()
         .filter_map(|(index, (opcode, operands))| match (opcode, operands) {
-            (FinalOpcode::Eval, Operands::NPopU16 { scope_index: 0, .. })
-            | (FinalOpcode::ApplyEval, Operands::U16(0)) => u32::try_from(index + 1).ok(),
+            (
+                FinalOpcode::Eval | FinalOpcode::TailEval,
+                Operands::NPopU16 { scope_index: 0, .. },
+            )
+            | (FinalOpcode::ApplyEval | FinalOpcode::TailApplyEval, Operands::U16(0)) => {
+                u32::try_from(index + 1).ok()
+            }
             _ => None,
         })
         .max();
@@ -3289,13 +3405,13 @@ fn typed_stack_input_with_profile(
     let capture_count = u32::try_from(captures.len()).expect("fixture capture count");
     let header = if asynchronous {
         UnverifiedFunctionHeader::async_source_function_with_variable_references(
-            false,
+            strict,
             0,
             capture_count,
         )
     } else {
         UnverifiedFunctionHeader::ordinary_source_function_with_variable_references(
-            false,
+            strict,
             0,
             capture_count,
         )

@@ -836,6 +836,7 @@ pub(super) fn create_frame(
         generator_resume: None,
         generator_result: None,
         resume_abrupt: None,
+        pending_tail_completion: None,
         pending_async_iterator_close: None,
         reserved_values: plan.reserved_values,
         arguments_snapshot_use: plan.arguments_snapshot_use,
@@ -1628,7 +1629,8 @@ pub(super) fn execute_one(
         | FinalOpcode::Call0
         | FinalOpcode::Call1
         | FinalOpcode::Call2
-        | FinalOpcode::Call3 => {
+        | FinalOpcode::Call3
+        | FinalOpcode::TailCall => {
             let argument_count = direct_call_argument_count(opcode, operands)?;
             let required = argument_count.saturating_add(1);
             if frame.stack.len() < required {
@@ -1646,6 +1648,16 @@ pub(super) fn execute_one(
                     runtime, frame, source_pc,
                 )?));
             };
+            if opcode == FinalOpcode::TailCall {
+                return Ok(Step::TailCall {
+                    function: *function,
+                    inputs: CallInputSource::Frame {
+                        argument_count,
+                        kind: CallKind::Direct,
+                    },
+                    source_pc,
+                });
+            }
             let return_to =
                 CallReturn::push(verified_instruction.successors().fallthrough().ok_or(
                     EngineFault::InvalidSuccessor {
@@ -1663,7 +1675,7 @@ pub(super) fn execute_one(
                 source_pc,
             });
         }
-        FinalOpcode::Eval => {
+        FinalOpcode::Eval | FinalOpcode::TailEval => {
             let Operands::NPopU16 {
                 argument_count,
                 scope_index,
@@ -1688,13 +1700,17 @@ pub(super) fn execute_one(
                     runtime, frame, source_pc,
                 )?));
             };
-            let return_to =
+            let tail = opcode == FinalOpcode::TailEval;
+            let return_to = if tail {
+                CallReturn::tail(frame.instruction, source_pc)
+            } else {
                 CallReturn::push(verified_instruction.successors().fallthrough().ok_or(
                     EngineFault::InvalidSuccessor {
                         function: frame.template,
                         pc: source_pc,
                     },
-                )?);
+                )?)
+            };
             let realm = code(runtime, frame.code)?.realm;
             let inputs = if eval_reference_call {
                 CallInputSource::EvalReferenceFrame { argument_count }
@@ -1705,6 +1721,13 @@ pub(super) fn execute_one(
                 }
             };
             if !is_canonical_realm_eval(runtime, *function, realm)? {
+                if tail {
+                    return Ok(Step::TailCall {
+                        function: *function,
+                        inputs,
+                        source_pc,
+                    });
+                }
                 return Ok(Step::Call {
                     function: *function,
                     inputs,
@@ -1721,7 +1744,7 @@ pub(super) fn execute_one(
                 source_pc,
             });
         }
-        FinalOpcode::ApplyEval => {
+        FinalOpcode::ApplyEval | FinalOpcode::TailApplyEval => {
             let Operands::U16(scope_index) = operands else {
                 return unsupported_dispatch(opcode);
             };
@@ -1748,16 +1771,29 @@ pub(super) fn execute_one(
             } else {
                 StoredValue::Undefined
             };
-            let return_to =
+            let tail = opcode == FinalOpcode::TailApplyEval;
+            let return_to = if tail {
+                CallReturn::tail(frame.instruction, source_pc)
+            } else {
                 CallReturn::push(verified_instruction.successors().fallthrough().ok_or(
                     EngineFault::InvalidSuccessor {
                         function: frame.template,
                         pc: source_pc,
                     },
-                )?);
+                )?)
+            };
             let realm = code(runtime, frame.code)?.realm;
             frame.stack.truncate(callee_index);
             if !is_canonical_realm_eval(runtime, function, realm)? {
+                if tail {
+                    return Ok(Step::TailApply {
+                        function,
+                        receiver,
+                        array_like,
+                        magic: 0,
+                        source_pc,
+                    });
+                }
                 return Ok(Step::Apply {
                     function,
                     receiver,
@@ -1783,7 +1819,7 @@ pub(super) fn execute_one(
                 source_pc,
             });
         }
-        FinalOpcode::CallMethod => {
+        FinalOpcode::CallMethod | FinalOpcode::TailCallMethod => {
             let Operands::NPop { argument_count } = operands else {
                 return unsupported_dispatch(opcode);
             };
@@ -1804,6 +1840,16 @@ pub(super) fn execute_one(
                     runtime, frame, source_pc,
                 )?));
             };
+            if opcode == FinalOpcode::TailCallMethod {
+                return Ok(Step::TailCall {
+                    function: *function,
+                    inputs: CallInputSource::Frame {
+                        argument_count,
+                        kind: CallKind::Method,
+                    },
+                    source_pc,
+                });
+            }
             let return_to =
                 CallReturn::push(verified_instruction.successors().fallthrough().ok_or(
                     EngineFault::InvalidSuccessor {
@@ -2046,7 +2092,7 @@ pub(super) fn execute_one(
                 source_pc,
             });
         }
-        FinalOpcode::Apply => {
+        FinalOpcode::Apply | FinalOpcode::TailApply => {
             let Operands::U16(magic) = operands else {
                 return unsupported_dispatch(opcode);
             };
@@ -2077,6 +2123,15 @@ pub(super) fn execute_one(
             let receiver = stack_value_at(frame, callee_index + 1)?.duplicate();
             let array_like = stack_value_at(frame, callee_index + 2)?.duplicate();
             frame.stack.truncate(callee_index);
+            if opcode == FinalOpcode::TailApply {
+                return Ok(Step::TailApply {
+                    function,
+                    receiver,
+                    array_like,
+                    magic,
+                    source_pc,
+                });
+            }
             let return_to =
                 CallReturn::push(verified_instruction.successors().fallthrough().ok_or(
                     EngineFault::InvalidSuccessor {

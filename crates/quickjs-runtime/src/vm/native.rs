@@ -344,6 +344,9 @@ pub(super) fn resume_iterator_abrupt_continuations(
             NativeContinuation::AsyncFromSyncClose(state) => {
                 resume_async_from_sync_close_abrupt(runtime, state)
             }
+            NativeContinuation::TailCallReturn(state) => {
+                resume_tail_call_return_abrupt(runtime, *state, pending)
+            }
             handler => {
                 resume_iterator_abrupt(runtime, handler, pending, return_to, execution_budget)
             }
@@ -1620,6 +1623,9 @@ pub(super) fn resume_native_continuations(
             }
             NativeContinuation::OwnDescriptorQuery(state) => {
                 advance_own_descriptor_query(runtime, state, value.duplicate())?
+            }
+            NativeContinuation::TailCallReturn(state) => {
+                finish_tail_call_return(runtime, *state, value, active_root_frames)?
             }
             NativeContinuation::AsyncAwait { origin } => finish_async_await(&value, origin)?,
             NativeContinuation::AsyncGeneratorReturnAwait {
@@ -5763,13 +5769,22 @@ fn function_apply_target_call(
     native_caller: Option<SyntheticNativeFrame>,
 ) -> Result<NativeDispatch, NativeFailure> {
     let mut continuations = Vec::new();
-    continuations
-        .try_reserve_exact(1)
-        .map_err(|_| ExecutionError::AllocationFailed {
-            resource: RuntimeResource::Frames,
-            additional: 1,
-        })?;
-    continuations.push(NativeContinuation::FunctionCall);
+    // Ordinary `apply` needs an identity continuation between list creation
+    // and its caller. A terminal spread call transfers directly into the
+    // target, so retaining that synthetic frame would defeat PTC resource
+    // accounting and has no completion work to perform.
+    if !matches!(
+        return_to.map(|return_to| return_to.disposition),
+        Some(ReturnDisposition::Tail(_))
+    ) {
+        continuations
+            .try_reserve_exact(1)
+            .map_err(|_| ExecutionError::AllocationFailed {
+                resource: RuntimeResource::Frames,
+                additional: 1,
+            })?;
+        continuations.push(NativeContinuation::FunctionCall);
+    }
     Ok(NativeDispatch::Call(NativeCall {
         function,
         receiver,
