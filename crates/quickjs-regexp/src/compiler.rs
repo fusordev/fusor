@@ -893,6 +893,7 @@ fn lower_character_class(
                 items.push(CharacterClassItem::Nested(Box::new(nested)));
             }
             CharacterClassContents::ClassStringDisjunction(disjunction) => {
+                let mut alternatives = Vec::with_capacity(disjunction.body.len());
                 for string in &disjunction.body {
                     let value = string
                         .body
@@ -900,8 +901,19 @@ fn lower_character_class(
                         .map(|character| character.value)
                         .collect::<Vec<_>>();
                     strings.push(value.clone());
-                    items.push(CharacterClassItem::String(value));
+                    alternatives.push(value);
                 }
+                items.push(CharacterClassItem::Nested(Box::new(CharacterClass {
+                    negative: false,
+                    kind: CharacterClassKind::Union,
+                    items: alternatives
+                        .iter()
+                        .cloned()
+                        .map(CharacterClassItem::String)
+                        .collect(),
+                    strings: alternatives,
+                    has_string_properties: false,
+                })));
             }
         }
     }

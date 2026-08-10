@@ -191,6 +191,38 @@ fn optional_zero_length_repeats_rollback_the_attempted_capture() {
 }
 
 #[test]
+fn class_string_disjunction_is_one_set_operand() {
+    assert_eq!(
+        matched_text(r"^[\d&&\q{0|2|4|9\uFE0F\u20E3}]+$", "v", "024"),
+        Some("024".to_owned())
+    );
+    assert_eq!(
+        matched_text(
+            r"^[\q{0|2|4|9\uFE0F\u20E3}--\d]+$",
+            "v",
+            "9\u{fe0f}\u{20e3}",
+        ),
+        Some("9\u{fe0f}\u{20e3}".to_owned())
+    );
+    assert_eq!(
+        matched_text(
+            r"^[\q{0|2|4|9\uFE0F\u20E3}&&\q{2|4|9\uFE0F\u20E3}]+$",
+            "v",
+            "24",
+        ),
+        Some("24".to_owned())
+    );
+    assert_eq!(
+        matched_text(
+            r"^[\d&&\q{0|2|4|9\uFE0F\u20E3}]+$",
+            "v",
+            "9\u{fe0f}\u{20e3}"
+        ),
+        None
+    );
+}
+
+#[test]
 fn classes_anchors_backreferences_and_inline_modifiers_execute() {
     assert_eq!(
         ranges(r"^(?<word>[a-z]+)\s+\k<word>$", "i", "Rust rUsT"),
