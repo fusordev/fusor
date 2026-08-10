@@ -1808,7 +1808,9 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 span: statement.span,
             });
         }
+        work.push(StatementWork::PopAbruptMarker(AbruptMarkerTag::ForOf));
         work.push(StatementWork::ForOfAssignment(&statement.left));
+        work.push(StatementWork::PushAbruptMarker(AbruptMarkerKind::ForOf));
         work.push(StatementWork::Bind(assign.clone()));
         work.push(StatementWork::Branch {
             kind: BranchKind::Goto,

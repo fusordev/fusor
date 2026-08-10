@@ -9189,7 +9189,10 @@ fn transfer_internal_operand_stack(
             let Some(marker_index) = state[..value_index].iter().rposition(|value| {
                 matches!(
                     value,
-                    InternalStackValue::CatchMarker { .. } | InternalStackValue::ForOfCatch(_)
+                    InternalStackValue::CatchMarker { .. }
+                        | InternalStackValue::ForOfCatch(_)
+                        | InternalStackValue::ForOfExhaustedCatch(_)
+                        | InternalStackValue::ForOfClosableCatch(_)
                 )
             }) else {
                 if state.iter().any(|value| value.is_for_of_value()) {
@@ -9214,12 +9217,45 @@ fn transfer_internal_operand_stack(
                     }
                     Some(site)
                 }
+                InternalStackValue::ForOfExhaustedCatch(site) => {
+                    let Some(record_start) = marker_index.checked_sub(2) else {
+                        return Err(for_of_stack_error(id, decoded.pc(), opcode));
+                    };
+                    if !matches!(
+                        (state[record_start], state[record_start + 1]),
+                        (
+                            InternalStackValue::ForOfExhaustedIterator(iterator),
+                            InternalStackValue::ForOfExhaustedNextMethod(next)
+                        ) if iterator == site && next == site
+                    ) {
+                        return Err(for_of_stack_error(id, decoded.pc(), opcode));
+                    }
+                    Some(site)
+                }
+                InternalStackValue::ForOfClosableCatch(site) => {
+                    let Some(record_start) = marker_index.checked_sub(2) else {
+                        return Err(for_of_stack_error(id, decoded.pc(), opcode));
+                    };
+                    if !matches!(
+                        (state[record_start], state[record_start + 1]),
+                        (
+                            InternalStackValue::ForOfClosableIterator(iterator),
+                            InternalStackValue::ForOfClosableNextMethod(next)
+                        ) if iterator == site && next == site
+                    ) {
+                        return Err(for_of_stack_error(id, decoded.pc(), opcode));
+                    }
+                    Some(site)
+                }
                 _ => return Err(internal_stack_error(id, decoded.pc(), opcode, state)),
             };
             let marker_is_for_of = for_of_site.is_some();
             let mut cursor = marker_index + 1;
             while cursor < value_index {
                 match state[cursor] {
+                    value if value.is_javascript_value() => {
+                        cursor += 1;
+                    }
                     InternalStackValue::FinallyPending { target, .. } => {
                         if !matches!(
                             state.get(cursor + 1),
@@ -9281,17 +9317,24 @@ fn transfer_internal_operand_stack(
             let Some(base) = state.len().checked_sub(3) else {
                 return Err(for_of_stack_error(id, decoded.pc(), opcode));
             };
-            let (
-                InternalStackValue::ForOfIterator(iterator),
-                InternalStackValue::ForOfNextMethod(next),
-                InternalStackValue::ForOfReturnValue(completion),
-            ) = (state[base], state[base + 1], state[base + 2])
-            else {
-                return Err(for_of_stack_error(id, decoded.pc(), opcode));
+            let iterator = match (state[base], state[base + 1], state[base + 2]) {
+                (
+                    InternalStackValue::ForOfIterator(iterator),
+                    InternalStackValue::ForOfNextMethod(next),
+                    InternalStackValue::ForOfReturnValue(completion),
+                )
+                | (
+                    InternalStackValue::ForOfExhaustedIterator(iterator),
+                    InternalStackValue::ForOfExhaustedNextMethod(next),
+                    InternalStackValue::ForOfReturnValue(completion),
+                )
+                | (
+                    InternalStackValue::ForOfClosableIterator(iterator),
+                    InternalStackValue::ForOfClosableNextMethod(next),
+                    InternalStackValue::ForOfReturnValue(completion),
+                ) if iterator == next && next == completion => iterator,
+                _ => return Err(for_of_stack_error(id, decoded.pc(), opcode)),
             };
-            if iterator != next || next != completion {
-                return Err(for_of_stack_error(id, decoded.pc(), opcode));
-            }
             state[base] = InternalStackValue::Ordinary;
             state[base + 1] = InternalStackValue::ForOfCloseIterator(iterator);
             state[base + 2] = InternalStackValue::ForOfCloseNextMethod(iterator);

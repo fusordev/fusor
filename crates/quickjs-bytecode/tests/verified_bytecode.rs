@@ -4972,6 +4972,55 @@ fn for_of_marker_certificate_accepts_exact_loop_close_return_and_throw_grammars(
     .expect("a complete for-of catch record may remain for exceptional VM cleanup");
 }
 
+#[test]
+fn nip_catch_discards_expression_temporaries_above_a_for_of_marker() {
+    let returning = [
+        (FinalOpcode::InitialYield, Operands::None),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::ForOfStart, Operands::None),
+        (FinalOpcode::Push1, Operands::NoneInt),
+        (FinalOpcode::Push2, Operands::NoneInt),
+        (FinalOpcode::NipCatch, Operands::None),
+        (FinalOpcode::Rot3r, Operands::None),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::IteratorClose, Operands::None),
+        (FinalOpcode::ReturnAsync, Operands::None),
+    ];
+    let text = "function* f(){}";
+    let span = SourceByteSpan::new(0, u32::try_from(text.len()).expect("source length"));
+    let input = profiled_single_input(
+        &returning,
+        UnverifiedFunctionHeader::generator_source_function_with_variable_references(false, 0, 0),
+        CompilerExecutableKind::GeneratorFunction,
+        &[atom("f")],
+        Some(AtomPoolIndex::new(0)),
+        &[],
+        0,
+        0,
+        &[],
+        source(
+            text,
+            span,
+            Some(SourceByteSpan::new(10, 11)),
+            &[
+                (0, span),
+                (1, span),
+                (2, span),
+                (3, span),
+                (4, span),
+                (5, span),
+                (6, span),
+                (7, span),
+                (8, span),
+                (9, span),
+            ],
+        ),
+    );
+
+    verify_compiler_bytecode_graph(input, BytecodeGraphVerificationLimits::default())
+        .expect("nip_catch discards expression temporaries while retaining the return value");
+}
+
 #[track_caller]
 fn assert_for_await_of_stack_mismatch(
     instructions: &[(FinalOpcode, Operands)],

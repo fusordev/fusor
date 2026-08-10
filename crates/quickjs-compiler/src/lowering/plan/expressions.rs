@@ -17,7 +17,7 @@ use super::super::{
     UpdateOperator, compiled_static_property_key, plan_external_put, plan_external_read,
     plan_put_slot, unsupported,
 };
-use super::abrupt::{AbruptMarker, AbruptMarkerKind};
+use super::abrupt::{AbruptMarker, AbruptMarkerKind, AbruptMarkerTag};
 use super::bindings::WithObjectSource;
 use super::calls::MemberCallee;
 use oxc_ast::ast::{SpreadElement, StaticBlock};
@@ -225,6 +225,11 @@ const fn super_member_update_permutation(prefix: bool) -> FinalOpcode {
 
 pub(in crate::lowering) enum ExpressionWork<'expression, 'arena> {
     Visit(&'expression Expression<'arena>),
+    EnterAbruptMarker(AbruptMarker),
+    ExitAbruptMarker {
+        expected: AbruptMarkerTag,
+        span: Span,
+    },
     VisitCallExpression(&'expression CallExpression<'arena>),
     VisitOptionalChain {
         chain: &'expression ChainExpression<'arena>,
@@ -355,10 +360,40 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         abrupt_markers: &[AbruptMarker],
         flow: &mut PlannedControlFlow,
     ) -> Result<(), LeafCompilationError> {
+        let initial_abrupt_marker_count = abrupt_markers.len();
+        let mut active_abrupt_markers = Vec::new();
+        active_abrupt_markers
+            .try_reserve_exact(initial_abrupt_marker_count)
+            .map_err(|_| LeafCompilationError::CapacityExceeded {
+                domain: "expression abrupt-marker stack",
+            })?;
+        active_abrupt_markers.extend_from_slice(abrupt_markers);
         let mut work = vec![ExpressionWork::Visit(expression)];
         while let Some(task) = work.pop() {
             match task {
                 ExpressionWork::Emit(instruction) => flow.emit(instruction)?,
+                ExpressionWork::EnterAbruptMarker(marker) => {
+                    active_abrupt_markers.try_reserve(1).map_err(|_| {
+                        LeafCompilationError::CapacityExceeded {
+                            domain: "expression abrupt-marker stack",
+                        }
+                    })?;
+                    active_abrupt_markers.push(marker);
+                }
+                ExpressionWork::ExitAbruptMarker { expected, span } => {
+                    let Some(marker) = active_abrupt_markers.pop() else {
+                        return Err(LeafCompilationError::SemanticInvariant {
+                            invariant: "expression abrupt-marker exit has an active marker",
+                            span: Some(span),
+                        });
+                    };
+                    if marker.tag() != expected {
+                        return Err(LeafCompilationError::SemanticInvariant {
+                            invariant: "expression abrupt-marker exits in LIFO order",
+                            span: Some(span),
+                        });
+                    }
+                }
                 ExpressionWork::VisitCallExpression(call) => {
                     self.plan_call_expression(call, layout, tree_layout, constants, &mut work)?;
                 }
@@ -610,7 +645,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                                     yield_expression,
                                     async_generator,
                                     constants,
-                                    abrupt_markers,
+                                    &active_abrupt_markers,
                                     flow,
                                     &mut work,
                                 )?;
@@ -624,7 +659,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                                 yield_expression.span,
                             )));
                             Self::schedule_yield_return_cleanup(
-                                abrupt_markers,
+                                &active_abrupt_markers,
                                 yield_expression.span,
                                 &mut work,
                             );
@@ -706,6 +741,12 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                     }
                 }
             }
+        }
+        if active_abrupt_markers.len() != initial_abrupt_marker_count {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "expression abrupt-marker scheduling is balanced",
+                span: Some(expression.span()),
+            });
         }
         Ok(())
     }

@@ -1051,6 +1051,9 @@ pub(super) fn dispatch_pending_exception(
         };
         frame.stack.truncate(catch_marker);
         push(frame, caught);
+        // Catch entry reconstructs the certified handler stack independently
+        // of any variable-width `nip_catch` cleanup on the abandoned path.
+        frame.stack_depth_correction = 0;
         frame.instruction = handler;
 
         if cleanup_temporary_receivers && runtime.collection_pending {

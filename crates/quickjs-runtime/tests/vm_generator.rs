@@ -335,6 +335,58 @@ fn generator_return_from_a_destructuring_default_runs_finally() {
 }
 
 #[test]
+fn generator_return_exits_an_assignment_destructuring_iterator() {
+    assert_eq!(
+        run("function run(){\
+                function* values(){let value;[value=yield 1]=[void 0];}\
+                let iterator=values();\
+                let first=iterator.next();\
+                let second=iterator.return(8);\
+                return first.value+':'+first.done+'|'+second.value+':'+second.done;\
+            }"),
+        "1:false|8:true"
+    );
+    assert_eq!(
+        run("function run(){\
+                function* values(){let value;for({value=yield 1} of [{}]){}}\
+                let iterator=values();\
+                let first=iterator.next();\
+                let second=iterator.return(8);\
+                return first.value+':'+first.done+'|'+second.value+':'+second.done;\
+            }"),
+        "1:false|8:true"
+    );
+    assert_eq!(
+        run("function run(){\
+                function* values(){let target={};[...[target[yield 1]]]=[86];}\
+                let iterator=values();\
+                let first=iterator.next();\
+                let second=iterator.return(8);\
+                return first.value+':'+first.done+'|'+second.value+':'+second.done;\
+        }"),
+        "1:false|8:true"
+    );
+    assert_eq!(
+        run("function run(){\
+                function* values(){\
+                    try{\
+                        let target={};\
+                        function* source(){yield void 0;}\
+                        let input=source();\
+                        input.return=function(){throw 42;};\
+                        [target[yield 1]]=input;\
+                    }catch(error){return 'caught:'+error;}\
+                }\
+                let iterator=values();\
+                let first=iterator.next();\
+                let second=iterator.return(8);\
+                return first.value+':'+first.done+'|'+second.value+':'+second.done;\
+            }"),
+        "1:false|caught:42:true"
+    );
+}
+
+#[test]
 fn suspended_generator_frames_trace_functions_cells_and_heap_values_until_completion() {
     let maker = compile(
         "function make(){\

@@ -1394,11 +1394,41 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         abrupt_markers: &[super::abrupt::AbruptMarker],
         flow: &mut PlannedControlFlow,
     ) -> Result<(), LeafCompilationError> {
+        let initial_abrupt_marker_count = abrupt_markers.len();
+        let mut active_abrupt_markers = Vec::new();
+        active_abrupt_markers
+            .try_reserve_exact(initial_abrupt_marker_count)
+            .map_err(|_| LeafCompilationError::CapacityExceeded {
+                domain: "assignment-pattern abrupt-marker stack",
+            })?;
+        active_abrupt_markers.extend_from_slice(abrupt_markers);
         let mut work = Vec::new();
         self.plan_assignment_target_value(target, &mut work, flow, layout, tree_layout, constants)?;
         while let Some(task) = work.pop() {
             match task {
                 ExpressionWork::Emit(instruction) => flow.emit(instruction)?,
+                ExpressionWork::EnterAbruptMarker(marker) => {
+                    active_abrupt_markers.try_reserve(1).map_err(|_| {
+                        LeafCompilationError::CapacityExceeded {
+                            domain: "assignment-pattern abrupt-marker stack",
+                        }
+                    })?;
+                    active_abrupt_markers.push(marker);
+                }
+                ExpressionWork::ExitAbruptMarker { expected, span } => {
+                    let Some(marker) = active_abrupt_markers.pop() else {
+                        return Err(LeafCompilationError::SemanticInvariant {
+                            invariant: "assignment-pattern abrupt-marker exit has an active marker",
+                            span: Some(span),
+                        });
+                    };
+                    if marker.tag() != expected {
+                        return Err(LeafCompilationError::SemanticInvariant {
+                            invariant: "assignment-pattern abrupt-marker exits in LIFO order",
+                            span: Some(span),
+                        });
+                    }
+                }
                 ExpressionWork::Branch { kind, target, span } => {
                     flow.branch(kind, &target, span)?;
                 }
@@ -1409,7 +1439,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                         layout,
                         tree_layout,
                         constants,
-                        abrupt_markers,
+                        &active_abrupt_markers,
                         flow,
                     )?;
                 }
@@ -1438,6 +1468,12 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                     });
                 }
             }
+        }
+        if active_abrupt_markers.len() != initial_abrupt_marker_count {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "assignment-pattern abrupt-marker scheduling is balanced",
+                span: Some(target.span()),
+            });
         }
         Ok(())
     }

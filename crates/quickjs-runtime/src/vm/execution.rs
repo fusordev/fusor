@@ -837,6 +837,7 @@ pub(super) fn create_frame(
         generator_result: None,
         resume_abrupt: None,
         pending_async_iterator_close: None,
+        stack_depth_correction: 0,
         reserved_values: plan.reserved_values,
         arguments_snapshot_use: plan.arguments_snapshot_use,
         arguments_snapshot,
@@ -904,13 +905,18 @@ pub(super) fn execute_one(
         frame.eval_declaration_environment = Some(body);
     }
 
-    let expected_depth =
+    let structural_depth =
         verified_instruction
             .entry_stack_depth()
             .ok_or(EngineFault::UnreachableInstruction {
                 function: frame.template,
                 pc: source_pc,
             })?;
+    let expected_depth = structural_depth
+        .checked_sub(frame.stack_depth_correction)
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "verified nip_catch correction exceeds the structural stack depth",
+        })?;
     if frame.stack.len() != expected_depth as usize {
         return Err(EngineFault::StackDepthMismatch {
             function: frame.template,
@@ -1493,7 +1499,31 @@ pub(super) fn execute_one(
             push(frame, top);
         }
         FinalOpcode::NipCatch => {
+            let nominal_output_depth =
+                frame
+                    .stack
+                    .len()
+                    .checked_sub(1)
+                    .ok_or(EngineFault::RuntimeInvariant {
+                        message: "verified nip_catch has no structural input",
+                    })?;
             nip_catch(frame, execution_budget)?;
+            let discarded_temporaries = nominal_output_depth.checked_sub(frame.stack.len()).ok_or(
+                EngineFault::RuntimeInvariant {
+                    message: "verified nip_catch grew the operand stack",
+                },
+            )?;
+            let discarded_temporaries = u32::try_from(discarded_temporaries).map_err(|_| {
+                EngineFault::RuntimeInvariant {
+                    message: "verified nip_catch correction exceeds u32",
+                }
+            })?;
+            frame.stack_depth_correction = frame
+                .stack_depth_correction
+                .checked_add(discarded_temporaries)
+                .ok_or(EngineFault::RuntimeInvariant {
+                    message: "verified nip_catch correction overflowed",
+                })?;
         }
         FinalOpcode::Dup => {
             let value = peek(frame)?.duplicate();

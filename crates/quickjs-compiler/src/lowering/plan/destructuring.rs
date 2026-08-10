@@ -885,6 +885,10 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             Operands::None,
             pattern.span,
         )));
+        work.push(ExpressionWork::ExitAbruptMarker {
+            expected: super::abrupt::AbruptMarkerTag::ForOf,
+            span: pattern.span,
+        });
         if let Some(rest) = pattern.rest.as_deref() {
             self.plan_assignment_rest_collection(rest, work, flow, layout, tree_layout, constants)?;
         }
@@ -1004,6 +1008,10 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 }
             }
         }
+        work.push(ExpressionWork::EnterAbruptMarker(AbruptMarker::new(
+            AbruptMarkerKind::ForOf,
+            0,
+        )));
         work.push(ExpressionWork::Emit(PlannedInstruction::new(
             FinalOpcode::ForOfStart,
             Operands::None,

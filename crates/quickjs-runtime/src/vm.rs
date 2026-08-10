@@ -397,6 +397,7 @@ pub(crate) struct Frame {
     generator_result: Option<ObjectId>,
     resume_abrupt: Option<PendingException>,
     pending_async_iterator_close: Option<PendingAsyncIteratorClose>,
+    stack_depth_correction: u32,
     reserved_values: u64,
     arguments_snapshot_use: ArgumentsSnapshotUse,
     arguments_snapshot: Option<Vec<StoredValue>>,
