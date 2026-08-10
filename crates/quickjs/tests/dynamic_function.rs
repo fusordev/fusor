@@ -838,27 +838,46 @@ fn escaped_program_function_is_hoisted_and_captures_program_lexicals() {
 }
 
 #[test]
-fn named_anonymous_binding_is_initialized_to_the_constructed_function() {
+fn synthetic_anonymous_name_is_not_a_lexical_binding() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
     let mut context = runtime.context(&realm).expect("context");
 
-    let completion = construct_dynamic_function(
+    let function = construct_dynamic_function(
         &mut context,
-        source(&[], "return anonymous;"),
+        source(
+            &[],
+            "let direct=typeof anonymous;\
+             let nested=(function(){return typeof anonymous;})();\
+             let evaluated=(function(){eval('');return typeof anonymous;})();\
+             globalThis.anonymous='realm';\
+             let resolved=anonymous;\
+             delete globalThis.anonymous;\
+             return direct+'|'+nested+'|'+evaluated+'|'+resolved;",
+        ),
         DynamicFunctionLimits::default(),
     )
-    .expect("dynamic Function");
-    let function = completion
-        .into_value()
-        .into_function()
-        .expect("function completion");
-    let returned = context
-        .call(&function, &[], ExecutionLimits::default())
-        .expect("self read")
-        .into_function()
-        .expect("self function");
-    assert!(function.same_identity(&returned).expect("same runtime"));
+    .expect("dynamic Function without a synthetic name binding")
+    .into_value()
+    .into_function()
+    .expect("function completion");
+    let result = call_with_dynamic_function_support(
+        &mut context,
+        &function,
+        &[],
+        DynamicFunctionLimits::default(),
+    )
+    .expect("dynamic Function name lookup");
+
+    assert_eq!(
+        result
+            .as_string()
+            .expect("live result")
+            .expect("string")
+            .to_utf8_lossy()
+            .expect("UTF-8"),
+        "undefined|undefined|undefined|realm"
+    );
 }
 
 #[test]
