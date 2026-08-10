@@ -114,12 +114,12 @@ fn reachable_statement_anchors_require_an_empty_stack() {
             pc,
             expected: 0,
             actual: 1,
-        } if span == anchor_span && pc == BytecodePc::new(134)
+        } if span == anchor_span && pc == BytecodePc::new(3)
     ));
 }
 
 #[test]
-fn unreachable_statement_anchors_have_no_required_entry_depth() {
+fn unreachable_statement_anchors_and_blocks_are_excised() {
     let mut flow = PlannedControlFlow::new(VerificationLimits::default());
     let live_exit = flow.new_label(Span::new(40, 41)).expect("live exit");
     flow.branch(BranchKind::Goto, &live_exit, Span::new(0, 1))
@@ -157,19 +157,33 @@ fn unreachable_statement_anchors_have_no_required_entry_depth() {
             VerificationLimits::default(),
         )
         .expect("unreachable anchor is accepted");
-    let anchor_source = source_instructions
-        .iter()
-        .find(|instruction| instruction.span() == Span::new(21, 22))
-        .expect("unreachable target source");
-    let anchor_index = control_flow
-        .instruction_index_at(anchor_source.pc())
-        .expect("verified unreachable target");
+    assert!(
+        source_instructions
+            .iter()
+            .all(|instruction| !matches!(instruction.span(), span if span == Span::new(10, 11) || span == Span::new(21, 22))),
+        "dead instructions and their statement anchor source are removed"
+    );
+    assert_eq!(source_instructions.len(), 2);
+    assert_eq!(control_flow.instructions().len(), 2);
+    assert!(matches!(
+        control_flow.instructions()[0]
+            .decoded()
+            .instruction()
+            .opcode(),
+        FinalOpcode::Goto | FinalOpcode::Goto8 | FinalOpcode::Goto16
+    ));
     assert_eq!(
+        control_flow.instructions()[1]
+            .decoded()
+            .instruction()
+            .opcode(),
+        FinalOpcode::ReturnUndef
+    );
+    assert!(
         control_flow
-            .instruction(anchor_index)
-            .expect("unreachable target instruction")
-            .entry_stack_depth(),
-        None
+            .instructions()
+            .iter()
+            .all(|instruction| instruction.entry_stack_depth().is_some())
     );
 }
 
@@ -458,11 +472,14 @@ fn known_branch_rewrite_preserves_sources_anchors_and_instruction_boundaries() {
     );
     assert_eq!(sources.len(), control_flow.instructions().len());
 
-    let dead = sources
-        .iter()
-        .position(|source| source.span() == dead_span)
-        .expect("retained dead block source");
-    assert_eq!(control_flow.instructions()[dead].entry_stack_depth(), None);
+    assert_eq!(opcodes.len(), 4);
+    assert!(sources.iter().all(|source| source.span() != dead_span));
+    assert!(
+        control_flow
+            .instructions()
+            .iter()
+            .all(|instruction| instruction.entry_stack_depth().is_some())
+    );
     let target = sources
         .iter()
         .position(|source| source.span() == target_span)

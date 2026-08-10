@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 
 use quickjs_bytecode::{
-    InstructionIndex, VerificationLimits, VerifiedControlFlow, VerifiedSuccessorKind,
+    FinalOpcode, InstructionIndex, VerificationLimits, VerifiedControlFlow, VerifiedSuccessorKind,
 };
 
 use super::{
@@ -12,11 +12,35 @@ use super::{
     },
 };
 
-pub(super) fn analyze_constant_branches(
+pub(super) struct ControlFlowFacts {
+    branch_outcomes: Vec<Option<bool>>,
+    retained: Vec<bool>,
+}
+
+impl ControlFlowFacts {
+    pub(super) fn branch_outcome(&self, position: usize) -> Option<bool> {
+        self.branch_outcomes.get(position).copied().flatten()
+    }
+
+    pub(super) fn is_retained(&self, position: usize) -> bool {
+        self.retained.get(position).copied().unwrap_or(false)
+    }
+
+    pub(super) fn instruction_count(&self) -> usize {
+        self.retained.len()
+    }
+
+    pub(super) fn changes_control_flow(&self) -> bool {
+        self.branch_outcomes.iter().any(Option::is_some)
+            || self.retained.iter().any(|retained| !retained)
+    }
+}
+
+pub(super) fn analyze_control_flow(
     control_flow: &VerifiedControlFlow,
     inputs: &ConstantInputs<'_>,
     limits: VerificationLimits,
-) -> Result<Vec<Option<bool>>, LeafCompilationError> {
+) -> Result<ControlFlowFacts, LeafCompilationError> {
     let instruction_count = control_flow.instructions().len();
     let mut entry_stacks = reserved_vec(instruction_count, "CFG constant entry states")?;
     entry_stacks.resize_with(instruction_count, || None);
@@ -107,17 +131,22 @@ pub(super) fn analyze_constant_branches(
         }
     }
 
-    let mut outcomes = reserved_vec(instruction_count, "CFG constant branch outcomes")?;
+    let mut branch_outcomes = reserved_vec(instruction_count, "CFG constant branch outcomes")?;
+    let mut executable = reserved_vec(instruction_count, "CFG executable instructions")?;
     for (position, verified) in control_flow.instructions().iter().copied().enumerate() {
-        let outcome = entry_stacks
-            .get(position)
-            .and_then(Option::as_deref)
-            .and_then(|stack| {
-                constant_branch_outcome(verified.decoded().instruction().opcode(), stack)
-            });
-        outcomes.push(outcome);
+        let entry_stack = entry_stacks.get(position).and_then(Option::as_deref);
+        let outcome = entry_stack.and_then(|stack| {
+            constant_branch_outcome(verified.decoded().instruction().opcode(), stack)
+        });
+        branch_outcomes.push(outcome);
+        executable.push(entry_stack.is_some());
     }
-    Ok(outcomes)
+    let retained =
+        super::retention::retained_instructions(control_flow, &executable, &branch_outcomes)?;
+    Ok(ControlFlowFacts {
+        branch_outcomes,
+        retained,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -125,7 +154,7 @@ fn propagate_branch(
     control_flow: &VerifiedControlFlow,
     entry_stacks: &mut [Option<Vec<AbstractValue>>],
     worklist: &mut VecDeque<usize>,
-    opcode: quickjs_bytecode::FinalOpcode,
+    opcode: FinalOpcode,
     outcome: Option<bool>,
     taken: InstructionIndex,
     not_taken: InstructionIndex,

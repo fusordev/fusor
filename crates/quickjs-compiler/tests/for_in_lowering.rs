@@ -326,18 +326,23 @@ fn protocol_instructions_retain_exact_spans_and_stack_anchors() {
         "iterator is removed at shared cleanup"
     );
 
-    for (jump_source, expected_depth) in [("continue;", Some(1)), ("break;", None)] {
-        let jump = instructions
-            .iter()
-            .find(|instruction| {
-                matches!(
-                    instruction.decoded().instruction().opcode(),
-                    FinalOpcode::Goto | FinalOpcode::Goto8 | FinalOpcode::Goto16
-                ) && source_slice_at(&compiled, source, instruction.decoded().pc()) == jump_source
-            })
-            .expect("source-owned loop jump");
-        assert_eq!(jump.entry_stack_depth(), expected_depth, "{jump_source}");
-    }
+    let continue_jump = instructions
+        .iter()
+        .find(|instruction| {
+            matches!(
+                instruction.decoded().instruction().opcode(),
+                FinalOpcode::Goto | FinalOpcode::Goto8 | FinalOpcode::Goto16
+            ) && source_slice_at(&compiled, source, instruction.decoded().pc()) == "continue;"
+        })
+        .expect("source-owned continue jump");
+    assert_eq!(continue_jump.entry_stack_depth(), Some(1));
+    assert!(
+        compiled.source_instructions().iter().all(|mapping| {
+            let span = mapping.span();
+            &source[span.start as usize..span.end as usize] != "break;"
+        }),
+        "the threaded unreachable break trampoline is excised"
+    );
 }
 
 #[test]

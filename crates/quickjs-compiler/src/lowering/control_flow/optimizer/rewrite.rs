@@ -1,12 +1,14 @@
 use quickjs_bytecode::{
     AssemblerError, AssemblerLabel, AssemblerLimits, BranchKind, BytecodeAssembler, FinalOpcode,
-    InstructionIndex, Operands, VerificationLimits, VerifiedControlFlow, VerifiedInstruction,
-    VerifiedSuccessorKind,
+    FunctionKind, InstructionIndex, Operands, VerificationLimits, VerifiedControlFlow,
+    VerifiedInstruction, VerifiedSuccessorKind,
 };
 
 use super::{
     super::{LeafCompilationError, ResolvedStackAnchor, SourceInstruction},
-    ConstantPropagationOutput,
+    OptimizedControlFlow,
+    analysis::ControlFlowFacts,
+    metadata,
 };
 
 struct RebuiltInstructions {
@@ -17,26 +19,26 @@ struct RebuiltInstructions {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn rebuild_with_constant_branches(
+pub(super) fn rebuild_optimized_control_flow(
     control_flow: &VerifiedControlFlow,
     source_instructions: &[SourceInstruction],
     eval_reference_call_instructions: &[u32],
     parameter_initialization_end: Option<u32>,
     function_initializer_prefix_start: u32,
     stack_anchors: &[ResolvedStackAnchor],
-    branch_outcomes: &[Option<bool>],
+    facts: &ControlFlowFacts,
     limits: VerificationLimits,
-) -> Result<ConstantPropagationOutput, LeafCompilationError> {
+) -> Result<OptimizedControlFlow, LeafCompilationError> {
     let instruction_count = control_flow.instructions().len();
-    if branch_outcomes.len() != instruction_count {
+    if facts.instruction_count() != instruction_count {
         return Err(LeafCompilationError::SemanticInvariant {
-            invariant: "CFG constant outcomes cover every verified instruction",
+            invariant: "CFG optimization facts cover every verified instruction",
             span: None,
         });
     }
 
     let rebuilt =
-        assemble_constant_branches(control_flow, source_instructions, branch_outcomes, limits)?;
+        assemble_optimized_control_flow(control_flow, source_instructions, facts, limits)?;
     let RebuiltInstructions {
         bytecode,
         instruction_pcs,
@@ -44,22 +46,27 @@ pub(super) fn rebuild_with_constant_branches(
         prefix_counts,
     } = rebuilt;
 
-    let source_instructions = remap_sources(&instruction_pcs, &origins, source_instructions)?;
-    let eval_reference_call_instructions =
-        remap_instruction_metadata(eval_reference_call_instructions, &prefix_counts)?;
+    let source_instructions =
+        metadata::remap_sources(&instruction_pcs, &origins, source_instructions)?;
+    let eval_reference_call_instructions = metadata::remap_instruction_metadata(
+        eval_reference_call_instructions,
+        &prefix_counts,
+        facts,
+    )?;
     let parameter_initialization_end = parameter_initialization_end
-        .map(|boundary| remap_boundary(boundary, &prefix_counts))
+        .map(|boundary| metadata::remap_boundary(boundary, &prefix_counts))
         .transpose()?;
     let function_initializer_prefix_start =
-        remap_boundary(function_initializer_prefix_start, &prefix_counts)?;
-    let stack_anchors = remap_stack_anchors(
+        metadata::remap_boundary(function_initializer_prefix_start, &prefix_counts)?;
+    let stack_anchors = metadata::remap_stack_anchors(
         control_flow,
         stack_anchors,
         &prefix_counts,
         &instruction_pcs,
+        facts,
     )?;
 
-    Ok(ConstantPropagationOutput {
+    Ok(OptimizedControlFlow {
         bytecode,
         source_instructions,
         eval_reference_call_instructions,
@@ -69,10 +76,10 @@ pub(super) fn rebuild_with_constant_branches(
     })
 }
 
-fn assemble_constant_branches(
+fn assemble_optimized_control_flow(
     control_flow: &VerifiedControlFlow,
     sources: &[SourceInstruction],
-    outcomes: &[Option<bool>],
+    facts: &ControlFlowFacts,
     limits: VerificationLimits,
 ) -> Result<RebuiltInstructions, LeafCompilationError> {
     let instruction_count = control_flow.instructions().len();
@@ -82,7 +89,7 @@ fn assemble_constant_branches(
         limits.max_transfer_evaluations(),
     );
     let mut plan = BytecodeAssembler::with_limits(assembler_limits);
-    let (labels, label_spans) = allocate_labels(&mut plan, sources)?;
+    let (labels, label_spans) = allocate_labels(&mut plan, sources, facts)?;
     let mut origins = reserved_vec(
         instruction_count.saturating_add(1),
         "optimized instruction origins",
@@ -92,27 +99,58 @@ fn assemble_constant_branches(
         "optimized instruction boundaries",
     )?;
     prefix_counts.push(0_u32);
+    let mut last_retained = None;
 
     for (position, verified) in control_flow.instructions().iter().copied().enumerate() {
-        let span = sources[position].span();
-        plan.bind(&labels[position])
-            .map_err(|source| LeafCompilationError::BytecodeAssembly {
-                span: Some(span),
-                source,
-            })?;
-        emit_rewritten_instruction(
-            &mut plan,
-            &mut origins,
-            &labels,
-            position,
-            verified,
-            outcomes[position],
-            span,
-        )?;
+        if facts.is_retained(position) {
+            last_retained = Some(position);
+            let span = sources[position].span();
+            let label = labels.get(position).and_then(Option::as_ref).ok_or(
+                LeafCompilationError::SemanticInvariant {
+                    invariant: "retained optimized instruction has a symbolic label",
+                    span: Some(span),
+                },
+            )?;
+            plan.bind(label)
+                .map_err(|source| LeafCompilationError::BytecodeAssembly {
+                    span: Some(span),
+                    source,
+                })?;
+            emit_rewritten_instruction(
+                &mut plan,
+                &mut origins,
+                &labels,
+                position,
+                verified,
+                facts.branch_outcome(position),
+                span,
+            )?;
+        }
         prefix_counts.push(u32_from_usize(
             origins.len(),
             "optimized instruction boundary",
         )?);
+    }
+
+    if let Some(position) = last_retained
+        && control_flow.instructions()[position].successors().kind()
+            == VerifiedSuccessorKind::Fallthrough
+    {
+        emit_disconnected_terminal(
+            &mut plan,
+            &mut origins,
+            position,
+            sources[position].span(),
+            control_flow.function_header().kind(),
+        )?;
+        let final_boundary =
+            prefix_counts
+                .last_mut()
+                .ok_or(LeafCompilationError::SemanticInvariant {
+                    invariant: "optimized instruction boundaries retain their final boundary",
+                    span: Some(sources[position].span()),
+                })?;
+        *final_boundary = u32_from_usize(origins.len(), "optimized final instruction boundary")?;
     }
 
     let assembly = finish_assembler(plan, &origins, sources, &label_spans)?;
@@ -131,20 +169,61 @@ fn assemble_constant_branches(
     })
 }
 
+fn emit_disconnected_terminal(
+    plan: &mut BytecodeAssembler,
+    origins: &mut Vec<usize>,
+    origin: usize,
+    span: quickjs_frontend::Span,
+    function_kind: FunctionKind,
+) -> Result<(), LeafCompilationError> {
+    if function_kind == FunctionKind::Normal {
+        emit_instruction(
+            plan,
+            origins,
+            origin,
+            span,
+            FinalOpcode::ReturnUndef,
+            Operands::None,
+        )
+    } else {
+        emit_instruction(
+            plan,
+            origins,
+            origin,
+            span,
+            FinalOpcode::Undefined,
+            Operands::None,
+        )?;
+        emit_instruction(
+            plan,
+            origins,
+            origin,
+            span,
+            FinalOpcode::ReturnAsync,
+            Operands::None,
+        )
+    }
+}
+
 fn allocate_labels(
     plan: &mut BytecodeAssembler,
     sources: &[SourceInstruction],
-) -> Result<(Vec<AssemblerLabel>, Vec<quickjs_frontend::Span>), LeafCompilationError> {
+    facts: &ControlFlowFacts,
+) -> Result<(Vec<Option<AssemblerLabel>>, Vec<quickjs_frontend::Span>), LeafCompilationError> {
     let mut labels = reserved_vec(sources.len(), "optimized CFG labels")?;
     let mut spans = reserved_vec(sources.len(), "optimized CFG label spans")?;
-    for source in sources {
+    for (position, source) in sources.iter().enumerate() {
+        if !facts.is_retained(position) {
+            labels.push(None);
+            continue;
+        }
         let label =
             plan.new_label()
                 .map_err(|assembler_error| LeafCompilationError::BytecodeAssembly {
                     span: Some(source.span()),
                     source: assembler_error,
                 })?;
-        labels.push(label);
+        labels.push(Some(label));
         spans.push(source.span());
     }
     Ok((labels, spans))
@@ -154,7 +233,7 @@ fn allocate_labels(
 fn emit_rewritten_instruction(
     plan: &mut BytecodeAssembler,
     origins: &mut Vec<usize>,
-    labels: &[AssemblerLabel],
+    labels: &[Option<AssemblerLabel>],
     position: usize,
     verified: VerifiedInstruction,
     outcome: Option<bool>,
@@ -257,26 +336,6 @@ fn finish_assembler(
     }
 }
 
-fn remap_sources(
-    instruction_pcs: &[quickjs_bytecode::BytecodePc],
-    origins: &[usize],
-    sources: &[SourceInstruction],
-) -> Result<Vec<SourceInstruction>, LeafCompilationError> {
-    let mut optimized = reserved_vec(instruction_pcs.len(), "optimized source instructions")?;
-    for (pc, origin) in instruction_pcs.iter().copied().zip(origins.iter().copied()) {
-        let span = sources
-            .get(origin)
-            .copied()
-            .ok_or(LeafCompilationError::SemanticInvariant {
-                invariant: "optimized instruction origin resolves to a source span",
-                span: None,
-            })?
-            .span();
-        optimized.push(SourceInstruction { pc, span });
-    }
-    Ok(optimized)
-}
-
 fn emit_instruction(
     assembler: &mut BytecodeAssembler,
     origins: &mut Vec<usize>,
@@ -344,13 +403,14 @@ fn is_with_branch(opcode: FinalOpcode) -> bool {
 }
 
 fn label_for(
-    labels: &[AssemblerLabel],
+    labels: &[Option<AssemblerLabel>],
     target: InstructionIndex,
 ) -> Result<&AssemblerLabel, LeafCompilationError> {
     labels
         .get(usize_from_u32(target.get(), "optimized branch target")?)
+        .and_then(Option::as_ref)
         .ok_or(LeafCompilationError::SemanticInvariant {
-            invariant: "verified optimized branch target has a symbolic label",
+            invariant: "retained optimized branch target has a symbolic label",
             span: None,
         })
 }
@@ -362,73 +422,6 @@ fn required_successor(
         invariant: "verified successor shape retains its target",
         span: None,
     })
-}
-
-fn remap_instruction_metadata(
-    old_indices: &[u32],
-    prefix_instruction_counts: &[u32],
-) -> Result<Vec<u32>, LeafCompilationError> {
-    let mut remapped = reserved_vec(old_indices.len(), "optimized instruction metadata")?;
-    for &old_index in old_indices {
-        let position = usize_from_u32(old_index, "compiler instruction metadata index")?;
-        let new_index = *prefix_instruction_counts.get(position).ok_or(
-            LeafCompilationError::SemanticInvariant {
-                invariant: "compiler instruction metadata resolves before a verified instruction",
-                span: None,
-            },
-        )?;
-        remapped.push(new_index);
-    }
-    Ok(remapped)
-}
-
-fn remap_boundary(
-    boundary: u32,
-    prefix_instruction_counts: &[u32],
-) -> Result<u32, LeafCompilationError> {
-    prefix_instruction_counts
-        .get(usize_from_u32(boundary, "compiler instruction boundary")?)
-        .copied()
-        .ok_or(LeafCompilationError::SemanticInvariant {
-            invariant: "compiler instruction boundary resolves in optimized control flow",
-            span: None,
-        })
-}
-
-fn remap_stack_anchors(
-    control_flow: &VerifiedControlFlow,
-    anchors: &[ResolvedStackAnchor],
-    prefix_instruction_counts: &[u32],
-    instruction_pcs: &[quickjs_bytecode::BytecodePc],
-) -> Result<Vec<ResolvedStackAnchor>, LeafCompilationError> {
-    let mut remapped = reserved_vec(anchors.len(), "optimized statement stack anchors")?;
-    for anchor in anchors {
-        let old_index = control_flow.instruction_index_at(anchor.pc).ok_or(
-            LeafCompilationError::SemanticInvariant {
-                invariant: "pre-optimization statement anchor resolves to a verified instruction",
-                span: Some(anchor.span),
-            },
-        )?;
-        let old_index = usize_from_u32(old_index.get(), "statement anchor instruction index")?;
-        let new_index = *prefix_instruction_counts.get(old_index).ok_or(
-            LeafCompilationError::SemanticInvariant {
-                invariant: "statement anchor resolves to an optimized instruction boundary",
-                span: Some(anchor.span),
-            },
-        )?;
-        let pc = instruction_pcs
-            .get(usize_from_u32(
-                new_index,
-                "optimized statement anchor index",
-            )?)
-            .copied()
-            .ok_or(LeafCompilationError::SemanticInvariant {
-                invariant: "optimized statement anchor resolves to a final instruction",
-                span: Some(anchor.span),
-            })?;
-        remapped.push(ResolvedStackAnchor { pc, ..*anchor });
-    }
-    Ok(remapped)
 }
 
 fn emitted_span(
@@ -451,31 +444,6 @@ fn emitted_span(
             invariant: "optimized assembler failure origin resolves to a source span",
             span: None,
         })
-}
-
-pub(super) fn validate_source_instructions(
-    control_flow: &VerifiedControlFlow,
-    source_instructions: &[SourceInstruction],
-) -> Result<(), LeafCompilationError> {
-    if source_instructions.len() != control_flow.instructions().len() {
-        return Err(LeafCompilationError::SemanticInvariant {
-            invariant: "pre-optimization source table covers every verified instruction",
-            span: source_instructions.last().map(|source| source.span()),
-        });
-    }
-    for (source, verified) in source_instructions
-        .iter()
-        .copied()
-        .zip(control_flow.instructions().iter().copied())
-    {
-        if source.pc() != verified.decoded().pc() {
-            return Err(LeafCompilationError::SemanticInvariant {
-                invariant: "pre-optimization source table follows verified instruction PCs",
-                span: Some(source.span()),
-            });
-        }
-    }
-    Ok(())
 }
 
 fn invalid_verified_operand<T>() -> Result<T, LeafCompilationError> {

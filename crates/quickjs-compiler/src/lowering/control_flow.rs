@@ -578,7 +578,7 @@ impl FinishedControlFlow {
             &source_instructions,
         )?;
 
-        let control_flow = if let Some(optimized) = optimizer::propagate_constants(
+        let control_flow = if let Some(optimized) = optimizer::optimize_control_flow(
             &initial_control_flow,
             &source_instructions,
             &eval_reference_call_instructions,
