@@ -200,6 +200,19 @@ fn typed_array_constructors_create_fixed_and_length_tracking_array_buffer_views(
 }
 
 #[test]
+fn growable_shared_buffers_keep_only_fixed_typed_array_views_fixed_length() {
+    assert_eq!(
+        rendered(
+            "var buffer=new SharedArrayBuffer(8,{maxByteLength:16});\
+             var fixed=new Uint8Array(buffer,0,4),tracking=new Uint8Array(buffer);\
+             return [Reflect.preventExtensions(fixed),Object.isExtensible(fixed),\
+               Reflect.preventExtensions(tracking),Object.isExtensible(tracking)].join('|');"
+        ),
+        "true|false|false|true"
+    );
+}
+
+#[test]
 fn typed_array_constructors_clone_typed_array_sources_and_check_content_types() {
     assert_eq!(
         rendered(

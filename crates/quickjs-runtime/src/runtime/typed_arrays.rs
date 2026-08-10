@@ -142,9 +142,9 @@ impl Runtime {
     }
 
     /// Implements `IsTypedArrayFixedLength` for the ArrayBuffer-backed view
-    /// forms presently supported by the runtime. Length-tracking views and
-    /// views backed by resizable buffers cannot be made non-extensible because
-    /// their virtual indexed-property set can still change after a resize.
+    /// forms presently supported by the runtime. A fixed view over a growable
+    /// `SharedArrayBuffer` is fixed because shared buffers cannot shrink; a
+    /// length-tracking view or a fixed view over a resizable `ArrayBuffer` is not.
     pub(crate) fn typed_array_is_fixed_length(
         &self,
         object: ObjectId,
@@ -158,7 +158,8 @@ impl Runtime {
             },
         )?;
         Ok(Some(
-            matches!(state.length(), TypedArrayLength::Fixed(_)) && !buffer.is_resizable(),
+            matches!(state.length(), TypedArrayLength::Fixed(_))
+                && (!buffer.is_resizable() || buffer.is_shared()),
         ))
     }
 
