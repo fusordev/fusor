@@ -588,20 +588,12 @@ pub(super) fn begin_object_prototype_to_string(
                 ObjectPrototypeTag::Boolean
             } else if runtime.boxed_number(*object)?.is_some() {
                 ObjectPrototypeTag::Number
-            } else if runtime.boxed_bigint(*object)?.is_some() {
-                ObjectPrototypeTag::BigInt
             } else if runtime.boxed_string(*object)?.is_some() {
                 ObjectPrototypeTag::String
-            } else if runtime.boxed_symbol(*object)?.is_some() {
-                ObjectPrototypeTag::Symbol
             } else if runtime.date_value(*object)?.is_some() {
                 ObjectPrototypeTag::Date
-            } else if let Some(state) = runtime.array_buffer_state(*object)? {
-                if state.is_shared() {
-                    ObjectPrototypeTag::SharedArrayBuffer
-                } else {
-                    ObjectPrototypeTag::ArrayBuffer
-                }
+            } else if runtime.regexp_state(*object)?.is_some() {
+                ObjectPrototypeTag::RegExp
             } else if runtime
                 .objects
                 .get(*object)
@@ -613,17 +605,6 @@ pub(super) fn begin_object_prototype_to_string(
                 .is_error()
             {
                 ObjectPrototypeTag::Error
-            } else if runtime
-                .objects
-                .get(*object)
-                .ok_or(EngineFault::StaleHeapEdge {
-                    edge: "object",
-                    index: object.index(),
-                    generation: object.generation(),
-                })?
-                .is_promise()
-            {
-                ObjectPrototypeTag::Promise
             } else {
                 ObjectPrototypeTag::Object
             },
@@ -726,7 +707,7 @@ fn begin_boxed_bigint_object_prototype_to_string(
     let temporary = runtime.allocate_boxed_bigint(realm, value)?;
     let receiver = StoredValue::Object(temporary);
     let continuation = IntrinsicGetContinuation::ObjectPrototypeToString {
-        default_tag: ObjectPrototypeTag::BigInt,
+        default_tag: ObjectPrototypeTag::Object,
         temporary_receiver: Some(temporary),
     };
     let outcome = match read_heap_property_for_receiver(
@@ -744,7 +725,7 @@ fn begin_boxed_bigint_object_prototype_to_string(
     match outcome {
         PropertyReadOutcome::Value(tag) => {
             remove_unobservable_temporary_wrapper(runtime, temporary, collection_pending);
-            finish_object_prototype_to_string(ObjectPrototypeTag::BigInt, tag)
+            finish_object_prototype_to_string(ObjectPrototypeTag::Object, tag)
         }
         PropertyReadOutcome::Getter { function, receiver } => {
             Ok(intrinsic_getter_call_with_reserved_continuation(
@@ -885,7 +866,7 @@ fn begin_boxed_symbol_object_prototype_to_string(
     let temporary = runtime.allocate_boxed_symbol(realm, value)?;
     let receiver = StoredValue::Object(temporary);
     let continuation = IntrinsicGetContinuation::ObjectPrototypeToString {
-        default_tag: ObjectPrototypeTag::Symbol,
+        default_tag: ObjectPrototypeTag::Object,
         temporary_receiver: Some(temporary),
     };
     let outcome = match read_heap_property_for_receiver(
@@ -903,7 +884,7 @@ fn begin_boxed_symbol_object_prototype_to_string(
     match outcome {
         PropertyReadOutcome::Value(tag) => {
             remove_unobservable_temporary_wrapper(runtime, temporary, collection_pending);
-            finish_object_prototype_to_string(ObjectPrototypeTag::Symbol, tag)
+            finish_object_prototype_to_string(ObjectPrototypeTag::Object, tag)
         }
         PropertyReadOutcome::Getter { function, receiver } => {
             Ok(intrinsic_getter_call_with_reserved_continuation(

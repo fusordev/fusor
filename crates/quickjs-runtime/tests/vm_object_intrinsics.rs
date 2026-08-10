@@ -1728,6 +1728,31 @@ fn proxy_get_drives_operator_and_property_key_conversion() {
 }
 
 #[test]
+fn object_prototype_to_string_uses_the_regexp_matcher_builtin_tag() {
+    assert_eq!(
+        text("return Object.prototype.toString.call(/./);"),
+        "[object RegExp]"
+    );
+}
+
+#[test]
+fn object_prototype_to_string_ignores_non_string_tags_without_inventing_brands() {
+    assert_eq!(
+        text(
+            "var tag=Object.prototype.toString,promise=Promise.resolve();\
+             Object.defineProperty(BigInt.prototype,Symbol.toStringTag,{value:null});\
+             delete Symbol.prototype[Symbol.toStringTag];\
+             Object.defineProperty(Math,Symbol.toStringTag,{value:Symbol()});\
+             delete JSON[Symbol.toStringTag];delete Promise.prototype[Symbol.toStringTag];\
+             return [tag.call(1n),tag.call(Object(1n)),tag.call(Symbol()),\
+               tag.call(Math),tag.call(JSON),tag.call(promise)].join('|');"
+        ),
+        "[object Object]|[object Object]|[object Object]|[object Object]|\
+[object Object]|[object Object]"
+    );
+}
+
+#[test]
 fn proxy_get_drives_intrinsic_tags_and_wrapper_new_target_prototypes() {
     assert_eq!(
         text(

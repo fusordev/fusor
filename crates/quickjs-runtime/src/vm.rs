@@ -1658,39 +1658,31 @@ impl IntrinsicGetContinuation {
 
 #[derive(Clone, Copy)]
 enum ObjectPrototypeTag {
-    ArrayBuffer,
-    SharedArrayBuffer,
     Arguments,
     Array,
-    BigInt,
     Boolean,
     Date,
     Error,
     Function,
     Number,
     Object,
-    Promise,
+    RegExp,
     String,
-    Symbol,
 }
 
 impl ObjectPrototypeTag {
     const fn name(self) -> &'static str {
         match self {
-            Self::ArrayBuffer => "ArrayBuffer",
-            Self::SharedArrayBuffer => "SharedArrayBuffer",
             Self::Arguments => "Arguments",
             Self::Array => "Array",
-            Self::BigInt => "BigInt",
             Self::Boolean => "Boolean",
             Self::Date => "Date",
             Self::Error => "Error",
             Self::Function => "Function",
             Self::Number => "Number",
             Self::Object => "Object",
-            Self::Promise => "Promise",
+            Self::RegExp => "RegExp",
             Self::String => "String",
-            Self::Symbol => "Symbol",
         }
     }
 }
