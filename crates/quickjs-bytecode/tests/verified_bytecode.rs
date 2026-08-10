@@ -1489,6 +1489,52 @@ fn finally_abrupt_exits_discard_only_complete_typed_pairs() {
 }
 
 #[test]
+fn finally_throw_preserves_only_a_complete_pair_beneath_a_nested_catch() {
+    let instructions = [
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::Gosub, Operands::Label(6)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::Catch, Operands::Label(6)),
+        (FinalOpcode::Push1, Operands::NoneInt),
+        (FinalOpcode::Throw, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Ret, Operands::None),
+    ];
+
+    verify_compiler_bytecode_graph(
+        typed_stack_input(&instructions, &[], &[]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("a local catch preserves the enclosing finalizer continuation across its throw");
+
+    let malformed = [
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::Gosub, Operands::Label(6)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Catch, Operands::Label(6)),
+        (FinalOpcode::Push1, Operands::NoneInt),
+        (FinalOpcode::Throw, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+    ];
+    let error = verify_compiler_bytecode_graph(
+        typed_stack_input(&malformed, &[], &[]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("a nested catch cannot authorize a split finalizer continuation pair");
+    assert!(
+        matches!(
+            error.kind(),
+            BytecodeVerificationErrorKind::FinallyReturnMarkerAtExit { .. }
+        ),
+        "{error:?}"
+    );
+}
+
+#[test]
 fn nip_catch_cannot_hide_a_following_typed_stack_underflow() {
     let instructions = [
         (FinalOpcode::Catch, Operands::Label(13)),

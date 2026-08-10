@@ -9811,6 +9811,10 @@ fn verify_internal_stack_exit(
     state: &[InternalStackValue],
     has_finally: bool,
 ) -> Result<(), BytecodeVerificationError> {
+    let is_throw = matches!(
+        decoded.instruction().opcode(),
+        FinalOpcode::Throw | FinalOpcode::ThrowError
+    );
     let mut prefix_len = state.len();
     while matches!(
         state.get(prefix_len.saturating_sub(1)),
@@ -9842,21 +9846,42 @@ fn verify_internal_stack_exit(
         prefix_len = pair_start;
     }
     let state = &state[..prefix_len];
-    if state.iter().any(|value| value.is_finally_value()) {
+    if !is_throw && state.iter().any(|value| value.is_finally_value()) {
         return Err(BytecodeVerificationError::function(
             id,
             BytecodeVerificationErrorKind::FinallyReturnMarkerAtExit { pc: decoded.pc() },
         ));
     }
-    if matches!(
-        decoded.instruction().opcode(),
-        FinalOpcode::Throw | FinalOpcode::ThrowError
-    ) {
+    if is_throw {
         let mut cursor = 0;
         while cursor < state.len() {
             match state[cursor] {
                 value if value.is_javascript_value() => cursor += 1,
                 InternalStackValue::CatchMarker { .. } => cursor += 1,
+                InternalStackValue::FinallyPending { target, .. } => {
+                    if !matches!(
+                        state.get(cursor.saturating_add(1)),
+                        Some(InternalStackValue::FinallyReturn {
+                            target: return_target
+                        }) if *return_target == target
+                    ) {
+                        return Err(BytecodeVerificationError::function(
+                            id,
+                            BytecodeVerificationErrorKind::FinallyReturnMarkerAtExit {
+                                pc: decoded.pc(),
+                            },
+                        ));
+                    }
+                    cursor += 2;
+                }
+                InternalStackValue::FinallyReturn { .. } => {
+                    return Err(BytecodeVerificationError::function(
+                        id,
+                        BytecodeVerificationErrorKind::FinallyReturnMarkerAtExit {
+                            pc: decoded.pc(),
+                        },
+                    ));
+                }
                 InternalStackValue::ForOfIterator(site) => {
                     if !matches!(
                         state.get(cursor..cursor.saturating_add(3)),
