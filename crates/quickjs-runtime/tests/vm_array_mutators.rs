@@ -283,6 +283,10 @@ fn fill_writes_across_its_resolved_range() {
         ("[1,2,3].fill(0).join()", "0,0,0"),
         ("[1,2,3].fill(0,1).join()", "1,0,0"),
         ("[1,2,3].fill(0,1,2).join()", "1,0,3"),
+        // An explicit `undefined` end has the same meaning as an absent end.
+        ("[1,2].fill(0,0,undefined).join()", "0,0"),
+        // `undefined` start still converts through `ToIntegerOrInfinity` to 0.
+        ("[1,2].fill(0,undefined).join()", "0,0"),
         // Negative bounds count from the end.
         ("[1,2,3].fill(0,-2).join()", "1,0,0"),
         ("[1,2,3].fill(0,0,-1).join()", "0,0,3"),
@@ -628,7 +632,37 @@ fn reverse_uses_proxy_internal_methods() {
             Array.prototype.reverse.call(proxy);\
             return log+'|'+target.join();\
         })()",
-        "glength;h0;g0;h1;g1;s1=1;s0=2;|2,1",
+        "glength;h0;g0;h1;g1;s0=2;s1=1;|2,1",
+    )]);
+}
+
+/// A maximum `ToLength` reverse uses ordinary decimal property keys and starts
+/// observable work immediately instead of allocating one swap per pair.
+#[test]
+fn reverse_large_proxy_is_lazy_and_preserves_trap_order() {
+    assert_all(&[(
+        "(function(){\
+            function StopReverse(){}\
+            const target={\
+                0:'zero',2:'two',\
+                get 4(){throw new StopReverse();},\
+                9007199254740987:'high3',\
+                9007199254740990:'high0',\
+                length:2**53+2\
+            };\
+            const log=[];\
+            const proxy=new Proxy(target,{\
+                getOwnPropertyDescriptor:function(t,k){log.push('GetOwnPropertyDescriptor:'+k);return Reflect.getOwnPropertyDescriptor(t,k);},\
+                defineProperty:function(t,k,d){log.push('DefineProperty:'+k);return Reflect.defineProperty(t,k,d);},\
+                has:function(t,k){log.push('Has:'+k);return Reflect.has(t,k);},\
+                get:function(t,k,r){log.push('Get:'+k);return Reflect.get(t,k,r);},\
+                set:function(t,k,v,r){log.push('Set:'+k);return Reflect.set(t,k,v,r);},\
+                deleteProperty:function(t,k){log.push('Delete:'+k);return Reflect.deleteProperty(t,k);}\
+            });\
+            try{Array.prototype.reverse.call(proxy);}catch(error){if(!(error instanceof StopReverse))throw error;}\
+            return log.join(';');\
+        })()",
+        "Get:length;Has:0;Get:0;Has:9007199254740990;Get:9007199254740990;Set:0;GetOwnPropertyDescriptor:0;DefineProperty:0;Set:9007199254740990;GetOwnPropertyDescriptor:9007199254740990;DefineProperty:9007199254740990;Has:1;Has:9007199254740989;Has:2;Get:2;Has:9007199254740988;Delete:2;Set:9007199254740988;GetOwnPropertyDescriptor:9007199254740988;DefineProperty:9007199254740988;Has:3;Has:9007199254740987;Get:9007199254740987;Set:3;GetOwnPropertyDescriptor:3;DefineProperty:3;Delete:9007199254740987;Has:4;Get:4",
     )]);
 }
 
