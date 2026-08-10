@@ -285,6 +285,64 @@ fn symbolic_assembly_leaves_cyclic_goto_targets_unthreaded() {
 }
 
 #[test]
+fn symbolic_assembly_preserves_exception_and_finalizer_entry_targets() {
+    let mut assembler = BytecodeAssembler::new();
+    let handler = assembler.new_label().expect("handler label");
+    let finalizer = assembler.new_label().expect("finalizer label");
+    let exit = assembler.new_label().expect("exit label");
+
+    assembler
+        .branch(BranchKind::Catch, &handler)
+        .expect("handler installation");
+    assembler
+        .branch(BranchKind::Gosub, &finalizer)
+        .expect("finalizer call");
+    assembler
+        .branch(BranchKind::Goto, &handler)
+        .expect("ordinary branch through handler trampoline");
+    assembler.bind(&handler).expect("handler target");
+    assembler
+        .branch(BranchKind::Goto, &exit)
+        .expect("handler trampoline");
+    assembler.bind(&finalizer).expect("finalizer target");
+    assembler
+        .branch(BranchKind::Goto, &exit)
+        .expect("finalizer trampoline");
+    assembler.bind(&exit).expect("exit target");
+    assembler
+        .push(FinalOpcode::ReturnUndef, Operands::None)
+        .expect("exit instruction");
+
+    let output = assembler.finish().expect("assembly");
+    assert_eq!(
+        decoded(output.bytecode()),
+        [
+            (BytecodePc::new(0), FinalOpcode::Catch, Operands::Label(11)),
+            (BytecodePc::new(5), FinalOpcode::Gosub, Operands::Label(8)),
+            (BytecodePc::new(10), FinalOpcode::Goto8, Operands::Label8(5)),
+            (BytecodePc::new(12), FinalOpcode::Goto8, Operands::Label8(3)),
+            (BytecodePc::new(14), FinalOpcode::Goto8, Operands::Label8(1)),
+            (
+                BytecodePc::new(16),
+                FinalOpcode::ReturnUndef,
+                Operands::None
+            ),
+        ]
+    );
+    assert_eq!(
+        output.instruction_pcs(),
+        [
+            BytecodePc::new(0),
+            BytecodePc::new(5),
+            BytecodePc::new(10),
+            BytecodePc::new(12),
+            BytecodePc::new(14),
+            BytecodePc::new(16),
+        ]
+    );
+}
+
+#[test]
 fn symbolic_catch_uses_the_fixed_long_encoding_and_pc_plus_one_base() {
     let mut assembler = BytecodeAssembler::new();
     let handler = assembler.new_label().expect("handler label");
