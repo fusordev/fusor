@@ -1963,6 +1963,11 @@ fn proxy_revocation_affects_objects_and_callable_proxies() {
          pair.revoke();return pair.proxy();",
         ExceptionKind::TypeError,
     );
+    assert_exception_kind(
+        "var pair=Proxy.revocable(function(){},{get:function(){pair.revoke();}});\
+         return new pair.proxy();",
+        ExceptionKind::TypeError,
+    );
 }
 
 #[test]

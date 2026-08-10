@@ -414,6 +414,8 @@ pub(crate) struct Frame {
 
 struct OrdinaryConstructorPrototypeContinuation {
     frame: Frame,
+    realm: RealmId,
+    origin: JsStackFrame,
 }
 
 impl OrdinaryConstructorPrototypeContinuation {
