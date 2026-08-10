@@ -330,6 +330,38 @@ fn join_reads_its_length_once_before_the_element_loop() {
     );
 }
 
+/// `LengthOfArrayLike` snapshots the iteration count before separator
+/// conversion, even when that conversion mutates the receiver's length.
+#[test]
+fn join_snapshots_length_before_converting_the_separator() {
+    assert_eq!(
+        text(
+            "var log='';\
+             var source={get length(){log+='l';return 2;},0:'a',1:'b'};\
+             var separator={toString(){log+='s';return '-';}};\
+             var joined=Array.prototype.join.call(source,separator);\
+             return log+'|'+joined;"
+        ),
+        "ls|a-b"
+    );
+    assert_eq!(
+        text(
+            "var source={length:2,0:'a',1:'b',2:'c'};\
+             var separator={toString(){source.length=3;return '-';}};\
+             return Array.prototype.join.call(source,separator);"
+        ),
+        "a-b"
+    );
+    assert_eq!(
+        text(
+            "var source={length:2,0:'a',1:'b'};\
+             var separator={toString(){source.length=1;return '-';}};\
+             return Array.prototype.join.call(source,separator);"
+        ),
+        "a-b"
+    );
+}
+
 /// A nullish receiver fails the initial `ToObject`.
 #[test]
 fn join_rejects_a_nullish_receiver() {

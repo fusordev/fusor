@@ -3595,7 +3595,7 @@ fn trace_operator_primitive_target_roots(
         OperatorPrimitiveTarget::MathHypot(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::ArrayJoinSeparator(state)
         | OperatorPrimitiveTarget::ArrayJoinElement(state) => {
-            trace_stored_value_root(state.target(), mark);
+            state.trace_roots(mark);
         }
         // The pending truncation operand is a real value and must be traced.
         OperatorPrimitiveTarget::BigIntTruncationBits { value, .. } => {
@@ -3671,9 +3671,7 @@ fn trace_native_continuation_roots(
             trace_function_apply_roots(state, mark);
         }
         NativeContinuation::ArrayToString(state) => state.trace_roots(mark),
-        NativeContinuation::ArrayJoin(state) => {
-            trace_stored_value_root(state.target(), mark);
-        }
+        NativeContinuation::ArrayJoin(state) => state.trace_roots(mark),
         NativeContinuation::ArraySearch(state) => state.trace_roots(mark),
         NativeContinuation::ArrayMutator(state) => state.trace_roots(mark),
         NativeContinuation::ArrayCopier(state) => state.trace_roots(mark),

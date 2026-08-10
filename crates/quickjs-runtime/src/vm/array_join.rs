@@ -137,6 +137,8 @@ fn array_to_string_continuation(state: ArrayToStringContinuation) -> NativeConti
 /// Which stage of the join loop a continuation resumes into.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ArrayJoinStage {
+    /// Ready to select the default separator or start its `ToString`.
+    PrepareSeparator,
     /// Awaiting `ToString` of the separator argument.
     AwaitSeparator,
     /// Awaiting the length property read.
@@ -155,15 +157,14 @@ pub(super) enum ArrayJoinStage {
 pub(super) struct ArrayJoinContinuation {
     /// The coerced receiver whose elements are joined.
     target: StoredValue,
+    /// The unconverted separator retained until after the length snapshot.
+    separator_argument: Option<StoredValue>,
     /// The separator, once converted. `None` until the conversion completes.
     separator: Option<JsString>,
     /// The accumulated result.
     accumulated: JsString,
     /// The element count from the single `ToLength` length read.
     length: u64,
-    /// Whether `length` comes from a prior `%TypedArray%` validation rather
-    /// than this generic join's observable `length` property read.
-    length_is_ready: bool,
     /// The next element index to read.
     next: u64,
     realm: RealmId,
@@ -172,17 +173,20 @@ pub(super) struct ArrayJoinContinuation {
 }
 
 impl ArrayJoinContinuation {
-    /// The receiver plus the accumulated string.
+    /// The receiver, pending separator, and accumulated string.
     ///
     /// The count is constant because the continuation never grows: the
     /// accumulated string replaces itself on every element.
     pub(super) const fn retained_values() -> u64 {
-        2
+        3
     }
 
-    /// Reports the receiver so cycle collection can trace it.
-    pub(super) const fn target(&self) -> &StoredValue {
-        &self.target
+    /// Reports the receiver and pending separator to cycle collection.
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        trace_stored_value_root(&self.target, mark);
+        if let Some(separator) = &self.separator_argument {
+            trace_stored_value_root(separator, mark);
+        }
     }
 }
 
@@ -205,39 +209,16 @@ pub(super) fn begin_array_join(
     };
     let state = ArrayJoinContinuation {
         target,
+        separator_argument: separator,
         separator: None,
         accumulated: JsString::empty(),
         length: 0,
-        length_is_ready: false,
         next: 0,
         realm,
-        stage: ArrayJoinStage::AwaitSeparator,
+        stage: ArrayJoinStage::AwaitLength,
         origin,
     };
-    // An absent or `undefined` separator uses the default `","` without running
-    // any conversion, which the oracle confirms: `[1,2].join(undefined)` is
-    // `"1,2"`.
-    match separator {
-        None | Some(StoredValue::Undefined) => {
-            let mut state = state;
-            state.separator = Some(JsString::from_utf8(",")?);
-            state.stage = ArrayJoinStage::AwaitLength;
-            advance_array_join(runtime, state, None, return_to, execution_budget)
-        }
-        Some(value) => {
-            let origin = state.origin.clone();
-            begin_operator_primitive_conversion(
-                runtime,
-                value,
-                OperatorPrimitiveHint::String,
-                OperatorPrimitiveTarget::ArrayJoinSeparator(Box::new(state)),
-                realm,
-                return_to,
-                origin,
-                execution_budget,
-            )
-        }
-    }
+    advance_array_join(runtime, state, None, return_to, execution_budget)
 }
 
 /// Starts `%TypedArray%.prototype.join` after `ValidateTypedArray` has
@@ -266,36 +247,16 @@ pub(super) fn begin_typed_array_join(
     })?;
     let state = ArrayJoinContinuation {
         target: receiver,
+        separator_argument: separator,
         separator: None,
         accumulated: JsString::empty(),
         length,
-        length_is_ready: true,
         next: 0,
         realm,
-        stage: ArrayJoinStage::AwaitSeparator,
+        stage: ArrayJoinStage::PrepareSeparator,
         origin,
     };
-    match separator {
-        None | Some(StoredValue::Undefined) => {
-            let mut state = state;
-            state.separator = Some(JsString::from_utf8(",")?);
-            state.stage = ArrayJoinStage::NextElement;
-            advance_array_join(runtime, state, None, return_to, execution_budget)
-        }
-        Some(value) => {
-            let origin = state.origin.clone();
-            begin_operator_primitive_conversion(
-                runtime,
-                value,
-                OperatorPrimitiveHint::String,
-                OperatorPrimitiveTarget::ArrayJoinSeparator(Box::new(state)),
-                realm,
-                return_to,
-                origin,
-                execution_budget,
-            )
-        }
-    }
+    advance_array_join(runtime, state, None, return_to, execution_budget)
 }
 
 /// Resumes the join loop.
@@ -332,6 +293,27 @@ pub(super) fn advance_array_join(
     }
     loop {
         match state.stage {
+            ArrayJoinStage::PrepareSeparator => match state.separator_argument.take() {
+                None | Some(StoredValue::Undefined) => {
+                    state.separator = Some(JsString::from_utf8(",")?);
+                    state.stage = ArrayJoinStage::NextElement;
+                }
+                Some(value) => {
+                    let realm = state.realm;
+                    let origin = state.origin.clone();
+                    state.stage = ArrayJoinStage::AwaitSeparator;
+                    return begin_operator_primitive_conversion(
+                        runtime,
+                        value,
+                        OperatorPrimitiveHint::String,
+                        OperatorPrimitiveTarget::ArrayJoinSeparator(Box::new(state)),
+                        realm,
+                        return_to,
+                        origin,
+                        execution_budget,
+                    );
+                }
+            },
             ArrayJoinStage::AwaitSeparator => {
                 let value = take_completion(&mut completion)?;
                 state.separator = Some(operator_primitive_to_string(
@@ -339,11 +321,7 @@ pub(super) fn advance_array_join(
                     state.realm,
                     &state.origin,
                 )?);
-                state.stage = if state.length_is_ready {
-                    ArrayJoinStage::NextElement
-                } else {
-                    ArrayJoinStage::AwaitLength
-                };
+                state.stage = ArrayJoinStage::NextElement;
             }
             ArrayJoinStage::AwaitLength => {
                 let length_key = runtime.predefined_property_key(PredefinedAtom::Length);
@@ -386,7 +364,7 @@ pub(super) fn advance_array_join(
                 }
                 let number = operator_to_number(value, state.realm, &state.origin)?;
                 state.length = number_to_length(number);
-                state.stage = ArrayJoinStage::NextElement;
+                state.stage = ArrayJoinStage::PrepareSeparator;
             }
             ArrayJoinStage::NextElement => {
                 if state.next >= state.length {
