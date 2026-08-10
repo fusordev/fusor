@@ -258,6 +258,22 @@ fn typed_array_constructors_inherit_from_the_hidden_abstract_constructor() {
 }
 
 #[test]
+fn typed_array_to_string_tag_getter_is_generic() {
+    assert_eq!(
+        rendered(
+            "var TypedArray=Object.getPrototypeOf(Int8Array);\
+             var getter=Object.getOwnPropertyDescriptor(TypedArray.prototype,Symbol.toStringTag).get;\
+             var proxy=new Proxy(new Int8Array(1),{});\
+             return [getter.call(new Int8Array(1)),getter.call(new BigUint64Array(1)),\
+               getter.call(TypedArray.prototype),getter.call(),getter.call(null),getter.call(1),\
+               getter.call('x'),getter.call(Symbol()),getter.call({}),getter.call(proxy)]\
+               .map(String).join('|');"
+        ),
+        "Int8Array|BigUint64Array|undefined|undefined|undefined|undefined|undefined|undefined|undefined|undefined"
+    );
+}
+
+#[test]
 fn typed_array_set_copies_typed_and_array_like_sources_with_fresh_target_indices() {
     assert_eq!(
         rendered(

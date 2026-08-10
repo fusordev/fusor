@@ -1774,9 +1774,15 @@ pub(super) fn dispatch_typed_array_prototype(
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     let StoredValue::Object(object) = receiver else {
+        if method == TypedArrayPrototypeMethod::ToStringTag {
+            return Ok(NativeDispatch::Immediate(StoredValue::Undefined));
+        }
         return typed_array_type_error(realm, &origin, "not a TypedArray");
     };
     let Some(state) = runtime.typed_array_state(*object)?.copied() else {
+        if method == TypedArrayPrototypeMethod::ToStringTag {
+            return Ok(NativeDispatch::Immediate(StoredValue::Undefined));
+        }
         return typed_array_type_error(realm, &origin, "not a TypedArray");
     };
     if matches!(
