@@ -239,11 +239,13 @@ fn typed_array_constructors_inherit_from_the_hidden_abstract_constructor() {
     assert_eq!(
         rendered(
             "var TypedArray=Object.getPrototypeOf(Int8Array),descriptor=Object.getOwnPropertyDescriptor(TypedArray,'prototype');\
+             class SharedTypedArray extends TypedArray{}\
              return [TypedArray.name,TypedArray.length,TypedArray.prototype.constructor===TypedArray,\
                Object.getPrototypeOf(Int8Array)===TypedArray,Object.getPrototypeOf(BigInt64Array)===TypedArray,\
+               Object.getPrototypeOf(SharedTypedArray)===TypedArray,\
                descriptor.writable,descriptor.enumerable,descriptor.configurable].join('|');"
         ),
-        "TypedArray|0|true|true|true|false|false|false"
+        "TypedArray|0|true|true|true|true|false|false|false"
     );
     assert_eq!(
         thrown("var TypedArray=Object.getPrototypeOf(Int8Array);TypedArray();"),

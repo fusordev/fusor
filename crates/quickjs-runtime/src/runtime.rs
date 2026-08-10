@@ -4745,6 +4745,7 @@ impl NativeFunctionKind {
                 | Self::ArrayBufferConstructor
                 | Self::SharedArrayBufferConstructor
                 | Self::DataViewConstructor
+                | Self::TypedArrayBaseConstructor
                 | Self::TypedArrayConstructor(_)
                 | Self::DateConstructor
                 | Self::IntlCollatorConstructor
