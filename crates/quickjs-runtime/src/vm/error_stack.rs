@@ -158,7 +158,10 @@ pub(super) fn render_error_stack(
     Ok(rendered)
 }
 
-fn active_frame_location(runtime: &Runtime, frame: &Frame) -> Result<JsStackFrame, ExecutionError> {
+pub(super) fn active_frame_location(
+    runtime: &Runtime,
+    frame: &Frame,
+) -> Result<JsStackFrame, ExecutionError> {
     let instruction = code(runtime, frame.code)?
         .authority
         .function(frame.template)

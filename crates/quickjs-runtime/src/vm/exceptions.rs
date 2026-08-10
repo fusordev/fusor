@@ -473,6 +473,8 @@ fn exception_caller_frames(
                 | FinalOpcode::CallConstructor
                 | FinalOpcode::Eval
                 | FinalOpcode::ApplyEval
+                | FinalOpcode::TailEval
+                | FinalOpcode::TailApplyEval
                 | FinalOpcode::GetField
                 | FinalOpcode::GetField2
                 | FinalOpcode::PutField

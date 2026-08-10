@@ -396,6 +396,7 @@ pub(crate) struct Frame {
     generator_resume: Option<ObjectId>,
     generator_result: Option<ObjectId>,
     resume_abrupt: Option<PendingException>,
+    pending_tail_completion: Option<(StoredValue, BytecodePc)>,
     pending_async_iterator_close: Option<PendingAsyncIteratorClose>,
     reserved_values: u64,
     arguments_snapshot_use: ArgumentsSnapshotUse,
@@ -503,6 +504,116 @@ struct DynamicFunctionReturn {
     kind: DynamicRootKind,
     construction: Option<FunctionId>,
     origin: Option<JsStackFrame>,
+}
+
+struct TailCallReturnContinuation {
+    constructor: Option<TailConstructorReturn>,
+    dynamic: Option<DynamicFunctionReturn>,
+}
+
+struct TailConstructorReturn {
+    state: ConstructorState,
+    receiver: StoredValue,
+    realm: RealmId,
+    origin: JsStackFrame,
+}
+
+impl TailCallReturnContinuation {
+    fn retained_values(&self) -> u64 {
+        u64::from(self.constructor.is_some()).saturating_add(
+            self.dynamic
+                .as_ref()
+                .and_then(|dynamic| dynamic.construction)
+                .map_or(0, |_| 1),
+        )
+    }
+
+    const fn handles_abrupt(&self) -> bool {
+        self.dynamic.is_some()
+    }
+}
+
+fn finish_tail_call_return(
+    runtime: &mut Runtime,
+    mut state: TailCallReturnContinuation,
+    value: StoredValue,
+    active_root_frames: &[Frame],
+) -> Result<NativeDispatch, NativeFailure> {
+    if let Some(dynamic) = state.dynamic.take() {
+        return match finish_dynamic_function_return(runtime, dynamic, value)? {
+            DynamicFunctionCompletion::Value(value) => Ok(NativeDispatch::Immediate(value)),
+            DynamicFunctionCompletion::Abrupt(pending) => Err(NativeFailure::Abrupt(pending)),
+        };
+    }
+    let Some(constructor) = state.constructor else {
+        return Ok(NativeDispatch::Immediate(value));
+    };
+    // PrepareForTailCall removed the constructor frame. Any post-call
+    // constructor-completion error therefore belongs to the still-active
+    // construction site, not to the discarded tail caller. With no bytecode
+    // caller (a host-root construct), the retained constructor location is
+    // harmless because an empty stack snapshot has no active-frame invariant.
+    let completion_origin = if let Some(frame) = active_root_frames.last() {
+        active_frame_location(runtime, frame)?
+    } else {
+        constructor.origin.clone()
+    };
+    let completion = match (constructor.state, value) {
+        (_, value @ (StoredValue::Function(_) | StoredValue::Object(_))) => value,
+        (ConstructorState::Ordinary, _)
+        | (ConstructorState::DerivedInitialized, StoredValue::Undefined) => constructor.receiver,
+        (ConstructorState::DerivedUninitialized, StoredValue::Undefined) => {
+            return Err(NativeFailure::Abrupt(PendingException {
+                realm: constructor.realm,
+                payload: PendingExceptionPayload::EngineError {
+                    kind: ExceptionKind::ReferenceError,
+                    message: JsString::from_utf8(
+                        "Must call super constructor in derived class before accessing 'this' or returning from derived constructor",
+                    )?,
+                },
+                origin: completion_origin,
+            }));
+        }
+        (
+            ConstructorState::DerivedUninitialized | ConstructorState::DerivedInitialized,
+            StoredValue::Null
+            | StoredValue::Boolean(_)
+            | StoredValue::Number(_)
+            | StoredValue::BigInt(_)
+            | StoredValue::String(_)
+            | StoredValue::Symbol(_),
+        ) => {
+            return Err(NativeFailure::Abrupt(PendingException {
+                realm: constructor.realm,
+                payload: PendingExceptionPayload::EngineError {
+                    kind: ExceptionKind::TypeError,
+                    message: JsString::from_utf8(
+                        "Derived constructors may only return object or undefined",
+                    )?,
+                },
+                origin: completion_origin,
+            }));
+        }
+        (ConstructorState::NonConstructor, _) => {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "tail constructor continuation has a non-constructor state",
+            }
+            .into());
+        }
+    };
+    Ok(NativeDispatch::Immediate(completion))
+}
+
+fn resume_tail_call_return_abrupt(
+    runtime: &mut Runtime,
+    mut state: TailCallReturnContinuation,
+    pending: PendingException,
+) -> Result<NativeDispatch, NativeFailure> {
+    let dynamic = state.dynamic.take().ok_or(EngineFault::RuntimeInvariant {
+        message: "tail return continuation without abrupt cleanup became a handler",
+    })?;
+    runtime.retire_dynamic_root(dynamic.root)?;
+    Err(NativeFailure::Abrupt(pending))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -992,6 +1103,7 @@ enum NativeContinuation {
     LegacyAccessorLookup(Box<LegacyAccessorLookupContinuation>),
     LegacyDefineAccessor,
     OwnDescriptorQuery(OwnDescriptorQueryContinuation),
+    TailCallReturn(Box<TailCallReturnContinuation>),
     AsyncAwait {
         origin: JsStackFrame,
     },
@@ -1262,6 +1374,7 @@ impl NativeContinuation {
             Self::IsPrototypeOf(_) => IsPrototypeOfContinuation::retained_values(),
             Self::ObjectMeta(_) => ObjectMetaContinuation::retained_values(),
             Self::LegacyAccessorLookup(_) => LegacyAccessorLookupContinuation::retained_values(),
+            Self::TailCallReturn(state) => state.retained_values(),
             Self::OwnDescriptorQuery(_)
             | Self::LegacyDefineAccessor
             | Self::AsyncAwait { .. }
@@ -1297,6 +1410,7 @@ impl NativeContinuation {
         ) || matches!(self, Self::IteratorConsumer(state) if state.handles_abrupt())
             || matches!(self, Self::Promise(state) if state.handles_abrupt())
             || matches!(self, Self::RegExp(state) if state.handles_abrupt())
+            || matches!(self, Self::TailCallReturn(state) if state.handles_abrupt())
             || matches!(
                 self,
                 Self::OperatorPrimitive(state)
@@ -4114,6 +4228,19 @@ fn trace_native_continuation_roots(
         NativeContinuation::AsyncGeneratorReturnAwait { completion, .. } => {
             trace_stored_value_root(completion, mark);
         }
+        NativeContinuation::TailCallReturn(state) => {
+            if let Some(constructor) = &state.constructor {
+                trace_stored_value_root(&constructor.receiver, mark);
+            }
+            if let Some(dynamic) = &state.dynamic {
+                mark(CollectionRoot::Heap(HeapReference::Function(
+                    dynamic.root.function,
+                )));
+                if let Some(construction) = dynamic.construction {
+                    mark(CollectionRoot::Heap(HeapReference::Function(construction)));
+                }
+            }
+        }
         NativeContinuation::OwnDescriptorQuery(_)
         | NativeContinuation::LegacyDefineAccessor
         | NativeContinuation::AsyncAwait { .. }
@@ -4180,6 +4307,9 @@ pub(crate) fn trace_frame_roots(frame: &Frame, mark: &mut dyn FnMut(CollectionRo
     if let Some(pending) = &frame.resume_abrupt
         && let PendingExceptionPayload::ThrownValue(value) = &pending.payload
     {
+        trace_stored_value_root(value, mark);
+    }
+    if let Some((value, _)) = &frame.pending_tail_completion {
         trace_stored_value_root(value, mark);
     }
     if let Some(PendingAsyncIteratorClose::Abrupt(pending)) = &frame.pending_async_iterator_close
@@ -4519,6 +4649,7 @@ enum ReturnDisposition {
     Push,
     Discard,
     InitializeDerivedThis,
+    Tail(BytecodePc),
     WithBinding {
         taken: InstructionIndex,
         not_taken: InstructionIndex,
@@ -4557,6 +4688,13 @@ impl CallReturn {
         }
     }
 
+    const fn tail(instruction: InstructionIndex, source_pc: BytecodePc) -> Self {
+        Self {
+            instruction,
+            disposition: ReturnDisposition::Tail(source_pc),
+        }
+    }
+
     const fn with_binding(taken: InstructionIndex, not_taken: InstructionIndex) -> Self {
         Self {
             instruction: not_taken,
@@ -4592,12 +4730,24 @@ enum Step {
         return_to: CallReturn,
         source_pc: BytecodePc,
     },
+    TailCall {
+        function: FunctionId,
+        inputs: CallInputSource,
+        source_pc: BytecodePc,
+    },
     Apply {
         function: FunctionId,
         receiver: StoredValue,
         array_like: StoredValue,
         magic: u16,
         return_to: CallReturn,
+        source_pc: BytecodePc,
+    },
+    TailApply {
+        function: FunctionId,
+        receiver: StoredValue,
+        array_like: StoredValue,
+        magic: u16,
         source_pc: BytecodePc,
     },
     Native {
@@ -5371,7 +5521,60 @@ fn execute_frame_loop(
             function: FunctionTemplateId::new(0),
             instruction: 0,
         })?;
-        let step = execute_one(runtime, frame, execution_budget)?;
+        let step = if let Some((value, source_pc)) = frame.pending_tail_completion.take() {
+            Step::Return { value, source_pc }
+        } else {
+            execute_one(runtime, frame, execution_budget)?
+        };
+        let (step, tail_transfer) = match step {
+            Step::TailCall {
+                function,
+                inputs,
+                source_pc,
+            } => {
+                let instruction = frames
+                    .last()
+                    .ok_or(EngineFault::RuntimeInvariant {
+                        message: "tail call lost its executing frame",
+                    })?
+                    .instruction;
+                (
+                    Step::Call {
+                        function,
+                        inputs,
+                        return_to: CallReturn::tail(instruction, source_pc),
+                        source_pc,
+                    },
+                    true,
+                )
+            }
+            Step::TailApply {
+                function,
+                receiver,
+                array_like,
+                magic,
+                source_pc,
+            } => {
+                let instruction = frames
+                    .last()
+                    .ok_or(EngineFault::RuntimeInvariant {
+                        message: "tail apply lost its executing frame",
+                    })?
+                    .instruction;
+                (
+                    Step::Apply {
+                        function,
+                        receiver,
+                        array_like,
+                        magic,
+                        return_to: CallReturn::tail(instruction, source_pc),
+                        source_pc,
+                    },
+                    true,
+                )
+            }
+            step => (step, false),
+        };
         match step {
             Step::Continue => {}
             Step::DirectEval {
@@ -5591,8 +5794,10 @@ fn execute_frame_loop(
                 })?;
                 let origin = instruction_location(runtime, caller, source_pc)?;
                 let operation_realm = code(runtime, caller.code)?.realm;
+                let call_active_values =
+                    tail_call_active_values(frames, *active_frame_values, tail_transfer);
                 if proxy_function {
-                    let active_frames = active_execution_frames(frames);
+                    let active_frames = tail_call_active_frames(frames, tail_transfer);
                     frames
                         .try_reserve(1)
                         .map_err(|_| ExecutionError::AllocationFailed {
@@ -5622,7 +5827,7 @@ fn execute_frame_loop(
                         }),
                         frames,
                         active_frames,
-                        *active_frame_values,
+                        call_active_values,
                         compiler,
                         execution_budget,
                     );
@@ -5636,9 +5841,14 @@ fn execute_frame_loop(
                             push_call_result(runtime, parent, value, return_to)?;
                         }
                         Ok(NativeDispatch::Frame(child)) => {
-                            *active_frame_values =
-                                active_frame_values.saturating_add(child.reserved_values);
-                            frames.push(child);
+                            install_call_frame(
+                                runtime,
+                                frames,
+                                active_frame_values,
+                                child,
+                                tail_transfer,
+                                source_pc,
+                            )?;
                         }
                         Ok(NativeDispatch::Call(_)) => {
                             return Err(EngineFault::RuntimeInvariant {
@@ -5696,7 +5906,7 @@ fn execute_frame_loop(
                         )?;
                         continue;
                     }
-                    let active_frames = active_execution_frames(frames);
+                    let active_frames = tail_call_active_frames(frames, tail_transfer);
                     frames
                         .try_reserve(1)
                         .map_err(|_| ExecutionError::AllocationFailed {
@@ -5720,7 +5930,7 @@ fn execute_frame_loop(
                         Some(origin),
                         frames,
                         active_frames,
-                        *active_frame_values,
+                        call_active_values,
                         compiler,
                         execution_budget,
                     );
@@ -5730,7 +5940,7 @@ fn execute_frame_loop(
                             dispatch,
                             frames,
                             active_frames,
-                            *active_frame_values,
+                            call_active_values,
                             compiler,
                             execution_budget,
                         ),
@@ -5760,9 +5970,14 @@ fn execute_frame_loop(
                             .into());
                         }
                         Ok(NativeDispatch::Frame(child)) => {
-                            *active_frame_values =
-                                active_frame_values.saturating_add(child.reserved_values);
-                            frames.push(child);
+                            install_call_frame(
+                                runtime,
+                                frames,
+                                active_frame_values,
+                                child,
+                                tail_transfer,
+                                source_pc,
+                            )?;
                         }
                         Ok(NativeDispatch::Call(_)) => {
                             return Err(EngineFault::RuntimeInvariant {
@@ -5818,7 +6033,7 @@ fn execute_frame_loop(
                         )?;
                         continue;
                     }
-                    let active_frames = active_execution_frames(frames);
+                    let active_frames = tail_call_active_frames(frames, tail_transfer);
                     frames
                         .try_reserve(1)
                         .map_err(|_| ExecutionError::AllocationFailed {
@@ -5847,7 +6062,7 @@ fn execute_frame_loop(
                             dispatch,
                             frames,
                             active_frames,
-                            *active_frame_values,
+                            call_active_values,
                             compiler,
                             execution_budget,
                         ),
@@ -5863,9 +6078,14 @@ fn execute_frame_loop(
                             push_call_result(runtime, parent, value, return_to)?;
                         }
                         Ok(NativeDispatch::Frame(child)) => {
-                            *active_frame_values =
-                                active_frame_values.saturating_add(child.reserved_values);
-                            frames.push(child);
+                            install_call_frame(
+                                runtime,
+                                frames,
+                                active_frame_values,
+                                child,
+                                tail_transfer,
+                                source_pc,
+                            )?;
                         }
                         Ok(NativeDispatch::Call(_)) => {
                             return Err(EngineFault::RuntimeInvariant {
@@ -5923,7 +6143,7 @@ fn execute_frame_loop(
                         )?;
                         continue;
                     }
-                    let active_frames = active_execution_frames(frames);
+                    let active_frames = tail_call_active_frames(frames, tail_transfer);
                     frames
                         .try_reserve(1)
                         .map_err(|_| ExecutionError::AllocationFailed {
@@ -5946,7 +6166,7 @@ fn execute_frame_loop(
                             dispatch,
                             frames,
                             active_frames,
-                            *active_frame_values,
+                            call_active_values,
                             compiler,
                             execution_budget,
                         ),
@@ -5962,9 +6182,14 @@ fn execute_frame_loop(
                             push_call_result(runtime, parent, value, return_to)?;
                         }
                         Ok(NativeDispatch::Frame(child)) => {
-                            *active_frame_values =
-                                active_frame_values.saturating_add(child.reserved_values);
-                            frames.push(child);
+                            install_call_frame(
+                                runtime,
+                                frames,
+                                active_frame_values,
+                                child,
+                                tail_transfer,
+                                source_pc,
+                            )?;
                         }
                         Ok(NativeDispatch::Call(_)) => {
                             return Err(EngineFault::RuntimeInvariant {
@@ -6022,7 +6247,7 @@ fn execute_frame_loop(
                         )?;
                         continue;
                     }
-                    let active_frames = active_execution_frames(frames);
+                    let active_frames = tail_call_active_frames(frames, tail_transfer);
                     frames
                         .try_reserve(1)
                         .map_err(|_| ExecutionError::AllocationFailed {
@@ -6049,7 +6274,7 @@ fn execute_frame_loop(
                             dispatch,
                             frames,
                             active_frames,
-                            *active_frame_values,
+                            call_active_values,
                             compiler,
                             execution_budget,
                         ),
@@ -6065,9 +6290,14 @@ fn execute_frame_loop(
                             push_call_result(runtime, parent, value, return_to)?;
                         }
                         Ok(NativeDispatch::Frame(child)) => {
-                            *active_frame_values =
-                                active_frame_values.saturating_add(child.reserved_values);
-                            frames.push(child);
+                            install_call_frame(
+                                runtime,
+                                frames,
+                                active_frame_values,
+                                child,
+                                tail_transfer,
+                                source_pc,
+                            )?;
                         }
                         Ok(NativeDispatch::Call(_)) => {
                             return Err(EngineFault::RuntimeInvariant {
@@ -6125,7 +6355,7 @@ fn execute_frame_loop(
                         )?;
                         continue;
                     }
-                    let active_frames = active_execution_frames(frames);
+                    let active_frames = tail_call_active_frames(frames, tail_transfer);
                     frames
                         .try_reserve(1)
                         .map_err(|_| ExecutionError::AllocationFailed {
@@ -6153,7 +6383,7 @@ fn execute_frame_loop(
                             dispatch,
                             frames,
                             active_frames,
-                            *active_frame_values,
+                            call_active_values,
                             compiler,
                             execution_budget,
                         ),
@@ -6169,9 +6399,14 @@ fn execute_frame_loop(
                             push_call_result(runtime, parent, value, return_to)?;
                         }
                         Ok(NativeDispatch::Frame(child)) => {
-                            *active_frame_values =
-                                active_frame_values.saturating_add(child.reserved_values);
-                            frames.push(child);
+                            install_call_frame(
+                                runtime,
+                                frames,
+                                active_frame_values,
+                                child,
+                                tail_transfer,
+                                source_pc,
+                            )?;
                         }
                         Ok(NativeDispatch::Call(_)) => {
                             return Err(EngineFault::RuntimeInvariant {
@@ -6253,8 +6488,8 @@ fn execute_frame_loop(
                 let plan = plan_frame(
                     runtime,
                     function,
-                    active_execution_frames(frames),
-                    *active_frame_values,
+                    tail_call_active_frames(frames, tail_transfer),
+                    call_active_values,
                     supplied_argument_count,
                     if construction {
                         FrameEntryKind::Construct
@@ -6290,7 +6525,7 @@ fn execute_frame_loop(
                     Some(return_to),
                     None,
                 )?;
-                let active_frames = active_execution_frames(frames);
+                let active_frames = tail_call_active_frames(frames, tail_transfer);
                 let dispatch = if construction.is_some()
                     && child.constructor_state != ConstructorState::DerivedUninitialized
                 {
@@ -6310,7 +6545,7 @@ fn execute_frame_loop(
                         dispatch,
                         frames,
                         active_frames,
-                        *active_frame_values,
+                        call_active_values,
                         compiler,
                         execution_budget,
                     ),
@@ -6318,9 +6553,14 @@ fn execute_frame_loop(
                 };
                 match dispatch {
                     Ok(NativeDispatch::Frame(child)) => {
-                        *active_frame_values =
-                            active_frame_values.saturating_add(child.reserved_values);
-                        frames.push(child);
+                        install_call_frame(
+                            runtime,
+                            frames,
+                            active_frame_values,
+                            child,
+                            tail_transfer,
+                            source_pc,
+                        )?;
                     }
                     Ok(
                         NativeDispatch::Immediate(_)
@@ -6367,7 +6607,9 @@ fn execute_frame_loop(
                 })?;
                 let origin = instruction_location(runtime, caller, source_pc)?;
                 let operation_realm = code(runtime, caller.code)?.realm;
-                let active_frames = active_execution_frames(frames);
+                let apply_active_values =
+                    tail_call_active_values(frames, *active_frame_values, tail_transfer);
+                let active_frames = tail_call_active_frames(frames, tail_transfer);
                 if frames.try_reserve(1).is_err() {
                     return Err(ExecutionError::AllocationFailed {
                         resource: RuntimeResource::Frames,
@@ -6390,7 +6632,7 @@ fn execute_frame_loop(
                         Some(return_to),
                         origin,
                         active_frames,
-                        *active_frame_values,
+                        apply_active_values,
                         execution_budget,
                         Some(new_target),
                         None,
@@ -6409,7 +6651,7 @@ fn execute_frame_loop(
                         Some(return_to),
                         origin,
                         active_frames,
-                        *active_frame_values,
+                        apply_active_values,
                         execution_budget,
                         new_target,
                         None,
@@ -6441,7 +6683,7 @@ fn execute_frame_loop(
                     dispatch,
                     frames,
                     active_frames,
-                    *active_frame_values,
+                    apply_active_values,
                     compiler,
                     execution_budget,
                 );
@@ -6454,9 +6696,14 @@ fn execute_frame_loop(
                         push_call_result(runtime, parent, value, return_to)?;
                     }
                     Ok(NativeDispatch::Frame(child)) => {
-                        *active_frame_values =
-                            active_frame_values.saturating_add(child.reserved_values);
-                        frames.push(child);
+                        install_call_frame(
+                            runtime,
+                            frames,
+                            active_frame_values,
+                            child,
+                            tail_transfer,
+                            source_pc,
+                        )?;
                     }
                     Ok(NativeDispatch::Call(_)) => {
                         return Err(EngineFault::RuntimeInvariant {
@@ -7436,6 +7683,9 @@ fn execute_frame_loop(
                 }
                 return Ok(value);
             }
+            Step::TailCall { .. } | Step::TailApply { .. } => {
+                unreachable!("tail steps normalize before dispatch")
+            }
         }
     }
 }
@@ -7760,6 +8010,126 @@ fn bind_derived_this(
     Ok(true)
 }
 
+fn tail_call_active_frames(frames: &[Frame], tail: bool) -> usize {
+    active_execution_frames(frames).saturating_sub(usize::from(tail))
+}
+
+fn tail_call_retained_values(frame: &Frame) -> u64 {
+    let completion_values = if let Some(dynamic) = &frame.dynamic_return {
+        u64::from(dynamic.construction.is_some())
+    } else {
+        u64::from(frame.constructor_state != ConstructorState::NonConstructor)
+    };
+    native_continuation_values(&frame.native_returns).saturating_add(completion_values)
+}
+
+fn tail_call_active_values(frames: &[Frame], active_frame_values: u64, tail: bool) -> u64 {
+    if !tail {
+        return active_frame_values;
+    }
+    frames.last().map_or(active_frame_values, |frame| {
+        active_frame_values
+            .saturating_sub(frame.reserved_values)
+            .saturating_add(tail_call_retained_values(frame))
+    })
+}
+
+fn install_call_frame(
+    runtime: &Runtime,
+    frames: &mut Vec<Frame>,
+    active_frame_values: &mut u64,
+    mut child: Frame,
+    tail: bool,
+    source_pc: BytecodePc,
+) -> Result<(), ExecutionError> {
+    if !tail {
+        *active_frame_values = active_frame_values.saturating_add(child.reserved_values);
+        frames.push(child);
+        return Ok(());
+    }
+
+    let caller = frames.last_mut().ok_or(EngineFault::MissingInstruction {
+        function: FunctionTemplateId::new(0),
+        instruction: 0,
+    })?;
+    if caller.generator_resume.is_some() {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "verified tail transfer originated in a generator frame",
+        }
+        .into());
+    }
+    if caller.derived_this_cell.is_some() {
+        sync_derived_this(runtime, caller)?;
+    }
+    let needs_completion = caller.dynamic_return.is_some()
+        || caller.constructor_state != ConstructorState::NonConstructor;
+    let constructor_context = (caller.dynamic_return.is_none()
+        && caller.constructor_state != ConstructorState::NonConstructor)
+        .then(|| {
+            Ok::<_, ExecutionError>((
+                code(runtime, caller.code)?.realm,
+                instruction_location(runtime, caller, source_pc)?,
+            ))
+        })
+        .transpose()?;
+    caller
+        .native_returns
+        .try_reserve(
+            child
+                .native_returns
+                .len()
+                .saturating_add(usize::from(needs_completion)),
+        )
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::Frames,
+            additional: child
+                .native_returns
+                .len()
+                .saturating_add(usize::from(needs_completion)),
+        })?;
+
+    let mut finished = frames.pop().ok_or(EngineFault::RuntimeInvariant {
+        message: "tail transfer lost its caller frame",
+    })?;
+    let dynamic = finished.dynamic_return.take();
+    let constructor = constructor_context.map(|(realm, origin)| TailConstructorReturn {
+        state: finished.constructor_state,
+        receiver: finished.receiver,
+        realm,
+        origin,
+    });
+    let mut outer = std::mem::take(&mut finished.native_returns);
+    let outer_values = native_continuation_values(&outer);
+    let completion = (constructor.is_some() || dynamic.is_some()).then(|| {
+        NativeContinuation::TailCallReturn(Box::new(TailCallReturnContinuation {
+            constructor,
+            dynamic,
+        }))
+    });
+    let completion_values = completion
+        .as_ref()
+        .map_or(0, NativeContinuation::retained_values);
+    if let Some(completion) = completion {
+        outer.push(completion);
+    }
+    outer.append(&mut child.native_returns);
+    child.native_returns = outer;
+    child.reserved_values = child
+        .reserved_values
+        .saturating_add(outer_values)
+        .saturating_add(completion_values);
+    child.return_to = finished.return_to;
+    if child.native_caller.is_none() {
+        child.native_caller = finished.native_caller;
+    }
+
+    *active_frame_values = active_frame_values
+        .saturating_sub(finished.reserved_values)
+        .saturating_add(child.reserved_values);
+    frames.push(child);
+    Ok(())
+}
+
 fn push_call_result(
     runtime: &mut Runtime,
     parent: &mut Frame,
@@ -7797,6 +8167,16 @@ fn push_call_result(
                 .into());
             }
             push(parent, value);
+        }
+        ReturnDisposition::Tail(source_pc) => {
+            if parent.pending_tail_completion.is_some() {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "tail call completed more than once",
+                }
+                .into());
+            }
+            parent.pending_tail_completion = Some((value, source_pc));
+            return Ok(());
         }
         ReturnDisposition::WithBinding { .. } | ReturnDisposition::WithReference { .. } => {
             return Err(EngineFault::RuntimeInvariant {
@@ -7871,12 +8251,12 @@ fn push_operator_pair(
             parent.instruction = taken;
             Ok(())
         }
-        ReturnDisposition::Discard | ReturnDisposition::InitializeDerivedThis => {
-            Err(EngineFault::RuntimeInvariant {
-                message: "structured operator pair reached an incompatible continuation",
-            }
-            .into())
+        ReturnDisposition::Discard
+        | ReturnDisposition::InitializeDerivedThis
+        | ReturnDisposition::Tail(_) => Err(EngineFault::RuntimeInvariant {
+            message: "structured operator pair reached an incompatible continuation",
         }
+        .into()),
     }
 }
 

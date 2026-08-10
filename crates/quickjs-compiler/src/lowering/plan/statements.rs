@@ -69,6 +69,7 @@ pub(in crate::lowering) enum StatementWork<'statement, 'arena> {
         body_scope: ScopeId,
     },
     Expression(&'statement Expression<'arena>),
+    TailExpression(&'statement Expression<'arena>),
     InitializeInstanceFields(Span),
     Emit(PlannedInstruction),
     Branch {
@@ -322,6 +323,16 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 &state.abrupt_markers,
                 flow,
             )?,
+            StatementWork::TailExpression(expression) => {
+                ExpressionPlanner::new(self).plan_tail_expression(
+                    expression,
+                    planning.layout,
+                    planning.tree_layout,
+                    planning.constants,
+                    &state.abrupt_markers,
+                    flow,
+                )?;
+            }
             StatementWork::InitializeInstanceFields(span) => {
                 ExpressionPlanner::new(self).plan_call_instance_initializer(
                     planning.executable,
@@ -480,6 +491,14 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                     &state.abrupt_markers,
                     return_opcode,
                     async_generator,
+                    return_opcode == FinalOpcode::Return
+                        && executable.is_strict()
+                        && state.abrupt_markers.iter().all(|marker| {
+                            !matches!(
+                                marker.kind,
+                                AbruptMarkerKind::Catch { .. } | AbruptMarkerKind::ForOf
+                            )
+                        }),
                     flow,
                     &mut state.work,
                 )?;
@@ -672,6 +691,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         abrupt_markers: &[AbruptMarker],
         return_opcode: FinalOpcode,
         await_value: bool,
+        tail_position: bool,
         flow: &mut PlannedControlFlow,
         work: &mut Vec<StatementWork<'statement, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
@@ -705,7 +725,11 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                     statement.span,
                 )));
             }
-            work.push(StatementWork::Expression(argument));
+            work.push(if tail_position {
+                StatementWork::TailExpression(argument)
+            } else {
+                StatementWork::Expression(argument)
+            });
         } else if crosses_finalizer
             || closes_iterator
             || (has_pending_finally_subroutine && has_physical_marker)

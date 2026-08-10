@@ -340,9 +340,11 @@ macro_rules! define_opcode_tables {
     ) => {
         /// A final bytecode opcode.
         ///
-        /// Discriminants are the exact one-byte values used by the 2026-06-04
-        /// `QuickJS` release. The reserved [`FinalOpcode::Invalid`] sentinel is
-        /// represented for table parity but rejected by checked decoding.
+        /// The upstream-prefix discriminants are the exact one-byte values
+        /// used by the 2026-06-04 `QuickJS` release; Fusor-only verified
+        /// terminals are appended without renumbering that prefix. The
+        /// reserved [`FinalOpcode::Invalid`] sentinel is represented for table
+        /// parity but rejected by checked decoding.
         #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
         #[repr(u8)]
         pub enum FinalOpcode {
@@ -424,7 +426,7 @@ pub const FIRST_SHORT_OPCODE_BYTE: u8 = FinalOpcode::PushMinus1 as u8;
 /// Number of non-short final opcodes, including `Invalid`.
 pub const NON_SHORT_FINAL_OPCODE_COUNT: usize = FIRST_SHORT_OPCODE_BYTE as usize;
 
-/// Number of final short opcodes.
+/// Number of final short opcodes, including appended Fusor extensions.
 pub const SHORT_FINAL_OPCODE_COUNT: usize = FINAL_OPCODE_COUNT - NON_SHORT_FINAL_OPCODE_COUNT;
 
 /// Number of temporary compiler opcodes.

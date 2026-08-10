@@ -5754,6 +5754,11 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::Rot4l
             | FinalOpcode::Call
             | FinalOpcode::CallMethod
+            | FinalOpcode::TailCall
+            | FinalOpcode::TailCallMethod
+            | FinalOpcode::TailApply
+            | FinalOpcode::TailEval
+            | FinalOpcode::TailApplyEval
             | FinalOpcode::CallConstructor
             | FinalOpcode::Apply
             | FinalOpcode::Eval

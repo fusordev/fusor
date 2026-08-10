@@ -116,8 +116,13 @@ impl PlannedControlFlow {
         if instruction.eval_reference_call
             && !matches!(
                 (instruction.opcode, instruction.operands),
-                (FinalOpcode::Eval, Operands::NPopU16 { .. })
-                    | (FinalOpcode::ApplyEval, Operands::U16(_))
+                (
+                    FinalOpcode::Eval | FinalOpcode::TailEval,
+                    Operands::NPopU16 { .. },
+                ) | (
+                    FinalOpcode::ApplyEval | FinalOpcode::TailApplyEval,
+                    Operands::U16(_),
+                )
             )
         {
             return Err(LeafCompilationError::SemanticInvariant {
@@ -147,6 +152,11 @@ impl PlannedControlFlow {
                 | FinalOpcode::Return
                 | FinalOpcode::ReturnUndef
                 | FinalOpcode::ReturnAsync
+                | FinalOpcode::TailCall
+                | FinalOpcode::TailCallMethod
+                | FinalOpcode::TailApply
+                | FinalOpcode::TailEval
+                | FinalOpcode::TailApplyEval
                 | FinalOpcode::Throw
         ));
         self.label_bound_after_last_instruction = false;

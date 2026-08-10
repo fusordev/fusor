@@ -225,10 +225,15 @@ const fn super_member_update_permutation(prefix: bool) -> FinalOpcode {
 
 pub(in crate::lowering) enum ExpressionWork<'expression, 'arena> {
     Visit(&'expression Expression<'arena>),
-    VisitCallExpression(&'expression CallExpression<'arena>),
+    VisitTail(&'expression Expression<'arena>),
+    VisitCallExpression {
+        call: &'expression CallExpression<'arena>,
+        tail: bool,
+    },
     VisitOptionalChain {
         chain: &'expression ChainExpression<'arena>,
         preserve_final_reference: bool,
+        tail: bool,
     },
     IdentifierCallReference(&'expression IdentifierReference<'arena>),
     IdentifierDelete {
@@ -239,6 +244,7 @@ pub(in crate::lowering) enum ExpressionWork<'expression, 'arena> {
     CallAfterCallee {
         call: &'expression CallExpression<'arena>,
         method: bool,
+        tail: bool,
     },
     SuperPropertyBase {
         span: Span,
@@ -342,10 +348,6 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             _ => false,
         })
     }
-    #[expect(
-        clippy::too_many_lines,
-        reason = "the iterative dispatcher is the exhaustive expression-shape boundary"
-    )]
     pub(in crate::lowering) fn plan_expression<'expression>(
         &self,
         expression: &'expression Expression<'arena>,
@@ -355,27 +357,86 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         abrupt_markers: &[AbruptMarker],
         flow: &mut PlannedControlFlow,
     ) -> Result<(), LeafCompilationError> {
-        let mut work = vec![ExpressionWork::Visit(expression)];
+        self.plan_expression_mode(
+            expression,
+            false,
+            layout,
+            tree_layout,
+            constants,
+            abrupt_markers,
+            flow,
+        )
+    }
+
+    pub(in crate::lowering) fn plan_tail_expression<'expression>(
+        &self,
+        expression: &'expression Expression<'arena>,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
+        constants: &CompiledConstantPool,
+        abrupt_markers: &[AbruptMarker],
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        self.plan_expression_mode(
+            expression,
+            true,
+            layout,
+            tree_layout,
+            constants,
+            abrupt_markers,
+            flow,
+        )
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "the iterative dispatcher carries an explicit tail-position bit beside the exhaustive expression-shape boundary"
+    )]
+    fn plan_expression_mode<'expression>(
+        &self,
+        expression: &'expression Expression<'arena>,
+        tail: bool,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
+        constants: &CompiledConstantPool,
+        abrupt_markers: &[AbruptMarker],
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        let mut work = vec![if tail {
+            ExpressionWork::VisitTail(expression)
+        } else {
+            ExpressionWork::Visit(expression)
+        }];
         while let Some(task) = work.pop() {
             match task {
                 ExpressionWork::Emit(instruction) => flow.emit(instruction)?,
-                ExpressionWork::VisitCallExpression(call) => {
-                    self.plan_call_expression(call, layout, tree_layout, constants, &mut work)?;
+                ExpressionWork::VisitCallExpression { call, tail } => {
+                    self.plan_call_expression(
+                        call,
+                        tail,
+                        layout,
+                        tree_layout,
+                        constants,
+                        &mut work,
+                    )?;
                 }
                 ExpressionWork::VisitOptionalChain {
                     chain,
                     preserve_final_reference,
+                    tail,
                 } => self.plan_optional_chain(
                     chain,
                     preserve_final_reference,
+                    tail,
                     layout,
                     tree_layout,
                     constants,
                     flow,
                     &mut work,
                 )?,
-                ExpressionWork::CallAfterCallee { call, method } => {
-                    Self::plan_call_after_callee(call, method, &mut work)?;
+                ExpressionWork::CallAfterCallee { call, method, tail } => {
+                    Self::plan_call_after_callee(call, method, tail, &mut work)?;
                 }
                 ExpressionWork::IdentifierCallReference(identifier) => {
                     self.plan_identifier_call_reference(
@@ -429,6 +490,53 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                     flow.branch(kind, &target, span)?;
                 }
                 ExpressionWork::Bind(label) => flow.bind(&label)?,
+                ExpressionWork::VisitTail(expression) => match expression {
+                    Expression::ParenthesizedExpression(parenthesized) => {
+                        work.push(ExpressionWork::VisitTail(&parenthesized.expression));
+                    }
+                    Expression::SequenceExpression(sequence) => {
+                        Self::plan_tail_sequence_expression(sequence, &mut work)?;
+                    }
+                    Expression::ConditionalExpression(conditional) => {
+                        Self::plan_tail_conditional_expression(conditional, flow, &mut work)?;
+                    }
+                    Expression::LogicalExpression(logical) => {
+                        Self::plan_tail_logical_expression(logical, flow, &mut work)?;
+                    }
+                    Expression::CallExpression(call) => {
+                        self.plan_call_expression(
+                            call,
+                            true,
+                            layout,
+                            tree_layout,
+                            constants,
+                            &mut work,
+                        )?;
+                    }
+                    Expression::TaggedTemplateExpression(tagged) => {
+                        self.plan_tagged_template_expression(
+                            tagged,
+                            true,
+                            layout,
+                            tree_layout,
+                            constants,
+                            &mut work,
+                        )?;
+                    }
+                    Expression::ChainExpression(chain) => {
+                        self.plan_optional_chain(
+                            chain,
+                            false,
+                            true,
+                            layout,
+                            tree_layout,
+                            constants,
+                            flow,
+                            &mut work,
+                        )?;
+                    }
+                    _ => work.push(ExpressionWork::Visit(expression)),
+                },
                 ExpressionWork::Visit(expression) => {
                     if let Expression::RegExpLiteral(literal) = expression {
                         for instruction in constants.plan_regexp_literal(literal)? {
@@ -518,6 +626,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                             self.plan_optional_chain(
                                 chain,
                                 false,
+                                false,
                                 layout,
                                 tree_layout,
                                 constants,
@@ -548,6 +657,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                         Expression::CallExpression(call) => {
                             self.plan_call_expression(
                                 call,
+                                false,
                                 layout,
                                 tree_layout,
                                 constants,
@@ -557,6 +667,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                         Expression::TaggedTemplateExpression(tagged) => {
                             self.plan_tagged_template_expression(
                                 tagged,
+                                false,
                                 layout,
                                 tree_layout,
                                 constants,
@@ -3139,6 +3250,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         &self,
         chain: &'expression ChainExpression<'arena>,
         preserve_final_reference: bool,
+        tail: bool,
         layout: &FrameLayout,
         tree_layout: &FunctionTreeLayout,
         constants: &CompiledConstantPool,
@@ -3300,7 +3412,10 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                     span: Some(chain.span),
                 });
             };
-            planned.push(ExpressionWork::VisitCallExpression(call));
+            planned.push(ExpressionWork::VisitCallExpression {
+                call,
+                tail: tail && steps.len() == 1,
+            });
         } else {
             match root_member {
                 Some(MemberCallee::Static(member))
@@ -3364,6 +3479,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                     planned.push(ExpressionWork::VisitOptionalChain {
                         chain,
                         preserve_final_reference: true,
+                        tail: false,
                     });
                 }
                 Some(MemberCallee::Private(member)) => {
@@ -3476,7 +3592,11 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                             call.span,
                         );
                     }
-                    planned.push(ExpressionWork::CallAfterCallee { call, method });
+                    planned.push(ExpressionWork::CallAfterCallee {
+                        call,
+                        method,
+                        tail: tail && final_step,
+                    });
                 }
             }
         }
@@ -6911,6 +7031,106 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 )));
             }
             work.push(ExpressionWork::Visit(expression));
+        }
+        Ok(())
+    }
+
+    fn plan_tail_sequence_expression<'expression>(
+        sequence: &'expression SequenceExpression<'arena>,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        if sequence.expressions.is_empty() {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "Oxc sequence expression is nonempty",
+                span: Some(sequence.span),
+            });
+        }
+        for (index, expression) in sequence.expressions.iter().enumerate().rev() {
+            if index + 1 == sequence.expressions.len() {
+                work.push(ExpressionWork::VisitTail(expression));
+            } else {
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::Drop,
+                    Operands::None,
+                    expression.span(),
+                )));
+                work.push(ExpressionWork::Visit(expression));
+            }
+        }
+        Ok(())
+    }
+
+    fn plan_tail_conditional_expression<'expression>(
+        conditional: &'expression ConditionalExpression<'arena>,
+        flow: &mut PlannedControlFlow,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        let alternate = flow.new_label(conditional.alternate.span())?;
+        let done = flow.new_label(conditional.span)?;
+
+        work.push(ExpressionWork::Bind(done.clone()));
+        work.push(ExpressionWork::VisitTail(&conditional.alternate));
+        work.push(ExpressionWork::Bind(alternate.clone()));
+        work.push(ExpressionWork::Branch {
+            kind: BranchKind::Goto,
+            target: done,
+            span: conditional.span,
+        });
+        work.push(ExpressionWork::VisitTail(&conditional.consequent));
+        work.push(ExpressionWork::Branch {
+            kind: BranchKind::IfFalse,
+            target: alternate,
+            span: conditional.test.span(),
+        });
+        work.push(ExpressionWork::Visit(&conditional.test));
+        Ok(())
+    }
+
+    fn plan_tail_logical_expression<'expression>(
+        logical: &'expression LogicalExpression<'arena>,
+        flow: &mut PlannedControlFlow,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        let done = flow.new_label(logical.span)?;
+        let mut operands = same_operator_left_chain(logical);
+        let final_operand = operands
+            .pop()
+            .ok_or(LeafCompilationError::SemanticInvariant {
+                invariant: "Oxc logical expression has two operands",
+                span: Some(logical.span),
+            })?;
+        let branch_kind = match logical.operator {
+            LogicalOperator::Or => BranchKind::IfTrue,
+            LogicalOperator::And | LogicalOperator::Coalesce => BranchKind::IfFalse,
+        };
+
+        work.push(ExpressionWork::Bind(done.clone()));
+        work.push(ExpressionWork::VisitTail(final_operand));
+        for operand in operands.into_iter().rev() {
+            let span = operand.span();
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::Drop,
+                Operands::None,
+                span,
+            )));
+            work.push(ExpressionWork::Branch {
+                kind: branch_kind,
+                target: done.clone(),
+                span,
+            });
+            if logical.operator == LogicalOperator::Coalesce {
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::IsUndefinedOrNull,
+                    Operands::None,
+                    span,
+                )));
+            }
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::Dup,
+                Operands::None,
+                span,
+            )));
+            work.push(ExpressionWork::Visit(operand));
         }
         Ok(())
     }
