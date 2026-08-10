@@ -90,11 +90,17 @@ impl PromiseCombinatorContinuation {
     }
 
     const fn closes_on_abrupt(&self) -> bool {
+        // IteratorNext, IteratorStep, and IteratorStepValue mark the record
+        // done before propagating failures from these three resumed stages.
         self.next.is_some()
             && !self.iterator_done
             && !matches!(
                 self.stage,
-                PromiseCombinatorStage::AwaitCloseReturn | PromiseCombinatorStage::AwaitCloseCall
+                PromiseCombinatorStage::AwaitNextResult
+                    | PromiseCombinatorStage::AwaitDone
+                    | PromiseCombinatorStage::AwaitValue
+                    | PromiseCombinatorStage::AwaitCloseReturn
+                    | PromiseCombinatorStage::AwaitCloseCall
             )
     }
 }
