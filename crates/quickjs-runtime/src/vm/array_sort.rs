@@ -72,6 +72,7 @@ enum ArraySortStage {
     NextWrite,
     AwaitWrite,
     NextDelete,
+    AwaitDelete,
     Done,
 }
 
@@ -551,37 +552,39 @@ pub(super) fn advance_array_sort(
                     }
                     SortOutput::Array { destination: None } => {
                         let key = sort_element_key(runtime, index)?;
+                        let name =
+                            property_key_name(&key).ok_or(EngineFault::RuntimeInvariant {
+                                message: "an array sort index has no diagnostic name",
+                            })?;
+                        let reference =
+                            state
+                                .target
+                                .heap_reference()
+                                .ok_or(EngineFault::RuntimeInvariant {
+                                    message: "Array sort ToObject result is not an object",
+                                })?;
                         charge_sort_lookup(runtime, &state.target, execution_budget)?;
-                        match write_static_property(
+                        state.stage = ArraySortStage::AwaitWrite;
+                        let dispatch = begin_internal_set(
                             runtime,
-                            state.realm,
-                            &state.target,
+                            reference,
                             key,
+                            name,
                             value,
+                            state.target.duplicate(),
                             true,
+                            false,
+                            state.realm,
+                            return_to,
+                            state.origin.clone(),
                             execution_budget,
-                        )? {
-                            PropertyWriteOutcome::Complete => {
-                                state.next_write = state.next_write.saturating_add(1);
-                            }
-                            PropertyWriteOutcome::Setter {
-                                function,
-                                receiver,
-                                value,
-                            } => {
-                                state.stage = ArraySortStage::AwaitWrite;
-                                return suspend_sort(
-                                    state,
-                                    function,
-                                    receiver,
-                                    single_sort_argument(value)?,
-                                    return_to,
-                                );
-                            }
-                            PropertyWriteOutcome::Failed(failure) => {
-                                return Err(sort_property_failure(&state, failure));
-                            }
-                        }
+                        )?;
+                        await_get!(continue_get_state_after(
+                            dispatch,
+                            state,
+                            array_sort_continuation,
+                            "Array sort element [[Set]] produced a structured result",
+                        ));
                     }
                     SortOutput::TypedArray {
                         destination,
@@ -604,18 +607,37 @@ pub(super) fn advance_array_sort(
                 }
                 execution_budget.charge_instructions(1)?;
                 let key = sort_element_key(runtime, state.next_write)?;
+                let reference =
+                    state
+                        .target
+                        .heap_reference()
+                        .ok_or(EngineFault::RuntimeInvariant {
+                            message: "Array sort ToObject result is not an object",
+                        })?;
                 charge_sort_lookup(runtime, &state.target, execution_budget)?;
-                match delete_static_property(runtime, &state.target, &key)? {
-                    PropertyDeleteOutcome::Deleted => {
-                        state.next_write = state.next_write.saturating_add(1);
-                    }
-                    PropertyDeleteOutcome::Refused => {
-                        return Err(sort_property_failure(&state, PropertyFailure::NotDeletable));
-                    }
-                    PropertyDeleteOutcome::Failed(failure) => {
-                        return Err(sort_property_failure(&state, failure));
-                    }
-                }
+                state.stage = ArraySortStage::AwaitDelete;
+                let dispatch = begin_internal_delete(
+                    runtime,
+                    reference,
+                    key,
+                    true,
+                    false,
+                    state.realm,
+                    return_to,
+                    state.origin.clone(),
+                    execution_budget,
+                )?;
+                await_get!(continue_get_state_after(
+                    dispatch,
+                    state,
+                    array_sort_continuation,
+                    "Array sort element [[Delete]] produced a structured result",
+                ));
+            }
+            ArraySortStage::AwaitDelete => {
+                let _ = take_sort_completion(&mut completion)?;
+                state.next_write = state.next_write.saturating_add(1);
+                state.stage = ArraySortStage::NextDelete;
             }
             ArraySortStage::Done => {
                 let result = match state.output {
@@ -970,18 +992,6 @@ fn suspend_sort(
     }))
 }
 
-fn single_sort_argument(value: StoredValue) -> Result<Vec<StoredValue>, NativeFailure> {
-    let mut arguments = Vec::new();
-    arguments
-        .try_reserve_exact(1)
-        .map_err(|_| ExecutionError::AllocationFailed {
-            resource: RuntimeResource::Frames,
-            additional: 1,
-        })?;
-    arguments.push(value);
-    Ok(arguments)
-}
-
 fn sort_element_key(runtime: &mut Runtime, index: u64) -> Result<PropertyKey, NativeFailure> {
     if let Ok(index) = u32::try_from(index)
         && let Some(index) = ArrayIndex::new(index)
@@ -1017,13 +1027,6 @@ fn take_sort_completion(
         }
         .into()
     })
-}
-
-fn sort_property_failure(state: &ArraySortContinuation, failure: PropertyFailure) -> NativeFailure {
-    match property_exception_at(state.realm, state.origin.clone(), None, failure) {
-        Ok(exception) => NativeFailure::Abrupt(exception),
-        Err(error) => error.into(),
-    }
 }
 
 fn sort_type_error(realm: RealmId, origin: &JsStackFrame, message: &str) -> NativeFailure {

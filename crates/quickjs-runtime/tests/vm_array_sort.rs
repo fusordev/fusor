@@ -201,6 +201,41 @@ fn to_sorted_uses_proxy_internal_methods_while_collecting() {
 }
 
 #[test]
+fn sort_publication_uses_current_receiver_internal_methods() {
+    assert_all(&[
+        (
+            "(function(){\
+                let log='';\
+                const target={length:3,0:'b',2:'a'};\
+                const proxy=new Proxy(target,{\
+                    get:function(t,k){log+='get:'+k+';';return t[k];},\
+                    has:function(t,k){log+='has:'+k+';';return k in t;},\
+                    set:function(t,k,v){log+='set:'+k+'='+v+';';t[k]=v;return true;},\
+                    deleteProperty:function(t,k){log+='delete:'+k+';';delete t[k];return true;}\
+                });\
+                Array.prototype.sort.call(proxy);\
+                return log+'|'+target[0]+','+target[1]+'|'+('2' in target);\
+            })()",
+            "get:length;has:0;get:0;has:1;has:2;get:2;set:0=a;set:1=b;delete:2;|a,b|false",
+        ),
+        (
+            "(function(){\
+                const buffer=new ArrayBuffer(4,{maxByteLength:8});\
+                const view=new Uint8Array(buffer);\
+                view[0]=4;view[1]=3;view[2]=2;view[3]=1;\
+                let resized=false;\
+                Array.prototype.sort.call(view,function(a,b){\
+                    if(!resized){resized=true;buffer.resize(2);}\
+                    return a-b;\
+                });\
+                return view.length+'|'+Array.prototype.join.call(view);\
+            })()",
+            "2|1,2",
+        ),
+    ]);
+}
+
+#[test]
 fn to_sorted_returns_a_fresh_dense_array() {
     assert_all(&[
         (
