@@ -227,12 +227,6 @@ fn run_candidate(
                 let made_no_progress =
                     repeated.count > 0 && repeated.iteration_start == Some(state.position);
                 let reached_max = max.is_some_and(|maximum| repeated.count >= maximum);
-                if reached_max {
-                    state.repeats[*slot].active = false;
-                    clear_terminal_repeat(&mut state, *slot);
-                    state.pc = *exit;
-                    continue;
-                }
                 if repeated.count >= *min && made_no_progress {
                     if repeated.optional_attempted {
                         if !restore(&mut state, &mut backtrack) {
@@ -243,6 +237,12 @@ fn run_candidate(
                         clear_terminal_repeat(&mut state, *slot);
                         state.pc = *exit;
                     }
+                    continue;
+                }
+                if reached_max {
+                    state.repeats[*slot].active = false;
+                    clear_terminal_repeat(&mut state, *slot);
+                    state.pc = *exit;
                     continue;
                 }
                 if repeated.count < *min {

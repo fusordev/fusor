@@ -174,6 +174,23 @@ fn unicode_mode_consumes_a_surrogate_pair_as_one_character() {
 }
 
 #[test]
+fn optional_zero_length_repeats_rollback_the_attempted_capture() {
+    assert_eq!(
+        ranges("(?:(?=(abc)))a", "", "abc"),
+        [Some((0, 1)), Some((0, 3))]
+    );
+    assert_eq!(ranges("(?:(?=(abc)))?a", "", "abc"), [Some((0, 1)), None]);
+    assert_eq!(
+        ranges("(?:(?=(abc))){1,1}a", "", "abc"),
+        [Some((0, 1)), Some((0, 3))]
+    );
+    assert_eq!(
+        ranges("(?:(?=(abc))){0,1}a", "", "abc"),
+        [Some((0, 1)), None]
+    );
+}
+
+#[test]
 fn classes_anchors_backreferences_and_inline_modifiers_execute() {
     assert_eq!(
         ranges(r"^(?<word>[a-z]+)\s+\k<word>$", "i", "Rust rUsT"),
