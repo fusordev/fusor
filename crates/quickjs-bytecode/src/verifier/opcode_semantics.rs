@@ -340,8 +340,8 @@ mod tests {
         }
 
         assert_eq!(invalid, 1);
-        assert_eq!(supported, 217);
-        assert_eq!(unsupported, 26);
+        assert_eq!(supported, 221);
+        assert_eq!(unsupported, 22);
         assert_eq!(invalid + supported + unsupported, ALL_FINAL_OPCODES.len());
         assert_eq!(
             opcode_semantics(FinalOpcode::Invalid),

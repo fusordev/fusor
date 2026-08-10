@@ -7,7 +7,11 @@ use quickjs_bytecode::{
     TEMPORARY_OPCODE_START, TemporaryOpcode,
 };
 
-const UPSTREAM_TABLE_FINGERPRINT: u64 = 0x37d5_ab88_5a37_011f;
+// The source-level port keeps QuickJS opcode ordering, while the engine's
+// `define_private_field` carries one U8 kind tag for data/method/accessor
+// installation. Pin the resulting engine table instead of claiming byte-table
+// identity with upstream.
+const ENGINE_TABLE_FINGERPRINT: u64 = 0xf124_7020_c377_e8bf;
 const _: () = assert!(SHORT_OPCODES_ENABLED);
 
 #[test]
@@ -268,8 +272,8 @@ fn dynamic_stack_effect_errors_are_structured() {
 }
 
 #[test]
-fn canonical_table_fingerprint_matches_quickjs_opcode_header() {
-    assert_eq!(table_fingerprint(), UPSTREAM_TABLE_FINGERPRINT);
+fn engine_opcode_table_fingerprint_is_stable() {
+    assert_eq!(table_fingerprint(), ENGINE_TABLE_FINGERPRINT);
 }
 
 fn assert_adjacent(left: FinalOpcode, right: FinalOpcode) {
