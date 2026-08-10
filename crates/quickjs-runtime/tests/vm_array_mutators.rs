@@ -550,6 +550,20 @@ fn growing_past_the_maximum_length_is_rejected() {
     );
 }
 
+/// A real Array publishes the non-index property before its exotic length
+/// write rejects `2^32` with `RangeError`.
+#[test]
+fn push_preserves_the_element_before_invalid_array_length_rejection() {
+    assert_all(&[(
+        "(function(){\
+            const a=[];a.length=4294967295;let range=false;\
+            try{a.push('x')}catch(error){range=error instanceof RangeError;}\
+            return range+'|'+a[4294967295]+'|'+a.length;\
+        })()",
+        "true|x|4294967295",
+    )]);
+}
+
 /// A nullish receiver is rejected before the length is read.
 #[test]
 fn a_nullish_receiver_is_rejected() {

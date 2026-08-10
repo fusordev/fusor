@@ -799,8 +799,8 @@ pub(super) fn advance_array_mutator(
                 if let StoredValue::Object(object) = state.target
                     && runtime.is_array_object(object)?
                 {
-                    let requested =
-                        u32::try_from(state.final_length).map_err(|_| array_too_long(&state))?;
+                    let requested = u32::try_from(state.final_length)
+                        .map_err(|_| invalid_array_length(&state))?;
                     match runtime.set_array_length(object, requested)? {
                         ArrayLengthWriteOutcome::Complete
                         | ArrayLengthWriteOutcome::BlockedByNonConfigurable { .. } => {}
@@ -1091,13 +1091,22 @@ fn argument_for(state: &ArrayMutatorContinuation, index: u64) -> StoredValue {
 /// The misspelling is upstream's (`quickjs.c:41933`), and the message is
 /// observable, so it is reproduced rather than corrected.
 fn array_too_long(state: &ArrayMutatorContinuation) -> NativeFailure {
-    match JsString::from_utf8("Array loo long") {
+    array_mutator_error(state, ExceptionKind::TypeError, "Array loo long")
+}
+
+fn invalid_array_length(state: &ArrayMutatorContinuation) -> NativeFailure {
+    array_mutator_error(state, ExceptionKind::RangeError, "invalid array length")
+}
+
+fn array_mutator_error(
+    state: &ArrayMutatorContinuation,
+    kind: ExceptionKind,
+    message: &str,
+) -> NativeFailure {
+    match JsString::from_utf8(message) {
         Ok(message) => NativeFailure::Abrupt(PendingException {
             realm: state.realm,
-            payload: PendingExceptionPayload::EngineError {
-                kind: ExceptionKind::TypeError,
-                message,
-            },
+            payload: PendingExceptionPayload::EngineError { kind, message },
             origin: state.origin.clone(),
         }),
         Err(error) => error.into(),
