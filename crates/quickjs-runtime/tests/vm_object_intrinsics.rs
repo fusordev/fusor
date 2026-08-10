@@ -1744,6 +1744,15 @@ fn symbol_primitive_get_uses_the_mutable_intrinsic_prototype_and_original_receiv
 }
 
 #[test]
+fn array_prototype_remains_the_intrinsic_after_its_length_is_frozen() {
+    assert!(boolean(
+        "delete Array.prototype.slice;\
+         Object.freeze(Array.prototype);\
+         return Object.isFrozen(Array.prototype);"
+    ));
+}
+
+#[test]
 fn object_prototype_to_string_uses_the_regexp_matcher_builtin_tag() {
     assert_eq!(
         text("return Object.prototype.toString.call(/./);"),

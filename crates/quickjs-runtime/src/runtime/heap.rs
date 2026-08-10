@@ -31,8 +31,8 @@ use super::{
     HeapObject, HeapReference, JsBigInt, JsNumber, JsString, NativeFunction, NativeFunctionKind,
     ObjectId, ObjectRecord, OwnProperty, PredefinedAtom, PropertyDeletion, PropertyKey,
     PropertyLayout, PropertyLayoutKind, Rc, RealmId, RealmIntrinsics, ReleaseMailbox, Runtime,
-    RuntimeResource, SetPrototypeOutcome, SlotValue, StoredValue, array_length_from_number,
-    check_execution_limit, stale_heap_reference, usize_to_u64,
+    RuntimeResource, SetPrototypeOutcome, SlotValue, StoredValue, check_execution_limit,
+    stale_heap_reference, usize_to_u64,
 };
 
 #[derive(Clone, Copy)]
@@ -413,23 +413,9 @@ impl Runtime {
                     index: array.prototype.index(),
                     generation: array.prototype.generation(),
                 })?;
-        let array_length = prototype
-            .array_state()
-            .ok_or(crate::EngineFault::RuntimeInvariant {
-                message: "Array.prototype intrinsic has no array state",
-            })?
-            .length();
-        let length_key = self.predefined_property_key(PredefinedAtom::Length);
-        if !matches!(
-            prototype.record.own_property(&length_key),
-            Some(OwnProperty::Data {
-                layout,
-                value: StoredValue::Number(value),
-            }) if layout == PropertyLayout::data(true, false, false)
-                && array_length_from_number(value) == Some(array_length)
-        ) {
+        if prototype.array_state().is_none() {
             return Err(crate::EngineFault::RuntimeInvariant {
-                message: "Array.prototype intrinsic has an invalid length property",
+                message: "Array.prototype intrinsic has no array state",
             });
         }
         Ok(array.prototype)
