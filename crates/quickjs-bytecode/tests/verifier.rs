@@ -1285,6 +1285,57 @@ fn gosub_and_ret_have_structural_successors_and_stack_depths() {
 }
 
 #[test]
+fn compiler_gosub_depth_join_defers_to_the_typed_whole_graph() {
+    let bytecode = encode(&[
+        (FinalOpcode::PushTrue, Operands::None),
+        (FinalOpcode::IfFalse8, Operands::Label8(9)),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::Gosub, Operands::Label(16)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::Push1, Operands::NoneInt),
+        (FinalOpcode::Push2, Operands::NoneInt),
+        (FinalOpcode::Gosub, Operands::Label(7)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::Ret, Operands::None),
+    ]);
+
+    let serialized = verify_control_flow(
+        unverified(bytecode.clone(), 3, FunctionIndexDomains::default()),
+        VerificationLimits::default(),
+    )
+    .expect_err("serialized bytecode retains exact ordinary-depth joins");
+    assert!(
+        matches!(
+            serialized.kind(),
+            VerificationErrorKind::InconsistentStackAtJoin {
+                target,
+                established_depth,
+                incoming_depth,
+                ..
+            } if *target == BytecodePc::new(21)
+                && ((*established_depth == 2 && *incoming_depth == 3)
+                    || (*established_depth == 3 && *incoming_depth == 2))
+        ),
+        "{serialized:?}"
+    );
+
+    let compiler = verify_compiler_control_flow(
+        UnverifiedCompilerFunctionBody::new(
+            bytecode,
+            FunctionIndexDomains::default(),
+            UnverifiedFunctionHeader::default(),
+        ),
+        VerificationLimits::default(),
+    )
+    .expect("the typed whole graph owns compiler-generated finalizer-state equality");
+    assert_eq!(compiler.computed_stack_size(), 3);
+    assert_eq!(compiler.instructions()[12].entry_stack_depth(), Some(2));
+}
+
+#[test]
 fn gosub_return_address_counts_toward_the_structural_stack_limit() {
     let bytecode = encode(&[
         (FinalOpcode::Undefined, Operands::None),

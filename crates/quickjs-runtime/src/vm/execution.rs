@@ -915,7 +915,7 @@ pub(super) fn execute_one(
     let expected_depth = structural_depth
         .checked_sub(frame.stack_depth_correction)
         .ok_or(EngineFault::RuntimeInvariant {
-            message: "verified nip_catch correction exceeds the structural stack depth",
+            message: "verified stack correction exceeds the structural stack depth",
         })?;
     if frame.stack.len() != expected_depth as usize {
         return Err(EngineFault::StackDepthMismatch {
@@ -1484,10 +1484,13 @@ pub(super) fn execute_one(
         }
         FinalOpcode::Gosub => {
             enter_finally_subroutine(verified_instruction, frame)?;
+            normalize_stack_depth_correction(runtime, frame, frame.instruction)?;
             return Ok(Step::Continue);
         }
         FinalOpcode::Ret => {
-            frame.instruction = pop_finally_continuation(frame)?;
+            let continuation = pop_finally_continuation(frame)?;
+            frame.instruction = continuation;
+            normalize_stack_depth_correction(runtime, frame, continuation)?;
             return Ok(Step::Continue);
         }
         FinalOpcode::Drop => {

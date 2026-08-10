@@ -274,6 +274,46 @@ pub(super) fn enter_finally_subroutine(
     Ok(())
 }
 
+pub(super) fn normalize_stack_depth_correction(
+    runtime: &Runtime,
+    frame: &mut Frame,
+    instruction: InstructionIndex,
+) -> Result<(), EngineFault> {
+    let verified = code(runtime, frame.code)?
+        .authority
+        .function(frame.template)
+        .and_then(|function| function.function().control_flow().instruction(instruction))
+        .copied()
+        .ok_or(EngineFault::MissingInstruction {
+            function: frame.template,
+            instruction: instruction.get(),
+        })?;
+    let structural_depth =
+        verified
+            .entry_stack_depth()
+            .ok_or(EngineFault::UnreachableInstruction {
+                function: frame.template,
+                pc: verified.decoded().pc(),
+            })?;
+    let actual_depth =
+        u32::try_from(frame.stack.len()).map_err(|_| EngineFault::StackDepthMismatch {
+            function: frame.template,
+            pc: verified.decoded().pc(),
+            expected: structural_depth,
+            actual: frame.stack.len(),
+        })?;
+    frame.stack_depth_correction =
+        structural_depth
+            .checked_sub(actual_depth)
+            .ok_or(EngineFault::StackDepthMismatch {
+                function: frame.template,
+                pc: verified.decoded().pc(),
+                expected: structural_depth,
+                actual: frame.stack.len(),
+            })?;
+    Ok(())
+}
+
 pub(super) fn nip_catch(
     frame: &mut Frame,
     execution_budget: &mut ExecutionBudget,

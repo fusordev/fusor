@@ -301,6 +301,21 @@ fn generator_return_completion_survives_a_yielding_finally() {
 }
 
 #[test]
+fn generator_return_abandons_a_suspended_property_reference_before_finally() {
+    assert_eq!(
+        run("function run(){\
+                let box={value:'unchanged'};\
+                function* values(){try{box.value=yield;}finally{return 1;}}\
+                let iterator=values();\
+                iterator.next();\
+                let result=iterator.return(45);\
+                return box.value+'|'+result.value+':'+result.done;\
+            }"),
+        "unchanged|1:true"
+    );
+}
+
+#[test]
 fn generator_return_closes_an_active_for_of_iterator() {
     assert_eq!(
         run("function run(){\

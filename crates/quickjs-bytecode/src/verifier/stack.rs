@@ -209,6 +209,7 @@ pub(super) fn analyze_ordinary_stack(
                 successor,
                 output_depth,
                 current.decoded,
+                false,
             )?,
             VerifiedSuccessorsRepr::Branch { taken, not_taken } => {
                 propagate_stack_depth(
@@ -219,6 +220,8 @@ pub(super) fn analyze_ordinary_stack(
                         .or(with_binding_depth)
                         .unwrap_or(output_depth),
                     current.decoded,
+                    require_empty_exits
+                        && current.decoded.instruction().opcode() == FinalOpcode::Gosub,
                 )?;
                 propagate_stack_depth(
                     &mut instructions,
@@ -226,6 +229,7 @@ pub(super) fn analyze_ordinary_stack(
                     not_taken,
                     output_depth,
                     current.decoded,
+                    false,
                 )?;
             }
             VerifiedSuccessorsRepr::Terminate => {
@@ -292,6 +296,7 @@ fn propagate_stack_depth(
     target: InstructionIndex,
     incoming_depth: u32,
     source: DecodedInstruction,
+    defer_gosub_join_to_typed_stack: bool,
 ) -> Result<(), VerificationError> {
     let position = usize::try_from(target.get()).map_err(|_| {
         VerificationError::at_instruction(
@@ -321,6 +326,7 @@ fn propagate_stack_depth(
             worklist.push_back(target);
         }
         Some(established_depth) if established_depth == incoming_depth => {}
+        Some(_) if defer_gosub_join_to_typed_stack => {}
         Some(established_depth) => {
             return Err(VerificationError::at_instruction(
                 source,

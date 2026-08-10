@@ -1203,6 +1203,38 @@ fn finally_return_address_certificate_accepts_shared_and_nested_subroutines() {
 }
 
 #[test]
+fn finally_return_address_certificate_rejects_different_shared_prefixes() {
+    let instructions = [
+        (FinalOpcode::PushTrue, Operands::None),
+        (FinalOpcode::IfFalse8, Operands::Label8(9)),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::Gosub, Operands::Label(16)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::Push1, Operands::NoneInt),
+        (FinalOpcode::Push2, Operands::NoneInt),
+        (FinalOpcode::Gosub, Operands::Label(7)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::Ret, Operands::None),
+    ];
+
+    let error = verify_compiler_bytecode_graph(
+        typed_stack_input(&instructions, &[], &[]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("nominal gosub depth deferral cannot hide different typed prefixes");
+    assert!(
+        matches!(
+            error.kind(),
+            BytecodeVerificationErrorKind::FinallyReturnJoinMismatch { .. }
+        ),
+        "{error:?}"
+    );
+}
+
+#[test]
 fn finally_return_address_certificate_rejects_marker_misuse_and_ordinary_entry() {
     for (opcode, operands) in [
         (FinalOpcode::Dup, Operands::None),
