@@ -583,6 +583,20 @@ fn a_primitive_is_vacuously_sealed_and_frozen() {
     assert!(boolean("return Object.isSealed(true);"));
 }
 
+#[test]
+fn object_integrity_statics_preserve_every_primitive_boundary() {
+    assert!(boolean(
+        "var symbol=Symbol('primitive');\
+         function check(value){\
+           return Object.freeze(value)===value&&Object.seal(value)===value&&\
+             Object.preventExtensions(value)===value&&Object.isFrozen(value)&&\
+             Object.isSealed(value)&&!Object.isExtensible(value);\
+         }\
+         return check(undefined)&&check(null)&&check(false)&&check(3)&&\
+           check(4n)&&check('text')&&check(symbol);"
+    ));
+}
+
 /// Oracle: `keys order => [0,2,b,a]`. `[[OwnPropertyKeys]]` reports array
 /// indices in ascending numeric order before string keys in creation order.
 #[test]

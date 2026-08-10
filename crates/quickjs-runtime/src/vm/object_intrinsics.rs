@@ -43,9 +43,11 @@ use super::*;
 /// `Object.keys(5)` is empty rather than a `TypeError`.
 #[derive(Clone, Copy)]
 enum PrimitivePolicy {
-    /// Return the argument unchanged, as `preventExtensions` and
-    /// `setPrototypeOf` do.
+    /// Return any primitive argument unchanged, as the integrity mutators do.
     ReturnArgument,
+    /// Return a non-nullish primitive unchanged after the explicit
+    /// `RequireObjectCoercible` boundary used by `setPrototypeOf`.
+    ReturnObjectCoercibleArgument,
     /// Answer as though the primitive were a frozen, non-extensible wrapper.
     TreatAsSealed,
     /// Answer with no own keys.
@@ -108,12 +110,10 @@ fn reflection_target(
         StoredValue::Function(function) => Ok(Some(HeapReference::Function(*function))),
         StoredValue::Object(object) => Ok(Some(HeapReference::Object(*object))),
         StoredValue::Undefined | StoredValue::Null => match policy {
-            // Even the permissive statics reject `null` and `undefined`,
-            // because `ToObject` fails for them.
+            PrimitivePolicy::ReturnArgument | PrimitivePolicy::TreatAsSealed => Ok(None),
             PrimitivePolicy::PrototypeLookup
-            | PrimitivePolicy::TreatAsSealed
-            | PrimitivePolicy::NoKeys
-            | PrimitivePolicy::ReturnArgument => Err(nullish_reflection_failure(
+            | PrimitivePolicy::ReturnObjectCoercibleArgument
+            | PrimitivePolicy::NoKeys => Err(nullish_reflection_failure(
                 realm, origin, method, value, policy,
             )?),
         },
@@ -126,6 +126,7 @@ fn reflection_target(
             match policy {
                 PrimitivePolicy::PrototypeLookup
                 | PrimitivePolicy::ReturnArgument
+                | PrimitivePolicy::ReturnObjectCoercibleArgument
                 | PrimitivePolicy::TreatAsSealed
                 | PrimitivePolicy::NoKeys => Ok(None),
             }
@@ -150,6 +151,7 @@ fn nullish_reflection_failure(
         PrimitivePolicy::NoKeys => "cannot convert to object",
         PrimitivePolicy::PrototypeLookup
         | PrimitivePolicy::ReturnArgument
+        | PrimitivePolicy::ReturnObjectCoercibleArgument
         | PrimitivePolicy::TreatAsSealed => "not an object",
     };
     Ok(NativeFailure::Abrupt(type_error(
@@ -1088,7 +1090,7 @@ pub(super) fn set_prototype_of(
         runtime,
         realm,
         &target,
-        PrimitivePolicy::ReturnArgument,
+        PrimitivePolicy::ReturnObjectCoercibleArgument,
         Some(&origin),
         "setPrototypeOf",
     )?
