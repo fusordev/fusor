@@ -2,3 +2,4 @@
 *.profraw
 *.profdata
 .DS_Store
+/tests/test262/suite/
