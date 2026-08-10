@@ -911,6 +911,40 @@ fn parameter_initializers_resolve_past_body_only_bindings() {
 }
 
 #[test]
+fn parameter_arguments_resolves_before_body_lexical_arguments() {
+    let plan = script(
+        "var captured;const f=function(value=captured=arguments){let arguments;return arguments;};",
+    );
+    let function = plan.executables()[1].id();
+    let arguments = plan
+        .bindings_for(function)
+        .unwrap()
+        .iter()
+        .filter(|binding| binding.name() == "arguments")
+        .collect::<Vec<_>>();
+    assert_eq!(arguments.len(), 2);
+    let implicit = arguments
+        .iter()
+        .copied()
+        .find(|binding| binding.is_arguments_object())
+        .expect("parameter environment arguments object");
+    let lexical = arguments
+        .iter()
+        .copied()
+        .find(|binding| binding.policy().kind() == DeclarationKind::Let)
+        .expect("body lexical arguments binding");
+    let targets = plan
+        .resolved_references_for(function)
+        .unwrap()
+        .iter()
+        .map(quickjs_compiler::ResolvedReference::binding)
+        .collect::<Vec<_>>();
+    assert!(targets.contains(&implicit.id()));
+    assert!(targets.contains(&lexical.id()));
+    assert!(plan.unresolved_globals_for(function).unwrap().is_empty());
+}
+
+#[test]
 fn sloppy_arguments_is_synthesized_and_captured_by_an_arrow() {
     let plan = script("function outer() { arguments; return () => arguments; }");
     let outer = plan.executables()[1].id();

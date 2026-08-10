@@ -277,6 +277,23 @@ fn parameter_lexical_and_function_declarations_suppress_arguments_instantiation(
 }
 
 #[test]
+fn parameter_expressions_observe_arguments_before_body_lexical_bindings() {
+    let result = string_result(
+        "let ordinaryExpression;const f=function(value=ordinaryExpression=arguments){\
+            let arguments;};f(undefined,2);\
+            let ordinaryDeclaration;function g(value=ordinaryDeclaration=arguments){\
+            let arguments;}g(undefined,4,5);\
+            let generatorExpression;const h=function*(value=generatorExpression=arguments){\
+            let arguments;};h(undefined,7).next();\
+            let generatorDeclaration;function* i(value=generatorDeclaration=arguments){\
+            let arguments;}i(undefined,9,10,11).next();\
+            return ordinaryExpression.length+'|'+ordinaryDeclaration.length+'|'+\
+                generatorExpression.length+'|'+generatorDeclaration.length;",
+    );
+    assert_eq!(result, "2|3|2|4");
+}
+
+#[test]
 fn expression_free_destructured_formals_initialize_left_to_right() {
     let result = string_result(
         "function inspect(keep,{value,...objectRest},[head,,...tail]){\
