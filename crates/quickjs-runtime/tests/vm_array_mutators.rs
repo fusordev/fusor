@@ -234,6 +234,32 @@ fn shift_and_unshift_slide_the_elements() {
     ]);
 }
 
+/// `unshift` does not allocate a move plan proportional to `LengthOfArrayLike`.
+#[test]
+fn unshift_large_lengths_use_a_bounded_lazy_scan() {
+    assert_all(&[
+        (
+            "(function(){const o={length:2**53};const result=Array.prototype.unshift.call(o);return result+'|'+o.length;})()",
+            "9007199254740991|9007199254740991",
+        ),
+        (
+            "(function(){\
+                const marker={};let caught=false;\
+                const o={\
+                    get '9007199254740986'(){throw marker;},\
+                    '9007199254740987':'a',\
+                    '9007199254740989':'b',\
+                    length:2**53-2\
+                };\
+                try{Array.prototype.unshift.call(o,null)}catch(error){caught=error===marker;}\
+                return caught+'|'+o.length+'|'+o['9007199254740988']+'|'\
+                    +('9007199254740989' in o)+'|'+o['9007199254740990'];\
+            })()",
+            "true|9007199254740990|a|false|b",
+        ),
+    ]);
+}
+
 /// `reverse` exchanges each pair in place and returns the same object.
 #[test]
 fn reverse_exchanges_pairs_in_place() {

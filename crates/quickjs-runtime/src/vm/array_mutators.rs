@@ -138,6 +138,9 @@ pub(crate) struct ArrayMutatorContinuation {
     copy_final: u64,
     copy_remaining: u64,
     copy_backward: bool,
+    /// `unshift` walks existing elements from the end, then stores arguments.
+    unshift_remaining: u64,
+    unshift_next_argument: u64,
     /// The value this mutator returns.
     result: StoredValue,
     /// The length to write back once the moves finish.
@@ -219,6 +222,8 @@ pub(super) fn begin_array_mutator(
         copy_final: 0,
         copy_remaining: 0,
         copy_backward: false,
+        unshift_remaining: 0,
+        unshift_next_argument: 0,
         result: StoredValue::Undefined,
         final_length: 0,
         realm,
@@ -466,6 +471,14 @@ pub(super) fn advance_array_mutator(
                     state.moves.clear();
                     state.next_move = 0;
                     let Some(step) = next_copy_within_step(&mut state) else {
+                        state.stage = ArrayMutatorStage::AwaitLengthWrite;
+                        continue;
+                    };
+                    state.moves.push(step);
+                } else if matches!(state.mutator, ArrayMutator::Unshift) {
+                    state.moves.clear();
+                    state.next_move = 0;
+                    let Some(step) = next_unshift_step(&mut state) else {
                         state.stage = ArrayMutatorStage::AwaitLengthWrite;
                         continue;
                     };
@@ -888,11 +901,11 @@ pub(super) fn advance_array_mutator(
 
 /// Plans the element moves each mutator performs.
 ///
-/// Planning up front lets one driver serve the finite mutators. `copyWithin`
-/// instead keeps a constant-space cursor because its `ToLength` input can be as
-/// large as `2^53 - 1`; each completed step prepares only its immediate
-/// successor, so instruction fuel bounds the scan without an attacker-sized
-/// allocation before the first observable element operation.
+/// Planning up front lets one driver serve the finite mutators. `unshift` and
+/// `copyWithin` instead keep constant-space cursors because their `ToLength`
+/// inputs can be as large as `2^53 - 1`; each completed step prepares only its
+/// immediate successor, so instruction fuel bounds the scan without an
+/// attacker-sized allocation before the first observable element operation.
 fn plan_moves(state: &mut ArrayMutatorContinuation) -> Result<(), NativeFailure> {
     let length = state.length;
     match state.mutator {
@@ -949,23 +962,9 @@ fn plan_moves(state: &mut ArrayMutatorContinuation) -> Result<(), NativeFailure>
                 .checked_add(extra)
                 .filter(|total| *total <= MAX_ARRAY_LENGTH)
                 .ok_or_else(|| array_too_long(state))?;
-            let count = usize::try_from(length).map_err(|_| EngineFault::RuntimeInvariant {
-                message: "array unshift length exceeded the addressable step plan",
-            })?;
-            reserve_moves(state, count.saturating_add(state.arguments.len()))?;
-            // Existing elements move up, highest first, so no destination is
-            // overwritten before its own source is read.
-            if extra > 0 {
-                for index in (0..length).rev() {
-                    state.moves.push(ElementStep::Move {
-                        from: index,
-                        to: index.saturating_add(extra),
-                    });
-                }
-            }
-            for offset in 0..extra {
-                state.moves.push(ElementStep::Store { index: offset });
-            }
+            state.unshift_remaining = if extra == 0 { 0 } else { length };
+            state.unshift_next_argument = 0;
+            reserve_moves(state, usize::from(extra > 0))?;
             state.final_length = total;
             state.result = StoredValue::Number(JsNumber::from_f64(length_as_f64(total)));
         }
@@ -1047,6 +1046,25 @@ fn next_copy_within_step(state: &mut ArrayMutatorContinuation) -> Option<Element
         state.copy_to = state.copy_to.saturating_add(1);
     }
     Some(step)
+}
+
+/// Produces the next descending move or leading argument store for `unshift`.
+fn next_unshift_step(state: &mut ArrayMutatorContinuation) -> Option<ElementStep> {
+    let extra = usize_to_u64(state.arguments.len());
+    if state.unshift_remaining > 0 {
+        state.unshift_remaining -= 1;
+        let from = state.unshift_remaining;
+        return Some(ElementStep::Move {
+            from,
+            to: from.saturating_add(extra),
+        });
+    }
+    if state.unshift_next_argument < extra {
+        let index = state.unshift_next_argument;
+        state.unshift_next_argument += 1;
+        return Some(ElementStep::Store { index });
+    }
+    None
 }
 
 /// Reserves the move plan's storage fallibly.
