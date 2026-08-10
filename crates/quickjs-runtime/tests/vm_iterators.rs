@@ -1439,7 +1439,7 @@ fn nested_abrupt_spreads_close_inner_then_outer() {
 }
 
 #[test]
-fn array_iterator_length_uses_quickjs_uint32_conversion() {
+fn array_iterator_length_uses_spec_to_length_conversion() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
     let mut context = runtime.context(&realm).expect("context");
@@ -1447,16 +1447,42 @@ fn array_iterator_length_uses_quickjs_uint32_conversion() {
         &mut context,
         "let values=Array.prototype.values;\
          let negative=values.call({0:7,length:-1}).next();\
-         let wrappedZero=values.call({0:8,length:4294967296}).next();\
-         let wrappedOne=values.call({0:9,length:4294967297}).next();\
-         return negative.done+'|'+negative.value+'|'+wrappedZero.done+'|'\
-           +wrappedOne.done+'|'+wrappedOne.value;",
+         let aboveUint32=values.call({0:8,length:4294967296}).next();\
+         let aboveUint32Again=values.call({0:9,length:4294967297}).next();\
+         return negative.done+'|'+aboveUint32.done+'|'+aboveUint32.value+'|'\
+           +aboveUint32Again.done+'|'+aboveUint32Again.value;",
     );
 
     let value = context
         .call(&run, &[], ExecutionLimits::default())
-        .expect("uint32 lengths");
-    assert_eq!(string_value(&value), "false|7|true|false|9");
+        .expect("ToLength lengths");
+    assert_eq!(string_value(&value), "true|false|8|false|9");
+}
+
+#[test]
+fn array_iterator_uses_a_live_typed_array_witness() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = dynamic_function(
+        &mut context,
+        "let buffer=new ArrayBuffer(4,{maxByteLength:8});\
+         let values=new Uint8Array(buffer,0,4);values[0]=9;\
+         let iterator=Array.prototype.values.call(values);buffer.resize(2);\
+         let threw=false;try{iterator.next();}catch(error){threw=error instanceof TypeError;}\
+         buffer.resize(4);let recovered=iterator.next();\
+         let tracking=new Uint8Array(buffer);let keys=Array.prototype.keys.call(tracking);\
+         let first=keys.next();buffer.resize(6);\
+         let rest=[keys.next().value,keys.next().value,keys.next().value,\
+                   keys.next().value,keys.next().value,keys.next().done].join(',');\
+         return threw+'|'+recovered.value+'|'+recovered.done+'|'\
+           +first.value+'|'+rest;",
+    );
+
+    let value = context
+        .call(&run, &[], ExecutionLimits::default())
+        .expect("typed-array Array iterator witness");
+    assert_eq!(string_value(&value), "true|9|false|0|1,2,3,4,5,true");
 }
 
 #[test]

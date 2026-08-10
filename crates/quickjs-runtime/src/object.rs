@@ -379,7 +379,7 @@ pub(crate) enum ArrayIteratorKind {
 pub(crate) struct ArrayIterator {
     iterated: Option<StoredValue>,
     kind: ArrayIteratorKind,
-    next: u32,
+    next: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -939,7 +939,7 @@ impl ArrayIterator {
         self.kind
     }
 
-    pub(crate) const fn next(&self) -> u32 {
+    pub(crate) const fn next(&self) -> u64 {
         self.next
     }
 

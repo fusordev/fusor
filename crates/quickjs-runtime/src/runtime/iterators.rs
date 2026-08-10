@@ -63,7 +63,7 @@ impl PreparedIteratorResultPlan {
 pub(crate) struct ArrayIteratorSnapshot {
     pub(crate) iterated: Option<StoredValue>,
     pub(crate) kind: ArrayIteratorKind,
-    pub(crate) next: u32,
+    pub(crate) next: u64,
 }
 
 pub(crate) struct RegExpStringIteratorSnapshot {

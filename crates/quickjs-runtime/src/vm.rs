@@ -1699,7 +1699,7 @@ struct ArrayIteratorNextContinuation {
     iterator: ObjectId,
     iterated: StoredValue,
     kind: crate::object::ArrayIteratorKind,
-    index: u32,
+    index: u64,
     realm: RealmId,
     stage: ArrayIteratorNextStage,
     prepared_result: Option<PreparedIteratorResultPlan>,

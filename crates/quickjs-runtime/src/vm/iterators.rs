@@ -6289,6 +6289,19 @@ pub(super) fn begin_array_iterator_next(
         prepared_result: None,
         origin,
     };
+    if let StoredValue::Object(object) = state.iterated
+        && runtime.typed_array_state(object)?.is_some()
+    {
+        let (_, length) =
+            typed_array_require_in_bounds(runtime, object, state.realm, &state.origin)?;
+        return finish_array_iterator_live_length(
+            runtime,
+            state,
+            usize_to_u64(length),
+            return_to,
+            execution_budget,
+        );
+    }
     let key = runtime.predefined_property_key(PredefinedAtom::Length);
     charge_iterator_property_lookup(runtime, &state.iterated, execution_budget)?;
     let dispatch = begin_value_get(
@@ -6360,19 +6373,29 @@ fn begin_array_iterator_length_conversion(
     )
 }
 
-#[allow(
-    clippy::too_many_lines,
-    reason = "Array iterator index advancement, prepared-result admission, and Proxy-aware element Get remain one failure-atomic step"
-)]
 pub(super) fn finish_array_iterator_length(
     runtime: &mut Runtime,
-    mut state: ArrayIteratorNextContinuation,
+    state: ArrayIteratorNextContinuation,
     value: StoredValue,
     return_to: Option<CallReturn>,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     let number = operator_to_number(value, state.realm, &state.origin)?;
-    let length = number_to_uint32(number);
+    let length = number_to_length(number);
+    finish_array_iterator_live_length(runtime, state, length, return_to, execution_budget)
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "Array iterator index advancement, prepared-result admission, and Proxy-aware element Get remain one failure-atomic step"
+)]
+fn finish_array_iterator_live_length(
+    runtime: &mut Runtime,
+    mut state: ArrayIteratorNextContinuation,
+    length: u64,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
     let live = runtime.array_iterator_snapshot(state.iterator)?;
     state.iterated = live.iterated.unwrap_or(StoredValue::Undefined);
     state.kind = live.kind;
@@ -6386,11 +6409,12 @@ pub(super) fn finish_array_iterator_length(
     }
 
     let index = state.index;
+    let index_number = array_iterator_index_number(index);
     state.prepared_result = Some(
         runtime.prepare_iterator_result_allocation(
             state.realm,
             matches!(state.kind, crate::object::ArrayIteratorKind::KeyAndValue)
-                .then_some(StoredValue::Number(JsNumber::from_u32(index))),
+                .then_some(StoredValue::Number(index_number)),
         )?,
     );
     if matches!(state.kind, crate::object::ArrayIteratorKind::Key) {
@@ -6400,23 +6424,13 @@ pub(super) fn finish_array_iterator_length(
             .expect("Array iterator result preparation was just installed");
         let result = runtime.commit_prepared_iterator_result(
             prepared,
-            StoredValue::Number(JsNumber::from_u32(index)),
+            StoredValue::Number(index_number),
             false,
         )?;
         runtime.advance_array_iterator(state.iterator)?;
         return Ok(NativeDispatch::Immediate(StoredValue::Object(result)));
     }
-    let Some(index) = ArrayIndex::new(index) else {
-        let prepared = state
-            .prepared_result
-            .take()
-            .expect("Array iterator result preparation was just installed");
-        let result =
-            runtime.commit_prepared_iterator_result(prepared, StoredValue::Undefined, true)?;
-        runtime.finish_array_iterator(state.iterator)?;
-        return Ok(NativeDispatch::Immediate(StoredValue::Object(result)));
-    };
-    let key = PropertyKey::from_index(index);
+    let key = array_iterator_element_key(runtime, index)?;
     charge_iterator_property_lookup(runtime, &state.iterated, execution_budget)?;
     state.stage = ArrayIteratorNextStage::AwaitValue;
     state
@@ -6474,6 +6488,27 @@ pub(super) fn finish_array_iterator_length(
         }
         .into()),
     }
+}
+
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "Array iterator indices are bounded by ToLength below 2^53, so each integer is exactly representable as binary64"
+)]
+fn array_iterator_index_number(index: u64) -> JsNumber {
+    JsNumber::from_f64(index as f64)
+}
+
+fn array_iterator_element_key(
+    runtime: &mut Runtime,
+    index: u64,
+) -> Result<PropertyKey, NativeFailure> {
+    if let Ok(index) = u32::try_from(index)
+        && let Some(index) = ArrayIndex::new(index)
+    {
+        return Ok(PropertyKey::from_index(index));
+    }
+    let name = array_iterator_index_number(index).to_javascript_string()?;
+    Ok(runtime.property_key_from_string(&name)?)
 }
 
 #[allow(
