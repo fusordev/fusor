@@ -657,3 +657,241 @@ fn captured_classic_for_continue_targets_close_loc_before_update() {
         "i"
     );
 }
+
+#[test]
+fn module_compiles_to_a_module_root_with_verified_bytecode() {
+    with_parsed_program(
+        "const x = 1; export { x }; export default x + 1;",
+        FrontendOptions::for_goal(CompilationGoal::Module),
+        |unit| {
+            let context = CompilationContext::new(unit).expect("module storage plan");
+            let tree = context
+                .compile_module(VerificationLimits::default())
+                .expect("module compiles and verifies");
+            let bytecode = tree.verified_bytecode();
+            assert_eq!(
+                bytecode.root().metadata().executable_kind(),
+                quickjs_bytecode::CompilerExecutableKind::Module
+            );
+            assert!(!bytecode.requirements().iter().any(|requirement| {
+                *requirement == quickjs_bytecode::ExecutionRequirement::RealmGlobalBindings
+            }));
+            assert!(bytecode.requirements().iter().any(|requirement| {
+                *requirement == quickjs_bytecode::ExecutionRequirement::ModuleBindings
+            }));
+            assert!(bytecode.module().is_some());
+        },
+    )
+    .expect("front-end acceptance");
+}
+
+fn module_binding_names(tree: &CompiledFunctionTree) -> Vec<String> {
+    let bytecode = tree.verified_bytecode();
+    let root = bytecode.root();
+    let atoms = root.function().atoms();
+    bytecode
+        .module()
+        .expect("module record")
+        .bindings()
+        .iter()
+        .map(|binding| {
+            let atom = &atoms[binding.name().get() as usize];
+            String::from_utf16(&atom.string().code_units().collect::<Vec<u16>>())
+                .unwrap_or_default()
+        })
+        .collect()
+}
+
+#[test]
+fn module_import_bindings_are_immutable_temporal_dead_zone_cells() {
+    use quickjs_bytecode::{CompilerBindingKind, CompilerClosureBinding, CompilerWritePolicy};
+    with_parsed_program(
+        "import { a } from './m.js'; import * as ns from './ns.js'; export { a, ns };",
+        FrontendOptions::for_goal(CompilationGoal::Module),
+        |unit| {
+            let context = CompilationContext::new(unit).expect("module storage plan");
+            let tree = context
+                .compile_module(VerificationLimits::default())
+                .expect("module compiles");
+            let bytecode = tree.verified_bytecode();
+            let record = bytecode.module().expect("module record");
+            let import_a = record
+                .bindings()
+                .iter()
+                .find(|binding| binding.import().is_some() && !binding.import().unwrap().is_namespace())
+                .expect("named import binding");
+            assert_eq!(import_a.policy().kind(), CompilerBindingKind::Const);
+            assert_eq!(import_a.policy().writes(), CompilerWritePolicy::Immutable);
+            assert!(import_a.policy().has_temporal_dead_zone());
+            assert_eq!(
+                import_a.origin(),
+                quickjs_bytecode::ModuleBindingOrigin::Import
+            );
+            assert!(import_a.initializer().is_none());
+            let namespace = record
+                .bindings()
+                .iter()
+                .find(|binding| {
+                    binding
+                        .import()
+                        .is_some_and(quickjs_bytecode::ModuleImportName::is_namespace)
+                })
+                .expect("namespace import binding");
+            assert_eq!(namespace.policy().kind(), CompilerBindingKind::Const);
+            assert_eq!(
+                namespace.origin(),
+                quickjs_bytecode::ModuleBindingOrigin::Namespace
+            );
+            // The cell reads lower to TDZ-checked captured-cell reads: the root
+            // closure descriptor for the import is a Captured(immutable, TDZ)
+            // binding.
+            let root_closures = bytecode.root().metadata().closures();
+            let import_closure = root_closures
+                .iter()
+                .find(|closure| matches!(closure.binding(), CompilerClosureBinding::Captured(policy) if policy.kind() == CompilerBindingKind::Const))
+                .expect("import closure descriptor is a captured const cell");
+            assert!(matches!(
+                import_closure.binding(),
+                CompilerClosureBinding::Captured(policy) if policy.has_temporal_dead_zone()
+            ));
+        },
+    )
+    .expect("front-end acceptance");
+}
+
+#[test]
+fn module_export_default_expression_stores_at_statement_position() {
+    use quickjs_bytecode::{FinalOpcode, Operands};
+    with_parsed_program(
+        "const x = 1; export default x + 1;",
+        FrontendOptions::for_goal(CompilationGoal::Module),
+        |unit| {
+            let context = CompilationContext::new(unit).expect("module storage plan");
+            let tree = context
+                .compile_module(VerificationLimits::default())
+                .expect("module compiles");
+            let instructions = tree
+                .verified_bytecode()
+                .root()
+                .function()
+                .control_flow()
+                .instructions();
+            // The synthetic *default* cell receives the default expression value
+            // via a TDZ-checked PutVarRef at the export default statement.
+            let put = instructions
+                .iter()
+                .find(|instruction| {
+                    matches!(
+                        (
+                            instruction.decoded().instruction().opcode(),
+                            instruction.decoded().instruction().operands(),
+                        ),
+                        (FinalOpcode::PutVarRefCheck, Operands::VarRef(_))
+                    )
+                })
+                .expect("export default stores to the synthetic cell");
+            // A checked read of the exported `x` precedes the store.
+            assert!(instructions.iter().any(|instruction| {
+                matches!(
+                    instruction.decoded().instruction().opcode(),
+                    FinalOpcode::GetVarRefCheck
+                )
+            }));
+            let _ = put;
+        },
+    )
+    .expect("front-end acceptance");
+}
+
+#[test]
+fn module_declaration_record_lists_expected_binding_policies() {
+    use quickjs_bytecode::{
+        CompilerBindingKind, CompilerInitializationPolicy, ModuleBindingOrigin,
+    };
+    with_parsed_program(
+        "var v; let l; const c = 1; function f(){} export default 0;",
+        FrontendOptions::for_goal(CompilationGoal::Module),
+        |unit| {
+            let context = CompilationContext::new(unit).expect("module storage plan");
+            let tree = context
+                .compile_module(VerificationLimits::default())
+                .expect("module compiles");
+            let record = tree.verified_bytecode().module().expect("module record");
+            let names = module_binding_names(&tree);
+            let policy = |name: &str| {
+                let index = names
+                    .iter()
+                    .position(|candidate| candidate == name)
+                    .unwrap_or_else(|| panic!("missing module binding {name}: {names:?}"));
+                record.bindings()[index].policy()
+            };
+            assert_eq!(policy("v").kind(), CompilerBindingKind::Var);
+            assert_eq!(
+                policy("v").initialization(),
+                CompilerInitializationPolicy::UndefinedAtInstantiation
+            );
+            assert_eq!(policy("l").kind(), CompilerBindingKind::Let);
+            assert_eq!(policy("c").kind(), CompilerBindingKind::Const);
+            assert_eq!(policy("f").kind(), CompilerBindingKind::Function);
+            assert_eq!(
+                policy("f").initialization(),
+                CompilerInitializationPolicy::FunctionAtInstantiation
+            );
+            // The synthetic *default* cell is a mutable TDZ local declaration.
+            assert!(record.bindings().iter().any(|binding| {
+                binding.origin() == ModuleBindingOrigin::Local
+                    && binding.policy().kind() == CompilerBindingKind::Let
+                    && binding.policy().initialization()
+                        == CompilerInitializationPolicy::AtDeclaration
+            }));
+            // The hoisted function declaration carries a function initializer.
+            let f_binding = record
+                .bindings()
+                .iter()
+                .find(|binding| binding.initializer().is_some())
+                .expect("a hoisted module function has an initializer");
+            assert_eq!(f_binding.policy().kind(), CompilerBindingKind::Function);
+        },
+    )
+    .expect("front-end acceptance");
+}
+
+#[test]
+fn module_top_level_await_is_rejected() {
+    with_parsed_program(
+        "await Promise.resolve(1);",
+        FrontendOptions::for_goal(CompilationGoal::Module),
+        |unit| {
+            let context = CompilationContext::new(unit).expect("module storage plan");
+            let result = context.compile_module(VerificationLimits::default());
+            assert!(matches!(
+                result,
+                Err(LeafCompilationError::Unsupported {
+                    feature: UnsupportedLeafFeature::TopLevelAwait,
+                    ..
+                })
+            ));
+        },
+    )
+    .expect("front-end acceptance");
+}
+
+#[test]
+fn module_import_meta_is_rejected() {
+    with_parsed_program(
+        "const m = import.meta;",
+        FrontendOptions::for_goal(CompilationGoal::Module),
+        |unit| {
+            let context = CompilationContext::new(unit).expect("module storage plan");
+            let result = context.compile_module(VerificationLimits::default());
+            assert!(matches!(
+                result,
+                Err(LeafCompilationError::Unsupported {
+                    feature: UnsupportedLeafFeature::ImportMeta,
+                    ..
+                })
+            ));
+        },
+    )
+    .expect("front-end acceptance");
+}

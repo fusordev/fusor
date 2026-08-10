@@ -5123,7 +5123,8 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
     ) -> Result<(), LeafCompilationError> {
         let (binding, frame_slot) = match reference {
             LoweredReference::Frame { binding, slot, .. } => (binding, slot),
-            LoweredReference::RealmGlobal { slot, binding, .. } => {
+            LoweredReference::RealmGlobal { slot, binding, .. }
+            | LoweredReference::Module { slot, binding, .. } => {
                 return Self::plan_realm_global_assignment(
                     assignment,
                     identifier,
@@ -6374,6 +6375,9 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             LoweredReference::RealmGlobal { global, .. } => {
                 CompiledMetadataAtomKey::RealmGlobal(global)
             }
+            LoweredReference::Module { module_id, .. } => {
+                CompiledMetadataAtomKey::ModuleBinding(module_id)
+            }
         };
         Ok(Some(PlannedInstruction::new(
             FinalOpcode::SetName,
@@ -6588,7 +6592,8 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
     ) -> Result<(), LeafCompilationError> {
         let (binding, frame_slot) = match reference {
             LoweredReference::Frame { binding, slot, .. } => (binding, slot),
-            LoweredReference::RealmGlobal { slot, binding, .. } => {
+            LoweredReference::RealmGlobal { slot, binding, .. }
+            | LoweredReference::Module { slot, binding, .. } => {
                 work.push(ExpressionWork::Emit(plan_external_put(
                     binding,
                     slot,

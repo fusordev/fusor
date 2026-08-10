@@ -854,6 +854,7 @@ pub(super) fn create_frame(
             CompilerExecutableKind::IndirectEvalScript
             | CompilerExecutableKind::DirectEvalScript
             | CompilerExecutableKind::DynamicFunctionScript
+            | CompilerExecutableKind::Module
             | CompilerExecutableKind::OrdinaryFunction
             | CompilerExecutableKind::OrdinaryArrow
             | CompilerExecutableKind::AsyncArrow

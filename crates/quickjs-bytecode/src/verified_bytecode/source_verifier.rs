@@ -245,7 +245,8 @@ fn verify_closure_metadata(
                         }),
                     CompilerClosureSource::ConstructorRealmGlobal(_)
                     | CompilerClosureSource::DirectEvalBinding { .. }
-                    | CompilerClosureSource::DirectEvalVariable { .. } => None,
+                    | CompilerClosureSource::DirectEvalVariable { .. }
+                    | CompilerClosureSource::Module { .. } => None,
                 };
                 let matches = expected.is_some_and(|expected| {
                     expected.binding == closure.binding

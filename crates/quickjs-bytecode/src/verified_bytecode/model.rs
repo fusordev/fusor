@@ -619,6 +619,12 @@ pub enum CompilerExecutableKind {
     AsyncGeneratorMethod,
     /// The constructor-realm global Script produced for dynamic `Function`.
     DynamicFunctionScript,
+    /// An ECMAScript Module root body.
+    ///
+    /// The module root owns a module environment of cells materialized by the
+    /// runtime linker; its top-level bindings are module-local or imported
+    /// cells and never touch the realm global environment.
+    Module,
 }
 
 /// One complete function metadata record awaiting final verification.
@@ -663,11 +669,259 @@ impl UnverifiedFunctionMetadata {
     }
 }
 
+/// One static module request retained for the runtime linker.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ModuleRequestDescriptor {
+    specifier: AtomPoolIndex,
+    has_assertions: bool,
+}
+
+impl ModuleRequestDescriptor {
+    /// Creates one module request descriptor.
+    #[must_use]
+    pub const fn new(specifier: AtomPoolIndex, has_assertions: bool) -> Self {
+        Self {
+            specifier,
+            has_assertions,
+        }
+    }
+
+    /// Returns the module specifier atom.
+    #[must_use]
+    pub const fn specifier(self) -> AtomPoolIndex {
+        self.specifier
+    }
+
+    /// Returns whether the request carries import attributes.
+    #[must_use]
+    pub const fn has_assertions(self) -> bool {
+        self.has_assertions
+    }
+}
+
+/// The origin category of one module-environment binding.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum ModuleBindingOrigin {
+    /// A module-local declaration cell.
+    Local,
+    /// A named or default live import cell.
+    Import,
+    /// A namespace import cell holding a module namespace object.
+    Namespace,
+}
+
+/// The import-side name carried by a module import binding.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ModuleImportName {
+    request: u32,
+    kind: ModuleImportNameKind,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum ModuleImportNameKind {
+    Named(AtomPoolIndex),
+    Default,
+    Namespace,
+}
+
+impl ModuleImportName {
+    /// Creates a named import binding descriptor.
+    #[must_use]
+    pub const fn named(request: u32, name: AtomPoolIndex) -> Self {
+        Self {
+            request,
+            kind: ModuleImportNameKind::Named(name),
+        }
+    }
+
+    /// Creates a default import binding descriptor.
+    #[must_use]
+    pub const fn default(request: u32) -> Self {
+        Self {
+            request,
+            kind: ModuleImportNameKind::Default,
+        }
+    }
+
+    /// Creates a namespace import binding descriptor.
+    #[must_use]
+    pub const fn namespace(request: u32) -> Self {
+        Self {
+            request,
+            kind: ModuleImportNameKind::Namespace,
+        }
+    }
+
+    /// Returns the static module request index.
+    #[must_use]
+    pub const fn request(&self) -> u32 {
+        self.request
+    }
+
+    /// Returns the named imported export atom, when present.
+    #[must_use]
+    pub const fn named_atom(&self) -> Option<AtomPoolIndex> {
+        match self.kind {
+            ModuleImportNameKind::Named(atom) => Some(atom),
+            _ => None,
+        }
+    }
+
+    /// Returns whether this is a default import.
+    #[must_use]
+    pub const fn is_default(&self) -> bool {
+        matches!(self.kind, ModuleImportNameKind::Default)
+    }
+
+    /// Returns whether this is a namespace import.
+    #[must_use]
+    pub const fn is_namespace(&self) -> bool {
+        matches!(self.kind, ModuleImportNameKind::Namespace)
+    }
+}
+
+/// One module-environment binding descriptor awaiting final verification.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UnverifiedModuleBindingDescriptor {
+    name: AtomPoolIndex,
+    slot: u32,
+    policy: CompilerBindingPolicy,
+    origin: ModuleBindingOrigin,
+    initializer: Option<u32>,
+    import: Option<ModuleImportName>,
+}
+
+impl UnverifiedModuleBindingDescriptor {
+    /// Creates one unverified module binding descriptor.
+    #[must_use]
+    pub const fn new(
+        name: AtomPoolIndex,
+        slot: u32,
+        policy: CompilerBindingPolicy,
+        origin: ModuleBindingOrigin,
+    ) -> Self {
+        Self {
+            name,
+            slot,
+            policy,
+            origin,
+            initializer: None,
+            import: None,
+        }
+    }
+
+    /// Attaches the function-template constant that initializes a hoisted
+    /// module-level function declaration at instantiation.
+    #[must_use]
+    pub const fn with_initializer(mut self, constant: u32) -> Self {
+        self.initializer = Some(constant);
+        self
+    }
+
+    /// Attaches the import-side name for an imported binding.
+    #[must_use]
+    pub const fn with_import(mut self, import: ModuleImportName) -> Self {
+        self.import = Some(import);
+        self
+    }
+}
+
+/// Complete module instantiation metadata awaiting final verification.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UnverifiedModuleDeclarationRecord {
+    bindings: Arc<[UnverifiedModuleBindingDescriptor]>,
+    requests: Arc<[ModuleRequestDescriptor]>,
+}
+
+impl UnverifiedModuleDeclarationRecord {
+    /// Creates unverified module instantiation metadata.
+    #[must_use]
+    pub const fn new(
+        bindings: Arc<[UnverifiedModuleBindingDescriptor]>,
+        requests: Arc<[ModuleRequestDescriptor]>,
+    ) -> Self {
+        Self { bindings, requests }
+    }
+}
+
+/// One verified module-environment binding descriptor.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ModuleBindingDescriptor {
+    name: AtomPoolIndex,
+    slot: u32,
+    policy: CompilerBindingPolicy,
+    origin: ModuleBindingOrigin,
+    initializer: Option<u32>,
+    import: Option<ModuleImportName>,
+}
+
+impl ModuleBindingDescriptor {
+    /// Returns the binding-name atom in the module root's atom pool.
+    #[must_use]
+    pub const fn name(&self) -> AtomPoolIndex {
+        self.name
+    }
+
+    /// Returns the closure-domain slot index in the module root.
+    #[must_use]
+    pub const fn slot(&self) -> u32 {
+        self.slot
+    }
+
+    /// Returns the verified declaration policy.
+    #[must_use]
+    pub const fn policy(&self) -> CompilerBindingPolicy {
+        self.policy
+    }
+
+    /// Returns the module binding origin category.
+    #[must_use]
+    pub const fn origin(&self) -> ModuleBindingOrigin {
+        self.origin
+    }
+
+    /// Returns the function-template constant for a hoisted function, when
+    /// present.
+    #[must_use]
+    pub const fn initializer(&self) -> Option<u32> {
+        self.initializer
+    }
+
+    /// Returns the import-side name for an imported binding.
+    #[must_use]
+    pub const fn import(&self) -> Option<&ModuleImportName> {
+        self.import.as_ref()
+    }
+}
+
+/// Verified module instantiation metadata retained for the runtime linker.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ModuleDeclarationRecord {
+    bindings: Arc<[ModuleBindingDescriptor]>,
+    requests: Arc<[ModuleRequestDescriptor]>,
+}
+
+impl ModuleDeclarationRecord {
+    /// Returns the verified module-environment binding descriptors in
+    /// declaration order.
+    #[must_use]
+    pub fn bindings(&self) -> &[ModuleBindingDescriptor] {
+        &self.bindings
+    }
+
+    /// Returns the static module requests in source order.
+    #[must_use]
+    pub fn requests(&self) -> &[ModuleRequestDescriptor] {
+        &self.requests
+    }
+}
+
 /// A staged compiler graph paired with complete parallel metadata.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UnverifiedCompilerBytecodeGraph {
     graph: Arc<VerifiedCompilerFunctionGraph>,
     metadata: Arc<[UnverifiedFunctionMetadata]>,
+    module: Option<Arc<UnverifiedModuleDeclarationRecord>>,
 }
 
 impl UnverifiedCompilerBytecodeGraph {
@@ -677,7 +931,21 @@ impl UnverifiedCompilerBytecodeGraph {
         graph: Arc<VerifiedCompilerFunctionGraph>,
         metadata: Arc<[UnverifiedFunctionMetadata]>,
     ) -> Self {
-        Self { graph, metadata }
+        Self {
+            graph,
+            metadata,
+            module: None,
+        }
+    }
+
+    /// Attaches the module instantiation metadata required by a Module root.
+    #[must_use]
+    pub fn with_module(
+        mut self,
+        module: Arc<UnverifiedModuleDeclarationRecord>,
+    ) -> Self {
+        self.module = Some(module);
+        self
     }
 }
 
@@ -829,6 +1097,8 @@ pub enum ExecutionRequirement {
     LexicalBindings,
     /// Constructor-realm unresolved lookup or indirect-eval `var` bindings.
     RealmGlobalBindings,
+    /// Module-environment cells materialized and linked by the module linker.
+    ModuleBindings,
     /// `in` or `instanceof` object semantics.
     ObjectOperators,
     /// Full dynamic coercion and mixed-type operator semantics.
@@ -837,7 +1107,7 @@ pub enum ExecutionRequirement {
 
 /// Number of conservative runtime implementation families selectable by the
 /// whole-graph compiler authority.
-pub const EXECUTION_REQUIREMENT_COUNT: usize = 15;
+pub const EXECUTION_REQUIREMENT_COUNT: usize = 16;
 
 const fn execution_requirement_ordinal(requirement: ExecutionRequirement) -> usize {
     match requirement {
@@ -854,8 +1124,9 @@ const fn execution_requirement_ordinal(requirement: ExecutionRequirement) -> usi
         ExecutionRequirement::AbruptCompletions => 10,
         ExecutionRequirement::LexicalBindings => 11,
         ExecutionRequirement::RealmGlobalBindings => 12,
-        ExecutionRequirement::ObjectOperators => 13,
-        ExecutionRequirement::DynamicOperators => 14,
+        ExecutionRequirement::ModuleBindings => 13,
+        ExecutionRequirement::ObjectOperators => 14,
+        ExecutionRequirement::DynamicOperators => 15,
     }
 }
 
@@ -908,6 +1179,7 @@ pub struct VerifiedBytecode {
     lexical_derived_this: Arc<[bool]>,
     requirements: Arc<[ExecutionRequirement]>,
     usage: BytecodeGraphUsage,
+    module: Option<Arc<ModuleDeclarationRecord>>,
 }
 
 impl VerifiedBytecode {
@@ -978,6 +1250,13 @@ impl VerifiedBytecode {
     #[must_use]
     pub const fn usage(&self) -> BytecodeGraphUsage {
         self.usage
+    }
+
+    /// Returns the verified module instantiation metadata, when the root is a
+    /// Module executable.
+    #[must_use]
+    pub fn module(&self) -> Option<&ModuleDeclarationRecord> {
+        self.module.as_deref()
     }
 }
 

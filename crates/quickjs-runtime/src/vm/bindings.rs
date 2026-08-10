@@ -60,7 +60,8 @@ pub(super) fn materialize_direct_eval_environment(
             } => environment_size as usize,
             CompilerClosureSource::ParentVariableReference(_)
             | CompilerClosureSource::ParentClosure(_)
-            | CompilerClosureSource::ConstructorRealmGlobal(_) => continue,
+            | CompilerClosureSource::ConstructorRealmGlobal(_)
+            | CompilerClosureSource::Module { .. } => continue,
         };
         if size < caller_bindings.len()
             || environment_size
@@ -955,7 +956,8 @@ fn captured_binding_eval_shadow(
         }
         CompilerClosureSource::ConstructorRealmGlobal(_)
         | CompilerClosureSource::DirectEvalBinding { .. }
-        | CompilerClosureSource::DirectEvalVariable { .. } => Ok(None),
+        | CompilerClosureSource::DirectEvalVariable { .. }
+        | CompilerClosureSource::Module { .. } => Ok(None),
     }
 }
 
@@ -1242,7 +1244,8 @@ pub(super) fn create_closure(
             }
             CompilerClosureSource::ConstructorRealmGlobal(_)
             | CompilerClosureSource::DirectEvalBinding { .. }
-            | CompilerClosureSource::DirectEvalVariable { .. } => {
+            | CompilerClosureSource::DirectEvalVariable { .. }
+            | CompilerClosureSource::Module { .. } => {
                 return Err(EngineFault::InvalidClosureEnvironment { function: child }.into());
             }
         }

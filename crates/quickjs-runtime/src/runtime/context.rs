@@ -729,6 +729,10 @@ impl Context<'_> {
                         message: "root function requires an external parent environment",
                     });
                 }
+                quickjs_bytecode::CompilerClosureSource::Module { .. } => {
+                    // Module cells are materialized by the runtime linker; root
+                    // admission of a Module authority is not yet supported.
+                }
             }
         }
 

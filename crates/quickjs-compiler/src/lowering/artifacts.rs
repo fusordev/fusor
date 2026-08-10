@@ -233,6 +233,103 @@ impl CompiledRealmGlobal {
     }
 }
 
+/// Dense compiler identity of one module-environment binding.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[repr(transparent)]
+pub struct ModuleBindingId(pub(super) u32);
+
+impl ModuleBindingId {
+    /// Returns the dense zero-based module-binding index.
+    #[must_use]
+    pub const fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+/// Source of one module-environment closure-domain slot.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum CompiledModuleBindingSource {
+    /// The Module root owns this cell in its module environment.
+    Module {
+        /// Zero-based cell index in the module environment.
+        index: u32,
+    },
+    /// A child forwards the same module cell from its parent.
+    ParentClosure(u16),
+}
+
+/// One module-environment binding descriptor for a compiled function.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompiledModuleBinding {
+    pub(super) id: ModuleBindingId,
+    pub(super) name: Arc<str>,
+    pub(super) atom: AtomPoolIndex,
+    pub(super) slot: u16,
+    pub(super) source: CompiledModuleBindingSource,
+    pub(super) policy: CompilerBindingPolicy,
+    pub(super) origin: quickjs_bytecode::ModuleBindingOrigin,
+    pub(super) import: Option<quickjs_bytecode::ModuleImportName>,
+    pub(super) function_initializer: Option<u32>,
+}
+
+#[allow(dead_code)]
+impl CompiledModuleBinding {
+    /// Returns the compilation-unit module-binding identity.
+    #[must_use]
+    pub const fn id(&self) -> ModuleBindingId {
+        self.id
+    }
+
+    /// Returns the exact binding identifier text.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Returns the function-local atom naming this binding.
+    #[must_use]
+    pub const fn atom(&self) -> AtomPoolIndex {
+        self.atom
+    }
+
+    /// Returns the dense function-local closure-domain slot.
+    #[must_use]
+    pub const fn slot(&self) -> u16 {
+        self.slot
+    }
+
+    /// Returns where this function originates or forwards the module cell.
+    #[must_use]
+    pub const fn source(&self) -> CompiledModuleBindingSource {
+        self.source
+    }
+
+    /// Returns the verified declaration policy.
+    #[must_use]
+    pub const fn policy(&self) -> CompilerBindingPolicy {
+        self.policy
+    }
+
+    /// Returns the module binding origin category.
+    #[must_use]
+    pub const fn origin(&self) -> quickjs_bytecode::ModuleBindingOrigin {
+        self.origin
+    }
+
+    /// Returns the import-side name for an imported binding.
+    #[must_use]
+    pub fn import(&self) -> Option<&quickjs_bytecode::ModuleImportName> {
+        self.import.as_ref()
+    }
+
+    /// Returns the root-only function-template initializer for a hoisted
+    /// module-level function declaration.
+    #[must_use]
+    pub const fn function_initializer(&self) -> Option<u32> {
+        self.function_initializer
+    }
+}
+
 /// One dense imported-closure descriptor for a compiled function.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CompiledClosureVariable {
@@ -285,6 +382,7 @@ pub struct CompiledFunction {
     pub(super) constants: Arc<[CompiledConstant]>,
     pub(super) closure_variables: Arc<[CompiledClosureVariable]>,
     pub(super) realm_globals: Arc<[CompiledRealmGlobal]>,
+    pub(super) module_bindings: Arc<[CompiledModuleBinding]>,
     pub(super) source_instructions: Arc<[SourceInstruction]>,
     pub(super) control_flow: Arc<VerifiedControlFlow>,
     pub(super) eval_reference_call_instructions: Arc<[u32]>,

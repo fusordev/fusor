@@ -112,7 +112,8 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 });
             }
             if executable.id().index() == 0
-                && crate::is_supported_script_compilation_goal(self.unit.goal())
+                && (crate::is_supported_script_compilation_goal(self.unit.goal())
+                    || crate::is_supported_module_goal(self.unit.goal()))
             {
                 owner.push(CompiledMetadataAtomCandidate {
                     key: CompiledMetadataAtomKey::ScriptCompletion,
@@ -195,6 +196,43 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                     value: compiler_identifier_string(&binding.name, binding.first_span)?,
                     span: binding.first_span,
                 });
+            }
+            for &module_id in tree_layout.module_bindings.imports_for(executable.id())? {
+                let descriptor = tree_layout.module_bindings.binding(module_id).ok_or(
+                    LeafCompilationError::SemanticInvariant {
+                        invariant: "module binding import has a descriptor",
+                        span: Some(executable.span()),
+                    },
+                )?;
+                owner.push(CompiledMetadataAtomCandidate {
+                    key: CompiledMetadataAtomKey::ModuleBinding(module_id),
+                    value: compiler_identifier_string(&descriptor.name, descriptor.first_span)?,
+                    span: descriptor.first_span,
+                });
+            }
+            if executable.id().index() == 0 && crate::is_supported_module_goal(self.unit.goal()) {
+                for (request_index, request) in
+                    self.unit.module_syntax().requests().iter().enumerate()
+                {
+                    let specifier =
+                        String::from_utf16(request.specifier().code_units()).map_err(|_| {
+                            LeafCompilationError::SemanticInvariant {
+                                invariant: "module specifier is valid UTF-16",
+                                span: Some(request.statement_span()),
+                            }
+                        })?;
+                    owner.push(CompiledMetadataAtomCandidate {
+                        key: CompiledMetadataAtomKey::ModuleRequest(
+                            u32::try_from(request_index).map_err(|_| {
+                                LeafCompilationError::CapacityExceeded {
+                                    domain: "module request index",
+                                }
+                            })?,
+                        ),
+                        value: compiler_identifier_string(&specifier, request.statement_span())?,
+                        span: request.statement_span(),
+                    });
+                }
             }
         }
         Ok(())

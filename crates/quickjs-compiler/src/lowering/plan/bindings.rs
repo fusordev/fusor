@@ -4,7 +4,7 @@ use super::super::{
     CompilerClosureBinding, ComputedMemberExpression, DestructuringBindingInitialization,
     ExecutableId, Expression, FinalOpcode, ForStatementLeft, FrameLayout, FrameSlot,
     FunctionTreeLayout, GetSpan, IdentifierReference, LeafCompilationError, LocalSlot,
-    NativeReferenceId, NodeId, Operands, PlannedControlFlow, PlannedInstruction,
+    ModuleBindingId, NativeReferenceId, NodeId, Operands, PlannedControlFlow, PlannedInstruction,
     PrivateFieldExpression, RealmGlobalId, ReferenceAccess, ReferenceId, ScopeId, Span,
     StaticMemberExpression, StoragePlacement, SymbolId, UnresolvedGlobalId, UnsupportedLeafFeature,
     VariableDeclaration, VariableDeclarationKind, VariableDeclarator, WritePolicy, binary_opcode,
@@ -21,6 +21,12 @@ pub(in crate::lowering) enum LoweredReference {
     },
     RealmGlobal {
         global: RealmGlobalId,
+        slot: u16,
+        binding: CompilerClosureBinding,
+        access: ReferenceAccess,
+    },
+    Module {
+        module_id: ModuleBindingId,
         slot: u16,
         binding: CompilerClosureBinding,
         access: ReferenceAccess,
@@ -181,7 +187,9 @@ pub(in crate::lowering) fn plan_external_put(
 impl LoweredReference {
     pub(in crate::lowering) const fn access(self) -> ReferenceAccess {
         match self {
-            Self::Frame { access, .. } | Self::RealmGlobal { access, .. } => access,
+            Self::Frame { access, .. }
+            | Self::RealmGlobal { access, .. }
+            | Self::Module { access, .. } => access,
         }
     }
 }
@@ -286,7 +294,8 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
             LoweredReference::Frame { binding, slot, .. } => {
                 self.plan_read_slot(binding, slot, identifier.span)?
             }
-            LoweredReference::RealmGlobal { slot, binding, .. } => {
+            LoweredReference::RealmGlobal { slot, binding, .. }
+            | LoweredReference::Module { slot, binding, .. } => {
                 plan_external_read(binding, slot, unresolved_is_undefined, identifier.span)
             }
         };
@@ -332,7 +341,8 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
             LoweredReference::Frame { binding, slot, .. } => {
                 self.plan_read_slot(binding, slot, identifier.span)?
             }
-            LoweredReference::RealmGlobal { slot, binding, .. } => {
+            LoweredReference::RealmGlobal { slot, binding, .. }
+            | LoweredReference::Module { slot, binding, .. } => {
                 plan_external_read(binding, slot, false, identifier.span)
             }
         };
@@ -389,7 +399,8 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
                 }
                 Ok(())
             }
-            LoweredReference::RealmGlobal { slot, binding, .. } => {
+            LoweredReference::RealmGlobal { slot, binding, .. }
+            | LoweredReference::Module { slot, binding, .. } => {
                 flow.emit(plan_external_put(binding, slot, identifier.span))
             }
         };
@@ -682,7 +693,8 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
             LoweredReference::Frame { binding, slot, .. } => {
                 self.push_slot_write(binding, slot, preserve_value, span, work)
             }
-            LoweredReference::RealmGlobal { slot, binding, .. } => {
+            LoweredReference::RealmGlobal { slot, binding, .. }
+            | LoweredReference::Module { slot, binding, .. } => {
                 work.push(ExpressionWork::Emit(plan_external_put(binding, slot, span)));
                 if preserve_value {
                     work.push(ExpressionWork::Emit(PlannedInstruction::new(
@@ -1771,6 +1783,83 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 return Ok(());
             }
 
+            if matches!(
+                storage.placement(),
+                StoragePlacement::ModuleLocal | StoragePlacement::ModuleImport
+            ) {
+                // Module-local declarations store into the module environment
+                // through the captured-cell machinery (PutVarRef family). Import
+                // placements have no source initializer and are linked by the
+                // runtime, so they never reach this declaration path.
+                let module_id = tree_layout.module_bindings.for_binding(binding).ok_or(
+                    LeafCompilationError::SemanticInvariant {
+                        invariant: "module declaration has a module binding descriptor",
+                        span: Some(identifier.span),
+                    },
+                )?;
+                let descriptor = tree_layout.module_bindings.binding(module_id).ok_or(
+                    LeafCompilationError::SemanticInvariant {
+                        invariant: "module declaration descriptor exists",
+                        span: Some(identifier.span),
+                    },
+                )?;
+                let realm_global_count = tree_layout
+                    .realm_globals
+                    .imports_for(layout.executable)
+                    .map_err(|_| LeafCompilationError::SemanticInvariant {
+                        invariant: "module declaration executable has realm-global count",
+                        span: Some(identifier.span),
+                    })?
+                    .len();
+                let slot = tree_layout.module_bindings.closure_slot(
+                    &self.planned.plan,
+                    layout.executable,
+                    module_id,
+                    realm_global_count,
+                )?;
+                let binding_kind = CompilerClosureBinding::Captured(descriptor.policy);
+                match &declarator.init {
+                    Some(initializer) => {
+                        let set_name = self.plan_inferred_function_name_for_initializer(
+                            identifier,
+                            initializer,
+                            constants,
+                        )?;
+                        self.plan_expression_with_abrupt_markers(
+                            initializer,
+                            layout,
+                            tree_layout,
+                            constants,
+                            abrupt_markers,
+                            flow,
+                        )?;
+                        if let Some(set_name) = set_name {
+                            flow.emit(set_name)?;
+                        }
+                        flow.emit(plan_external_put(binding_kind, slot, identifier.span))?;
+                    }
+                    None if declaration_kind == VariableDeclarationKind::Let => {
+                        flow.emit(PlannedInstruction::new(
+                            FinalOpcode::Undefined,
+                            Operands::None,
+                            identifier.span,
+                        ))?;
+                        flow.emit(plan_external_put(binding_kind, slot, identifier.span))?;
+                    }
+                    None if declaration_kind == VariableDeclarationKind::Var => {
+                        // `var` is initialized to `undefined` at instantiation;
+                        // no store is emitted at the declaration position.
+                    }
+                    None => {
+                        return unsupported(
+                            UnsupportedLeafFeature::UnsupportedDeclaration,
+                            declarator.span,
+                        );
+                    }
+                }
+                return Ok(());
+            }
+
             let frame_slot = layout
                 .slot(binding)
                 .ok_or(LeafCompilationError::Unsupported {
@@ -2066,9 +2155,14 @@ impl CompilationContext<'_, '_, '_> {
                             layout,
                             tree_layout,
                         ),
-                    StoragePlacement::ModuleLocal | StoragePlacement::ModuleImport => {
-                        unsupported(UnsupportedLeafFeature::UnsupportedBinding, span)
-                    }
+                    StoragePlacement::ModuleLocal | StoragePlacement::ModuleImport => self
+                        .lowered_module_binding_reference(
+                            binding.id(),
+                            reference.access(),
+                            span,
+                            layout,
+                            tree_layout,
+                        ),
                 }
             }
             NativeReferenceId::Unresolved(unresolved_id) => {
@@ -2164,6 +2258,51 @@ impl CompilationContext<'_, '_, '_> {
         })
     }
 
+    fn lowered_module_binding_reference(
+        &self,
+        binding: BindingId,
+        access: ReferenceAccess,
+        span: Span,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
+    ) -> Result<LoweredReference, LeafCompilationError> {
+        if !crate::is_supported_module_goal(self.unit.goal()) {
+            return unsupported(UnsupportedLeafFeature::UnsupportedBinding, span);
+        }
+        let module_id = tree_layout.module_bindings.for_binding(binding).ok_or(
+            LeafCompilationError::SemanticInvariant {
+                invariant: "module reference resolves a declared module binding",
+                span: Some(span),
+            },
+        )?;
+        let descriptor = tree_layout.module_bindings.binding(module_id).ok_or(
+            LeafCompilationError::SemanticInvariant {
+                invariant: "module binding reference has a descriptor",
+                span: Some(span),
+            },
+        )?;
+        let realm_global_count = tree_layout
+            .realm_globals
+            .imports_for(layout.executable)
+            .map_err(|_| LeafCompilationError::SemanticInvariant {
+                invariant: "module reference executable has a realm-global import count",
+                span: Some(span),
+            })?
+            .len();
+        let slot = tree_layout.module_bindings.closure_slot(
+            &self.planned.plan,
+            layout.executable,
+            module_id,
+            realm_global_count,
+        )?;
+        Ok(LoweredReference::Module {
+            module_id,
+            slot,
+            binding: CompilerClosureBinding::Captured(descriptor.policy),
+            access,
+        })
+    }
+
     pub(in crate::lowering) fn validate_lowered_mutation_reference(
         &self,
         reference: LoweredReference,
@@ -2185,7 +2324,7 @@ impl CompilationContext<'_, '_, '_> {
                     return unsupported(UnsupportedLeafFeature::UnsupportedReference, span);
                 }
             }
-            LoweredReference::RealmGlobal { .. } => {}
+            LoweredReference::RealmGlobal { .. } | LoweredReference::Module { .. } => {}
         }
         Ok(())
     }

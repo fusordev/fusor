@@ -568,10 +568,13 @@ fn verify_realm_global_function_initializers(
     closures: &[ClosureVariableDefinition],
     internal_stack: &InternalStackCertificate,
 ) -> Result<usize, BytecodeVerificationError> {
-    if !closures
-        .iter()
-        .any(|definition| definition.function_initializer.is_some())
-    {
+    if !closures.iter().any(|definition| {
+        definition.function_initializer.is_some()
+            && matches!(
+                definition.binding(),
+                CompilerClosureBinding::RealmGlobal(_)
+            )
+    }) {
         return Ok(0);
     }
     if id != root {
@@ -653,6 +656,15 @@ fn verify_realm_global_function_initializers(
         let Some(constant) = definition.function_initializer else {
             continue;
         };
+        // Only realm-global function declarations are verified here; module
+        // function declarations (Captured + Module source) are verified by the
+        // module function initializer check.
+        if !matches!(
+            definition.binding(),
+            CompilerClosureBinding::RealmGlobal(_)
+        ) {
+            continue;
+        }
         if matches[closure] != 1 {
             return Err(BytecodeVerificationError::function(
                 id,
@@ -696,6 +708,85 @@ fn verify_realm_global_function_initializers(
         })?;
     }
     Ok(prefix_index)
+}
+
+fn module_function_initializer_is_valid(
+    function: &VerifiedCompilerFunction,
+    closure: &ClosureVariableDefinition,
+    module_function: bool,
+) -> bool {
+    match (module_function, closure.function_initializer) {
+        (true, Some(constant)) => matches!(
+            function.constants().get(constant as usize),
+            Some(crate::CompilerConstant::Function(_))
+        ),
+        (false, None) => true,
+        (true, None) | (false, Some(_)) => false,
+    }
+}
+
+/// Verifies that every hoisted module-level function declaration is initialized
+/// at instantiation by a `Closure`/`PutVarRef` pair placed at the root entry,
+/// mirroring the realm-global function initializer prefix but for captured
+/// module cells.
+fn verify_module_function_initializers(
+    id: FunctionTemplateId,
+    closure_index: u32,
+    function: &VerifiedCompilerFunction,
+    closure: &ClosureVariableDefinition,
+) -> Result<(), BytecodeVerificationError> {
+    let Some(constant) = closure.function_initializer else {
+        return Ok(());
+    };
+    let instructions = function.control_flow().instructions();
+    let mut matched = 0_u32;
+    let mut first_site: Option<RealmGlobalFunctionInitializerSite> = None;
+    for index in 0..instructions.len().saturating_sub(1) {
+        let closure_instruction = instructions[index].decoded().instruction();
+        let Some(found) =
+            closure_constant(closure_instruction.opcode(), closure_instruction.operands())
+        else {
+            continue;
+        };
+        if found != constant {
+            continue;
+        }
+        let put_instruction = instructions[index + 1].decoded().instruction();
+        if !matches!(
+            (put_instruction.opcode(), put_instruction.operands()),
+            (FinalOpcode::PutVarRef, Operands::VarRef(slot)) if u32::from(slot) == closure_index
+        ) {
+            continue;
+        }
+        matched = matched.saturating_add(1);
+        if matched == 1 {
+            first_site = Some(RealmGlobalFunctionInitializerSite {
+                closure_index: index,
+                closure_pc: instructions[index].decoded().pc(),
+            });
+        }
+    }
+    if matched != 1 {
+        return Err(BytecodeVerificationError::function(
+            id,
+            BytecodeVerificationErrorKind::RealmGlobalFunctionInitializerOpcodeMismatch {
+                closure: closure_index,
+                constant,
+                matches: matched,
+            },
+        ));
+    }
+    let Some(_site) = first_site else {
+        return Err(BytecodeVerificationError::function(
+            id,
+            BytecodeVerificationErrorKind::RealmGlobalFunctionInitializerOpcodeMismatch {
+                closure: closure_index,
+                constant,
+                matches: matched,
+            },
+        ));
+    };
+    Ok(())
 }
 
 #[allow(
@@ -743,25 +834,41 @@ fn verify_closures(
                 && !policy.has_temporal_dead_zone());
         let deletable_eval_variable_valid = match staged_source {
             CompilerClosureSource::DirectEvalVariable { .. } => closure.deletable_eval_variable,
-            CompilerClosureSource::ParentClosure(_) => true,
+            CompilerClosureSource::ParentClosure(_)
+            | CompilerClosureSource::Module { .. } => true,
             CompilerClosureSource::ParentVariableReference(_)
             | CompilerClosureSource::ConstructorRealmGlobal(_)
             | CompilerClosureSource::DirectEvalBinding { .. } => !closure.deletable_eval_variable,
         };
+        let module_source = matches!(
+            staged_source,
+            CompilerClosureSource::Module { .. }
+        );
+        let module_source_valid = if module_source {
+            id == root && authority_kind == CompilerExecutableKind::Module
+        } else {
+            true
+        };
         let binding_valid = match closure.binding {
-            CompilerClosureBinding::Captured(_) => {
+            CompilerClosureBinding::Captured(policy) => {
+                let module_function = module_source
+                    && policy.kind() == CompilerBindingKind::Function
+                    && policy.initialization()
+                        == CompilerInitializationPolicy::FunctionAtInstantiation;
                 policy.is_valid()
                     && arguments_object_valid
                     && deletable_eval_variable_valid
+                    && module_source_valid
                     && policy.kind() != CompilerBindingKind::GlobalReference
-                    && closure.function_initializer.is_none()
-                    && matches!(
+                    && (module_function || closure.function_initializer.is_none())
+                    && (matches!(
                         staged_source,
                         CompilerClosureSource::ParentVariableReference(_)
                             | CompilerClosureSource::ParentClosure(_)
                             | CompilerClosureSource::DirectEvalBinding { .. }
                             | CompilerClosureSource::DirectEvalVariable { .. }
-                    )
+                            | CompilerClosureSource::Module { .. }
+                    ))
                     && (!matches!(
                         staged_source,
                         CompilerClosureSource::DirectEvalVariable { .. }
@@ -769,6 +876,7 @@ fn verify_closures(
                         policy.kind(),
                         CompilerBindingKind::Var | CompilerBindingKind::Function
                     ) && closure.name.is_some()))
+                    && (!module_source || (id == root && !closure.arguments_object))
             }
             CompilerClosureBinding::RealmGlobal(_) => {
                 !closure.arguments_object
@@ -793,7 +901,8 @@ fn verify_closures(
                         CompilerClosureSource::ParentClosure(_) => id != root,
                         CompilerClosureSource::ParentVariableReference(_)
                         | CompilerClosureSource::DirectEvalBinding { .. }
-                        | CompilerClosureSource::DirectEvalVariable { .. } => false,
+                        | CompilerClosureSource::DirectEvalVariable { .. }
+                        | CompilerClosureSource::Module { .. } => false,
                     }
             }
         };
@@ -814,12 +923,24 @@ fn verify_closures(
             staged_source,
             CompilerClosureSource::ConstructorRealmGlobal(_)
         );
-        let initializer_valid = realm_global_function_initializer_is_valid(
-            function,
-            closure,
-            realm_global_function,
-            originates_in_constructor_realm,
-        );
+        let module_function = module_source
+            && matches!(
+                closure.binding,
+                CompilerClosureBinding::Captured(policy)
+                    if policy.kind() == CompilerBindingKind::Function
+                        && policy.initialization()
+                            == CompilerInitializationPolicy::FunctionAtInstantiation
+            );
+        let initializer_valid = if module_function {
+            module_function_initializer_is_valid(function, closure, true)
+        } else {
+            realm_global_function_initializer_is_valid(
+                function,
+                closure,
+                realm_global_function,
+                originates_in_constructor_realm,
+            )
+        };
         if !initializer_valid {
             return Err(BytecodeVerificationError::function(
                 id,
@@ -828,6 +949,9 @@ fn verify_closures(
                     constant: closure.function_initializer,
                 },
             ));
+        }
+        if module_function && id == root {
+            verify_module_function_initializers(id, usize_to_u32(index), function, closure)?;
         }
         verify_realm_global_lexical_initializer_sites(
             id,

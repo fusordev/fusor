@@ -558,6 +558,21 @@ impl UnverifiedFunctionHeader {
         )
     }
 
+    /// Creates an ECMAScript Module root header.
+    ///
+    /// A Module root has no call arguments, is always strict, and uses the
+    /// same non-eval Script flag family as a Global Script. Its top-level
+    /// bindings are module-environment cells, not realm global bindings.
+    #[must_use]
+    pub const fn module(variable_reference_count: u32) -> Self {
+        Self::new(
+            Self::DYNAMIC_FUNCTION_SCRIPT_FLAGS,
+            1,
+            0,
+            variable_reference_count,
+        )
+    }
+
     /// Creates a direct-eval Script header carrying only the grammar
     /// capabilities inherited from its verified caller frame.
     #[must_use]

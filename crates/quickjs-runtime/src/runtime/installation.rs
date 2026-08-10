@@ -513,6 +513,11 @@ impl Runtime {
                         message: "root closure source requires an omitted parent",
                     });
                 }
+                quickjs_bytecode::CompilerClosureSource::Module { .. } => {
+                    return Err(InstallError::AuthorityInvariant {
+                        message: "module execution is not yet implemented in the runtime",
+                    });
+                }
             }
         }
 

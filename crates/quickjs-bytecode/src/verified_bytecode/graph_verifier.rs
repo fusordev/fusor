@@ -8,7 +8,11 @@ pub fn verify_compiler_bytecode_graph(
     input: UnverifiedCompilerBytecodeGraph,
     limits: BytecodeGraphVerificationLimits,
 ) -> Result<VerifiedBytecode, BytecodeVerificationError> {
-    let UnverifiedCompilerBytecodeGraph { graph, metadata } = input;
+    let UnverifiedCompilerBytecodeGraph {
+        graph,
+        metadata,
+        module,
+    } = input;
     let function_count = graph.functions().len();
     if metadata.len() != function_count {
         return Err(BytecodeVerificationError::graph(
@@ -77,6 +81,17 @@ pub fn verify_compiler_bytecode_graph(
     verify_class_field_key_bindings(&graph, &verified)?;
     verify_inferred_function_names(&graph, &verified)?;
     verify_method_definitions(&graph, &verified, limits, &mut usage)?;
+    let module = verify_module_declaration_record(
+        &graph,
+        &verified,
+        authority_kind,
+        module,
+        &mut usage,
+        limits,
+    )?;
+    if module.is_some() {
+        requirements.push(ExecutionRequirement::ModuleBindings);
+    }
 
     requirements.sort_unstable();
     Ok(VerifiedBytecode {
@@ -85,6 +100,7 @@ pub fn verify_compiler_bytecode_graph(
         lexical_derived_this: lexical_derived_this.into(),
         requirements: requirements.into(),
         usage,
+        module: module.map(Arc::new),
     })
 }
 
@@ -421,6 +437,7 @@ fn verify_function_metadata(
     })
 }
 
+#[allow(clippy::too_many_lines)]
 fn verify_executable_kind(
     id: FunctionTemplateId,
     root: FunctionTemplateId,
@@ -510,6 +527,21 @@ fn verify_executable_kind(
                 return Err(BytecodeVerificationError::function(
                     id,
                     BytecodeVerificationErrorKind::DynamicFunctionScriptHasFunctionName,
+                ));
+            }
+            Ok(())
+        }
+        CompilerExecutableKind::Module => {
+            if id != root {
+                return Err(BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::ModuleNotRoot,
+                ));
+            }
+            if metadata_has_function_name(metadata) {
+                return Err(BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::ModuleHasFunctionName,
                 ));
             }
             Ok(())
@@ -888,6 +920,26 @@ fn verify_header(
                 return Err(BytecodeVerificationError::function(
                     id,
                     BytecodeVerificationErrorKind::DynamicFunctionScriptHasArguments {
+                        defined: header.defined_argument_count(),
+                        arguments,
+                    },
+                ));
+            }
+        }
+        CompilerExecutableKind::Module => {
+            if header.kind() != FunctionKind::Normal
+                || header.flags().bits() != 0x0400
+                || !header.mode().is_strict()
+            {
+                return Err(BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::UnsupportedFunctionHeader,
+                ));
+            }
+            if header.defined_argument_count() != 0 || arguments != 0 {
+                return Err(BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::ModuleHasArguments {
                         defined: header.defined_argument_count(),
                         arguments,
                     },

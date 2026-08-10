@@ -5670,6 +5670,7 @@ fn require_root_kind(
         | CompilerExecutableKind::AsyncGeneratorMethod => {
             "unsupported executable-kind admission request"
         }
+        CompilerExecutableKind::Module => "module execution is not yet implemented in the runtime",
     };
     Err(InstallError::AuthorityInvariant { message })
 }
