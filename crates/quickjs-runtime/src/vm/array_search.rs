@@ -216,9 +216,16 @@ pub(super) fn advance_array_search(
                 }
                 let number = operator_to_number(value, state.realm, &state.origin)?;
                 state.length = number_to_length(number);
+                if state.length == 0 {
+                    return Ok(NativeDispatch::Immediate(missing_result(state.search)));
+                }
                 state.stage = ArraySearchStage::AwaitPosition;
             }
             ArraySearchStage::AwaitPosition => {
+                if let Some(value) = completion.take() {
+                    apply_position(&mut state, value)?;
+                    continue;
+                }
                 // An absent position needs no conversion at all.
                 let Some(position) = state.position.take() else {
                     bound_search(&mut state);
@@ -240,9 +247,7 @@ pub(super) fn advance_array_search(
                         execution_budget,
                     );
                 }
-                completion = Some(position);
-                let value = take_completion(&mut completion)?;
-                apply_position(&mut state, value)?;
+                apply_position(&mut state, position)?;
             }
             ArraySearchStage::NextElement => {
                 let Some(index) = next_index(&state) else {
@@ -252,7 +257,7 @@ pub(super) fn advance_array_search(
                 state.current = index;
                 advance_cursor(&mut state);
 
-                let key = element_key(index)?;
+                let key = element_key(runtime, index)?;
                 // Only the index-based searches skip a missing element, which is
                 // what makes `[1,,3].indexOf(undefined)` and
                 // `[1,,3].includes(undefined)` disagree.
@@ -512,7 +517,7 @@ fn begin_array_search_element_get(
     return_to: Option<CallReturn>,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<GetContinuationDispatch<ArraySearchContinuation>, NativeFailure> {
-    let key = element_key(state.current)?;
+    let key = element_key(runtime, state.current)?;
     charge_search_lookup(runtime, &state.target, execution_budget)?;
     state.stage = ArraySearchStage::AwaitElement;
     let dispatch = begin_value_get(
@@ -533,15 +538,16 @@ fn begin_array_search_element_get(
     )
 }
 
-/// Returns the property key for one element index.
-fn element_key(index: u64) -> Result<PropertyKey, NativeFailure> {
-    let index = u32::try_from(index).map_err(|_| EngineFault::RuntimeInvariant {
-        message: "array search index exceeded the array-index domain",
-    })?;
-    let index = ArrayIndex::new(index).ok_or(EngineFault::RuntimeInvariant {
-        message: "array search index reached the non-index sentinel",
-    })?;
-    Ok(PropertyKey::from_index(index))
+/// Returns an integer-index key, or the ordinary decimal-string key above the
+/// Array-index domain admitted by `LengthOfArrayLike`.
+fn element_key(runtime: &mut Runtime, index: u64) -> Result<PropertyKey, NativeFailure> {
+    if let Ok(index) = u32::try_from(index)
+        && let Some(index) = ArrayIndex::new(index)
+    {
+        return Ok(PropertyKey::from_index(index));
+    }
+    let name = JsNumber::from_f64(saturating_as_f64(index)).to_javascript_string()?;
+    Ok(runtime.property_key_from_string(&name)?)
 }
 
 /// Extracts the awaited completion value.
