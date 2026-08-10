@@ -366,9 +366,10 @@ pub(super) fn property_exception_at(
             "' of undefined",
         )?,
         PropertyFailure::NotObject => JsString::from_utf8("not an object")?,
-        PropertyFailure::ReadOnly => {
-            named_property_message("'", required_property_name(name)?, "' is read-only")?
-        }
+        PropertyFailure::ReadOnly => match name {
+            Some(name) => named_property_message("'", name, "' is read-only")?,
+            None => JsString::from_utf8("property is read-only")?,
+        },
         PropertyFailure::NoSetter => JsString::from_utf8("no setter for property")?,
         PropertyFailure::NotConfigurable => JsString::from_utf8("property is not configurable")?,
         PropertyFailure::NonExtensible => JsString::from_utf8("object is not extensible")?,

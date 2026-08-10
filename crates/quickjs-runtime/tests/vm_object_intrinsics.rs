@@ -1341,6 +1341,17 @@ fn object_assign_uses_strict_resumable_set_semantics() {
     ));
 }
 
+#[test]
+fn object_assign_reports_a_type_error_for_an_anonymous_frozen_symbol_property() {
+    assert!(boolean(
+        "var key=Symbol(),target={};target[key]=1;Object.freeze(target);\
+         var source={};source[key]=2;\
+         try{Object.assign(target,source);}catch(error){\
+           return error instanceof TypeError&&target[key]===1;\
+         }return false;"
+    ));
+}
+
 /// Assigning an enumerable `length` key to an Array uses the existing
 /// resumable Array length write path, including the two observable numeric
 /// conversions required for an object-valued length.
