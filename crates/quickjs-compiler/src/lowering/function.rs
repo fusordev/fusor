@@ -16,11 +16,11 @@ use quickjs_frontend::{CompilationGoal, Span};
 use super::{
     AstKind, ClassElement, CompilationContext, CompiledClosureVariable, CompiledConstant,
     CompiledConstantPool, CompiledFunction, CompiledMetadataAtomKey, CompiledRealmGlobal,
-    ExpressionPlanner, FrameLayout, FrameLayoutInput, FunctionTreeLayout, LeafCompilationError,
-    LocalSlot, LoweredLocal, MethodDefinitionKind, NodeId, OrdinaryFunctionForm,
-    PlannedControlFlow, PlannedInstruction, StatementCompletion, StatementControlStack,
-    StatementPlanningState, StatementWork, UnsupportedLeafFeature, checked_function_entry_count,
-    compiled_static_property_key, unsupported,
+    ControlFlowVerificationInputs, ExpressionPlanner, FrameLayout, FrameLayoutInput,
+    FunctionTreeLayout, LeafCompilationError, LocalSlot, LoweredLocal, MethodDefinitionKind,
+    NodeId, OrdinaryFunctionForm, PlannedControlFlow, PlannedInstruction, StatementCompletion,
+    StatementControlStack, StatementPlanningState, StatementWork, UnsupportedLeafFeature,
+    checked_function_entry_count, compiled_static_property_key, unsupported,
 };
 use crate::storage::{ExecutableId, ExecutableKind};
 
@@ -1315,17 +1315,17 @@ impl CompilationContext<'_, '_, '_> {
                 .into(),
         );
         let finished = flow.finish()?;
-        let parameter_initialization_end = finished.parameter_initialization_end();
-        let function_initializer_prefix_start = finished.function_initializer_prefix_start();
-        let eval_reference_call_instructions: Arc<[u32]> =
-            finished.eval_reference_call_instructions().into();
-        let (source_instructions, control_flow) = finished.verify_with_layouts(
+        let verified = finished.verify_with_inputs(
             domains,
             header,
-            capture_layout,
-            constant_layout,
+            ControlFlowVerificationInputs::new(capture_layout, constant_layout, &atoms, &constants),
             limits,
         )?;
+        let parameter_initialization_end = verified.parameter_initialization_end();
+        let function_initializer_prefix_start = verified.function_initializer_prefix_start();
+        let eval_reference_call_instructions: Arc<[u32]> =
+            verified.eval_reference_call_instructions().into();
+        let (source_instructions, control_flow) = verified.into_control_flow();
         let source_mappings = source_instructions
             .iter()
             .map(|instruction| {

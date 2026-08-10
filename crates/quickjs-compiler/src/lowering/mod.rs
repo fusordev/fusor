@@ -70,7 +70,9 @@ use constants::CompiledConstantPool;
 pub use context::{CompilationContext, CompilationExecutable, SourceTextSubstitution};
 #[cfg(test)]
 use control_flow::exact_source_span;
-use control_flow::{CompilerLabel, PlannedControlFlow, PlannedInstruction};
+use control_flow::{
+    CompilerLabel, ControlFlowVerificationInputs, PlannedControlFlow, PlannedInstruction,
+};
 use error::unsupported;
 pub use error::{LeafCompilationError, UnsupportedLeafFeature};
 use function::FunctionPlanningContext;

@@ -105,7 +105,7 @@ fn throw_call_evaluates_the_expression_before_the_terminal() {
 }
 
 #[test]
-fn unreachable_statements_after_throw_are_still_lowered_and_terminated() {
+fn unreachable_statements_after_throw_are_excised() {
     let compiled = compile("function f(a){throw a;a;}", "f");
 
     assert_eq!(
@@ -113,20 +113,13 @@ fn unreachable_statements_after_throw_are_still_lowered_and_terminated() {
         [
             (BytecodePc::new(0), FinalOpcode::GetArg0, Operands::NoneArg,),
             (BytecodePc::new(1), FinalOpcode::Throw, Operands::None),
-            (BytecodePc::new(2), FinalOpcode::GetArg0, Operands::NoneArg,),
-            (BytecodePc::new(3), FinalOpcode::Drop, Operands::None),
-            (BytecodePc::new(4), FinalOpcode::ReturnUndef, Operands::None,),
         ]
     );
-    assert_eq!(
-        compiled.control_flow().instructions()[2].entry_stack_depth(),
-        None,
-        "the unreachable tail remains in the verified structure"
-    );
+    assert_eq!(compiled.source_instructions().len(), 2);
 }
 
 #[test]
-fn unreachable_object_spread_is_still_lowered_and_preserves_the_throw_prefix() {
+fn unreachable_object_spread_is_excised_after_preserving_the_throw_prefix() {
     let compiled = compile("function f(a){throw a;({...a});}", "f");
 
     assert_eq!(
@@ -134,27 +127,7 @@ fn unreachable_object_spread_is_still_lowered_and_preserves_the_throw_prefix() {
         [
             (BytecodePc::new(0), FinalOpcode::GetArg0, Operands::NoneArg),
             (BytecodePc::new(1), FinalOpcode::Throw, Operands::None),
-            (BytecodePc::new(2), FinalOpcode::Object, Operands::None),
-            (BytecodePc::new(3), FinalOpcode::GetArg0, Operands::NoneArg),
-            (BytecodePc::new(4), FinalOpcode::Undefined, Operands::None),
-            (
-                BytecodePc::new(5),
-                FinalOpcode::CopyDataProperties,
-                Operands::U8(0b0000_0110),
-            ),
-            (BytecodePc::new(7), FinalOpcode::Drop, Operands::None),
-            (BytecodePc::new(8), FinalOpcode::Drop, Operands::None),
-            (BytecodePc::new(9), FinalOpcode::Drop, Operands::None),
-            (
-                BytecodePc::new(10),
-                FinalOpcode::ReturnUndef,
-                Operands::None
-            ),
         ]
     );
-    assert_eq!(
-        compiled.control_flow().instructions()[2].entry_stack_depth(),
-        None,
-        "the unreachable object-spread tail remains in the verified structure"
-    );
+    assert_eq!(compiled.source_instructions().len(), 2);
 }

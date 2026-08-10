@@ -307,29 +307,31 @@ fn return_and_throw_in_finally_override_the_pending_completion() {
         "function returned(){try{return 1;}finally{return 2;}}",
         "returned",
     );
-    assert!(opcodes(returned.root()).windows(5).any(|window| {
+    let returned_opcodes = opcodes(returned.root());
+    assert!(returned_opcodes.windows(4).any(|window| {
         window
             == [
                 FinalOpcode::Push2,
                 FinalOpcode::Nip,
                 FinalOpcode::Nip,
                 FinalOpcode::Return,
-                FinalOpcode::Ret,
             ]
     }));
+    assert!(!returned_opcodes.contains(&FinalOpcode::Ret));
 
     let thrown = compile(
         "function thrown(){try{return 1;}finally{throw 2;}}",
         "thrown",
     );
-    assert!(opcodes(thrown.root()).windows(5).any(|window| window
+    let thrown_opcodes = opcodes(thrown.root());
+    assert!(thrown_opcodes.windows(4).any(|window| window
         == [
             FinalOpcode::Push2,
             FinalOpcode::Nip,
             FinalOpcode::Nip,
             FinalOpcode::Throw,
-            FinalOpcode::Ret,
         ]));
+    assert!(!thrown_opcodes.contains(&FinalOpcode::Ret));
 }
 
 #[test]

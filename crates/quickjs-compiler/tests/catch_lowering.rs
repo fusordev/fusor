@@ -116,14 +116,9 @@ fn disconnected_abrupt_statements_do_not_consume_live_region_markers() {
         "deadThrow",
     );
     let dead_throw_opcodes = opcodes(&dead_throw);
-    let throw = dead_throw_opcodes
-        .iter()
-        .position(|&opcode| opcode == FinalOpcode::Throw)
-        .expect("the disconnected throw remains in the source map");
-    assert_ne!(
-        throw.checked_sub(1).map(|index| dead_throw_opcodes[index]),
-        Some(FinalOpcode::Nip),
-        "a disconnected throw has no executable for-in marker to consume"
+    assert!(
+        !dead_throw_opcodes.contains(&FinalOpcode::Throw),
+        "the disconnected throw and its cleanup sequence are excised"
     );
 }
 
