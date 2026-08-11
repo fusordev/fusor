@@ -14,8 +14,8 @@ use quickjs_bytecode::{ModuleDeclarationRecord, VerifiedBytecode};
 use quickjs_frontend::ModuleSyntaxRecord;
 
 use super::{
-    BindingCell, BindingCellId, EnvironmentBinding, FunctionId, InstalledCodeId,
-    ModuleRecordId, ObjectId, RealmId, Runtime,
+    BindingCell, BindingCellId, FunctionId, InstalledCodeId, ModuleRecordId, ObjectId, RealmId,
+    Runtime,
 };
 
 mod host;
@@ -29,7 +29,6 @@ pub use linking::{ModuleLinkError, link_module};
 pub use evaluation::{ModuleEvaluationError, evaluate_module};
 pub(crate) use namespace::ModuleNamespaceState;
 pub(crate) use import_meta::get_or_create_import_meta;
-pub(crate) use linking::get_or_create_namespace;
 
 use std::fmt;
 

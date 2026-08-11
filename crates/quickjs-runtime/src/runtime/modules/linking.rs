@@ -6,17 +6,11 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use quickjs_bytecode::{
-    CompilerInitializationPolicy, CompilerClosureSource, ModuleBindingOrigin, ModuleImportName,
-};
+use quickjs_bytecode::{CompilerInitializationPolicy, ModuleBindingOrigin, ModuleImportName};
 
-use super::{
-    BindingCell, EnvironmentBinding, ModuleError, ModuleKey, ModuleRecordId, ModuleStatus,
-    ResolvedExport,
-};
+use super::{BindingCell, ModuleError, ModuleKey, ModuleRecordId, ModuleStatus, ResolvedExport};
 use crate::runtime::{
-    BindingCellId, ExecutionLimits, FunctionTemplateId, ObjectId, RealmId, Runtime, SlotValue,
-    StoredValue, usize_to_u64,
+    BindingCellId, RealmId, Runtime, SlotValue, StoredValue, usize_to_u64,
 };
 
 use std::fmt;

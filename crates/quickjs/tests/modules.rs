@@ -331,15 +331,69 @@ fn import_meta_is_per_module_and_resolve_uses_the_referrer() {
 
 #[test]
 fn import_meta_is_visible_inside_module_functions() {
-    // The module avoids realm-global references (`Error`, `globalThis`) at top
-    // level: a hoisted function declaration combined with realm-global closure
-    // sources is a separate, pre-existing linking limitation.
     evaluate(
         "function read() { return import.meta.url; }\n\
          if (read() !== 'root.mjs') { throw 1; }",
         &[],
     )
     .expect("import.meta resolves to the owning module inside nested functions");
+}
+
+#[test]
+fn hoisted_module_functions_resolve_realm_globals() {
+    evaluate(
+        "function check() {\n\
+             if (typeof Error !== 'function') { throw new Error('Error'); }\n\
+             if (typeof JSON.parse !== 'function') { throw new Error('JSON'); }\n\
+             if (globalThis.Math !== Math) { throw new Error('globalThis'); }\n\
+             return Object.prototype.toString.call(Math).length > 0;\n\
+         }\n\
+         if (!check()) { throw new Error('check'); }",
+        &[],
+    )
+    .expect("hoisted module functions resolve realm globals");
+}
+
+#[test]
+fn hoisted_module_functions_capture_imported_bindings() {
+    evaluate(
+        "import { value } from './dep.mjs';\n\
+         function read() { return value; }\n\
+         if (read() !== 7) { throw new Error('value'); }",
+        &[("./dep.mjs", "export const value = 7;")],
+    )
+    .expect("hoisted module functions capture imported bindings");
+}
+
+#[test]
+fn nested_functions_capture_module_local_lexical_bindings() {
+    evaluate(
+        "let count = 1;\n\
+         function outer() {\n\
+             function inner() { return count + 1; }\n\
+             return inner();\n\
+         }\n\
+         if (outer() !== 2) { throw new Error('count'); }",
+        &[],
+    )
+    .expect("nested functions capture module-local let bindings");
+}
+
+#[test]
+fn import_meta_inside_a_function_that_references_globals() {
+    evaluate(
+        "function read() {\n\
+             try {\n\
+                 throw new Error('boom');\n\
+             } catch (error) {\n\
+                 if (error.message !== 'boom') { throw new Error('message'); }\n\
+             }\n\
+             return import.meta.url;\n\
+         }\n\
+         if (read() !== 'root.mjs') { throw new Error('url'); }",
+        &[],
+    )
+    .expect("import.meta resolves inside functions that also reference realm globals");
 }
 
 #[test]

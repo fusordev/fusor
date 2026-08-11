@@ -245,6 +245,81 @@ impl Runtime {
                     )?;
                     environment.push(EnvironmentBinding::Captured(cell));
                 }
+                CompilerClosureSource::ConstructorRealmGlobal(atom) => {
+                    let definition = child_function
+                        .metadata()
+                        .closures()
+                        .get(environment.len())
+                        .ok_or(InstallError::AuthorityInvariant {
+                            message: "module realm-global source has no closure metadata",
+                        })?;
+                    let CompilerClosureBinding::RealmGlobal(policy) = definition.binding() else {
+                        return Err(InstallError::AuthorityInvariant {
+                            message: "module realm-global source has captured-cell metadata",
+                        });
+                    };
+                    if !matches!(
+                        RealmGlobalRequest::from_policy(policy)?,
+                        RealmGlobalRequest::Lookup
+                    ) {
+                        return Err(InstallError::AuthorityInvariant {
+                            message: "module-level function declares a constructor-realm global",
+                        });
+                    }
+                    let name = template.atoms.get(atom.get() as usize).cloned().ok_or(
+                        InstallError::AuthorityInvariant {
+                            message: "constructor-realm global atom is missing",
+                        },
+                    )?;
+                    let existing = self
+                        .realms
+                        .get(realm)
+                        .and_then(|state| state.global_bindings.get(&name).copied());
+                    let global = if let Some(global) = existing {
+                        let valid = self.global_bindings.get(global).is_some_and(|binding| {
+                            binding.realm == realm && binding.name.is_same_identity(&name)
+                        });
+                        if !valid {
+                            return Err(InstallError::AuthorityInvariant {
+                                message: "constructor-realm global binding has the wrong owner",
+                            });
+                        }
+                        global
+                    } else {
+                        check_install_limit(
+                            RuntimeResource::RealmGlobalBindings,
+                            self.limits.max_realm_global_bindings,
+                            usize_to_u64(self.global_bindings.len()).saturating_add(1),
+                        )?;
+                        let global = self
+                            .global_bindings
+                            .try_insert(RealmGlobalBinding {
+                                realm,
+                                name: name.clone(),
+                                state: RealmGlobalBindingState::Unresolved,
+                            })
+                            .map_err(|_| InstallError::AllocationFailed {
+                                resource: RuntimeResource::RealmGlobalBindings,
+                                additional: 1,
+                            })?;
+                        let prior = self
+                            .realms
+                            .get_mut(realm)
+                            .ok_or(InstallError::AuthorityInvariant {
+                                message: "constructor realm disappeared during installation",
+                            })?
+                            .global_bindings
+                            .insert(name, global);
+                        if prior.is_some() {
+                            return Err(InstallError::AuthorityInvariant {
+                                message:
+                                    "constructor-realm global insertion replaced an existing binding",
+                            });
+                        }
+                        global
+                    };
+                    environment.push(EnvironmentBinding::RealmGlobal(global));
+                }
                 CompilerClosureSource::ParentClosure(slot) => {
                     let binding = parent_environment.get(slot as usize).copied().ok_or(
                         InstallError::AuthorityInvariant {
