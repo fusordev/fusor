@@ -124,6 +124,14 @@ fn create_module_environment(
         let Some(initializer) = binding.initializer() else {
             continue;
         };
+        let parent_environment = runtime
+            .functions
+            .get(root_fn)
+            .ok_or_else(|| ModuleError::link("module root function is stale"))?
+            .bytecode()
+            .map_err(|error| ModuleError::link(format!("root: {error}")))?
+            .environment
+            .clone();
         let function = runtime
             .create_module_closure(
                 realm,
@@ -131,6 +139,7 @@ fn create_module_environment(
                 &authority,
                 quickjs_bytecode::FunctionTemplateId::new(initializer),
                 &cells,
+                &parent_environment,
             )
             .map_err(|error| ModuleError::link(format!("closure: {error}")))?;
         let resolved = BindingCell::resolve_forward(runtime, cells[index])
@@ -582,7 +591,28 @@ fn resolve_and_forward_import(
             .and_then(|a| a.description())
             .ok_or_else(|| ModuleError::link("import atom not found"))?;
         let units: Vec<u16> = name.code_units().collect();
-        units_to_utf8(&units)
+        let local_name = units_to_utf8(&units);
+        // The bytecode import descriptor carries the *local* binding atom (see
+        // the compiler's module import lowering). For an aliased import
+        // (`import { remote as local }`) the export name is ECMA-262
+        // ImportEntry [[ImportName]], recovered from the frontend import entry.
+        record
+            .syntax_record
+            .import_entries()
+            .iter()
+            .find(|entry| {
+                entry.request().as_usize() as u32 == request_idx
+                    && entry
+                        .local_name()
+                        .equals_utf8(&String::from_utf8_lossy(&local_name))
+            })
+            .map_or(local_name.clone(), |entry| match entry.import_name() {
+                quickjs_frontend::ModuleImportName::Name(name) => {
+                    units_to_utf8(name.code_units())
+                }
+                quickjs_frontend::ModuleImportName::Default(_) => b"default".to_vec(),
+                _ => local_name.clone(),
+            })
     } else {
         return Err(ModuleError::link("import has no name"));
     };

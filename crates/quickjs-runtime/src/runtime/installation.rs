@@ -197,6 +197,11 @@ impl Runtime {
 
     /// Creates a hoisted module-level function from its template, capturing the
     /// module environment cells. Used during InitializeEnvironment.
+    ///
+    /// `parent_environment` is the installed module root function's closure
+    /// environment: a descendant forwards realm-global and module-binding slots
+    /// through `ParentClosure`, exactly like the ordinary closure-creation path
+    /// resolves them against the parent frame.
     pub(crate) fn create_module_closure(
         &mut self,
         realm: RealmId,
@@ -204,6 +209,7 @@ impl Runtime {
         authority: &VerifiedBytecode,
         child: FunctionTemplateId,
         module_environment: &[BindingCellId],
+        parent_environment: &[EnvironmentBinding],
     ) -> Result<FunctionId, InstallError> {
         let installed = self.code.get(code).ok_or(InstallError::AuthorityInvariant {
             message: "module installed code is stale",
@@ -238,6 +244,34 @@ impl Runtime {
                         },
                     )?;
                     environment.push(EnvironmentBinding::Captured(cell));
+                }
+                CompilerClosureSource::ParentClosure(slot) => {
+                    let binding = parent_environment.get(slot as usize).copied().ok_or(
+                        InstallError::AuthorityInvariant {
+                            message: "module closure parent slot out of range",
+                        },
+                    )?;
+                    match binding {
+                        EnvironmentBinding::Captured(cell) => {
+                            if !self.cells.contains(cell) {
+                                return Err(InstallError::AuthorityInvariant {
+                                    message: "module closure parent cell is stale",
+                                });
+                            }
+                        }
+                        EnvironmentBinding::RealmGlobal(global) => {
+                            let valid = self
+                                .global_bindings
+                                .get(global)
+                                .is_some_and(|binding| binding.realm == realm);
+                            if !valid {
+                                return Err(InstallError::AuthorityInvariant {
+                                    message: "module closure parent realm-global binding is stale",
+                                });
+                            }
+                        }
+                    }
+                    environment.push(binding);
                 }
                 _ => {
                     return Err(InstallError::AuthorityInvariant {
