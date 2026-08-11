@@ -561,6 +561,38 @@ impl ModuleSyntaxRecord {
                 })
                 .collect::<Result<Vec<_>, _>>()?,
         );
+        // ECMA-262 ParseModule step 10.i.ii: a local export entry whose local
+        // name is an imported binding is really an *indirect* export of the
+        // import's module request and import name (a namespace import maps to
+        // ~all~). Oxc keeps such entries local; rewrite them so linking
+        // resolves through the exporting module, making two re-exports of the
+        // same namespace object or binding unambiguous.
+        for entry in &mut export_entries {
+            if entry.role != ModuleExportEntryRole::Local {
+                continue;
+            }
+            let ModuleExportLocalName::Name(local_name) = &entry.local_name else {
+                continue;
+            };
+            let Some(import) = import_entries.iter().find(|import| {
+                import.local_name.code_units() == local_name.code_units()
+            }) else {
+                continue;
+            };
+            *entry = ModuleExportEntry {
+                role: ModuleExportEntryRole::Indirect,
+                statement_span: entry.statement_span,
+                span: entry.span,
+                request: Some(import.request),
+                import_name: match &import.import_name {
+                    ModuleImportName::Name(name) => ModuleExportImportName::Name(name.clone()),
+                    ModuleImportName::Default(span) => ModuleExportImportName::Default(*span),
+                    ModuleImportName::Namespace => ModuleExportImportName::All,
+                },
+                export_name: entry.export_name.clone(),
+                local_name: ModuleExportLocalName::Null,
+            };
+        }
         export_entries.sort_by_key(|entry| {
             (
                 entry.span.start,

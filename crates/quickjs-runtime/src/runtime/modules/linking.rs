@@ -292,6 +292,18 @@ fn resolve_export(
                     }
                 };
                 let dep = resolve_request(runtime, module, request_idx)?;
+                // `export * as name from "mod"`: the export resolves to the
+                // dependency's namespace object (ECMA-262 ResolveExport,
+                // indirect entry with [[ImportName]] ~all~).
+                if matches!(
+                    entry.import_name(),
+                    quickjs_frontend::ModuleExportImportName::All
+                ) {
+                    resolve_set.pop();
+                    return Ok(ExportResolution::Resolved(ResolvedExport::Namespace {
+                        module: dep,
+                    }));
+                }
                 let import_bytes = match entry.import_name() {
                     quickjs_frontend::ModuleExportImportName::Name(name) => {
                         units_to_utf8(name.code_units())
@@ -333,8 +345,9 @@ fn resolve_export(
                     None => found = Some(r),
                     // Two star paths reaching the *same* binding stay
                     // unambiguous (ECMA-262 ResolveExport, star-export
-                    // resolution dedup).
-                    Some(f) if f.module == r.module && f.cell == r.cell => {}
+                    // resolution dedup): same module + binding name, or the
+                    // same module's namespace.
+                    Some(f) if same_resolved_binding(&f, &r) => {}
                     Some(_) => {
                         resolve_set.pop();
                         return Ok(ExportResolution::Ambiguous);
@@ -351,6 +364,30 @@ fn resolve_export(
 
     resolve_set.pop();
     Ok(ExportResolution::Null)
+}
+
+fn same_resolved_binding(left: &ResolvedExport, right: &ResolvedExport) -> bool {
+    match (left, right) {
+        (
+            ResolvedExport::Binding {
+                module: left_module,
+                cell: left_cell,
+            },
+            ResolvedExport::Binding {
+                module: right_module,
+                cell: right_cell,
+            },
+        ) => left_module == right_module && left_cell == right_cell,
+        (
+            ResolvedExport::Namespace {
+                module: left_module,
+            },
+            ResolvedExport::Namespace {
+                module: right_module,
+            },
+        ) => left_module == right_module,
+        _ => false,
+    }
 }
 
 fn resolve_local_export(
@@ -377,7 +414,7 @@ fn resolve_local_export(
             });
         if name_match {
             if let Some(&cell) = record.environment.get(i) {
-                return Ok(Some(ResolvedExport { module, cell }));
+                return Ok(Some(ResolvedExport::Binding { module, cell }));
             }
         }
     }
@@ -560,6 +597,42 @@ fn resolve_module_imports(
             ModuleBindingOrigin::Local => {}
         }
     }
+
+    // ECMA-262 InitializeEnvironment validates every indirect export entry:
+    // `export { x } from "mod"` is a link-time SyntaxError when `x` resolves
+    // to null or ambiguous, even when nothing imports it.
+    let syntax = runtime
+        .modules
+        .get(module)
+        .expect("module exists")
+        .syntax_record
+        .clone();
+    for entry in syntax.export_entries() {
+        if entry.role() != quickjs_frontend::ModuleExportEntryRole::Indirect {
+            continue;
+        }
+        let export_name = match entry.export_name() {
+            quickjs_frontend::ModuleExportName::Name(name) => units_to_utf8(name.code_units()),
+            quickjs_frontend::ModuleExportName::Default(_) => b"default".to_vec(),
+            _ => continue,
+        };
+        let mut rs = Vec::new();
+        match resolve_export(runtime, module, &export_name, &mut rs)? {
+            ExportResolution::Resolved(_) => {}
+            ExportResolution::Null => {
+                return Err(ModuleError::link(format!(
+                    "unresolved export '{}'",
+                    String::from_utf8_lossy(&export_name)
+                )));
+            }
+            ExportResolution::Ambiguous => {
+                return Err(ModuleError::link(format!(
+                    "ambiguous export '{}'",
+                    String::from_utf8_lossy(&export_name)
+                )));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -642,11 +715,28 @@ fn resolve_and_forward_import(
         }
     };
 
-    runtime
-        .cells
-        .get_mut(import_cell)
-        .ok_or_else(|| ModuleError::link("import cell stale"))?
-        .forward = Some(resolved.cell);
+    match resolved {
+        ResolvedExport::Binding { cell, .. } => {
+            runtime
+                .cells
+                .get_mut(import_cell)
+                .ok_or_else(|| ModuleError::link("import cell stale"))?
+                .forward = Some(cell);
+        }
+        ResolvedExport::Namespace { module: dep } => {
+            // `export * as name` re-exported and then imported by name: the
+            // binding is initialized once with the dependency's namespace
+            // object and is not live (ECMA-262 InitializeEnvironment,
+            // namespace-object resolution).
+            let namespace = get_or_create_namespace(runtime, dep)?;
+            runtime
+                .cells
+                .get_mut(import_cell)
+                .ok_or_else(|| ModuleError::link("import cell stale"))?
+                .value = SlotValue::Value(StoredValue::Object(namespace));
+            runtime.collection_pending = true;
+        }
+    }
     Ok(())
 }
 
@@ -676,18 +766,21 @@ pub(crate) fn get_or_create_namespace(
         return Ok(ns);
     }
     let exports = module_export_names(runtime, module)?;
-    let ns_exports: Vec<(Box<[u8]>, super::namespace::NamespaceExport)> = exports
-        .into_iter()
-        .map(|(name, r)| {
-            (
-                name.into_boxed_slice(),
-                super::namespace::NamespaceExport {
-                    module: r.module,
-                    cell: r.cell,
-                },
-            )
-        })
-        .collect();
+    let mut ns_exports: Vec<(Box<[u8]>, super::namespace::NamespaceExport)> =
+        Vec::with_capacity(exports.len());
+    let mut namespace_deps: Vec<ModuleRecordId> = Vec::new();
+    for (name, resolution) in exports {
+        let export = match resolution {
+            ResolvedExport::Binding { module, cell } => {
+                super::namespace::NamespaceExport::Binding { module, cell }
+            }
+            ResolvedExport::Namespace { module: dep } => {
+                namespace_deps.push(dep);
+                super::namespace::NamespaceExport::Namespace { module: dep }
+            }
+        };
+        ns_exports.push((name.into_boxed_slice(), export));
+    }
 
     let to_string_tag_key =
         runtime.predefined_symbol_property_key(crate::PredefinedAtom::SymbolToStringTag);
@@ -739,6 +832,12 @@ pub(crate) fn get_or_create_namespace(
         .map_err(|_| ModuleError::link("namespace insert failed"))?;
 
     runtime.modules.get_mut(module).expect("module exists").namespace_object = Some(object);
+    // Realize re-exported namespaces only after installing this one, so
+    // self-references and namespace re-export cycles terminate against the
+    // already-installed object (ECMA-262 GetModuleNamespace idempotence).
+    for dep in namespace_deps {
+        get_or_create_namespace(runtime, dep)?;
+    }
     Ok(object)
 }
 

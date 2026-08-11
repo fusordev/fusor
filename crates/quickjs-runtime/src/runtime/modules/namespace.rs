@@ -14,11 +14,20 @@ pub(crate) struct ModuleNamespaceState {
     pub(crate) exports: Vec<(Box<[u8]>, NamespaceExport)>,
 }
 
-/// A namespace export entry: target module + binding cell.
+/// A namespace export entry (ECMA-262 ResolvedBinding shape).
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct NamespaceExport {
-    pub(crate) module: ModuleRecordId,
-    pub(crate) cell: crate::runtime::BindingCellId,
+pub(crate) enum NamespaceExport {
+    /// A live binding: target module + binding cell.
+    Binding {
+        module: ModuleRecordId,
+        cell: crate::runtime::BindingCellId,
+    },
+    /// An `export * as name` re-export: the target module, whose namespace
+    /// object is realized after this namespace is installed (self-references
+    /// and cycles resolve once creation unwinds).
+    Namespace {
+        module: ModuleRecordId,
+    },
 }
 
 impl Runtime {
@@ -72,24 +81,40 @@ impl Runtime {
         else {
             return Ok(None);
         };
-        let cell = BindingCell::resolve_forward(self, export.cell)?;
-        let value = match &self
-            .cells
-            .get(cell)
-            .ok_or(crate::EngineFault::StaleHeapEdge {
-                edge: "module namespace binding cell",
-                index: cell.index(),
-                generation: cell.generation(),
-            })?
-            .value
-        {
-            SlotValue::Value(value) => value.duplicate(),
-            // ECMA-262 throws a ReferenceError here; this read path cannot
-            // raise a JavaScript exception, so a binding still in its temporal
-            // dead zone reads as `undefined`. Cyclic namespace reads during
-            // the dead zone are rejected through the importing binding's own
-            // checked access instead.
-            SlotValue::Uninitialized => StoredValue::Undefined,
+        let value = match export {
+            NamespaceExport::Namespace { module } => {
+                // Realized when the owning namespace was installed; a missing
+                // object means namespace creation never completed.
+                let namespace = self
+                    .modules
+                    .get(*module)
+                    .and_then(|record| record.namespace_object)
+                    .ok_or(crate::EngineFault::RuntimeInvariant {
+                        message: "namespace re-export target was never realized",
+                    })?;
+                StoredValue::Object(namespace)
+            }
+            NamespaceExport::Binding { cell, .. } => {
+                let cell = BindingCell::resolve_forward(self, *cell)?;
+                match &self
+                    .cells
+                    .get(cell)
+                    .ok_or(crate::EngineFault::StaleHeapEdge {
+                        edge: "module namespace binding cell",
+                        index: cell.index(),
+                        generation: cell.generation(),
+                    })?
+                    .value
+                {
+                    SlotValue::Value(value) => value.duplicate(),
+                    // ECMA-262 throws a ReferenceError here; this read path cannot
+                    // raise a JavaScript exception, so a binding still in its temporal
+                    // dead zone reads as `undefined`. Cyclic namespace reads during
+                    // the dead zone are rejected through the importing binding's own
+                    // checked access instead.
+                    SlotValue::Uninitialized => StoredValue::Undefined,
+                }
+            }
         };
         Ok(Some(OwnProperty::Data {
             layout: PropertyLayout::data(true, true, false),

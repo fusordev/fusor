@@ -191,11 +191,19 @@ fn exception_message(runtime: &Runtime, exception: &crate::JsException) -> Strin
     "module evaluation error".to_owned()
 }
 
-/// A resolved export target: (module, binding cell).
+/// A resolved export target (ECMA-262 `ResolvedBinding`).
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct ResolvedExport {
-    pub(crate) module: ModuleRecordId,
-    pub(crate) cell: BindingCellId,
+pub(crate) enum ResolvedExport {
+    /// A binding cell in the module's environment ([[BindingName]] is a name).
+    Binding {
+        module: ModuleRecordId,
+        cell: BindingCellId,
+    },
+    /// The module namespace object of `module` (ResolveExport of an
+    /// `export * as name` entry; [[BindingName]] is ~namespace~).
+    Namespace {
+        module: ModuleRecordId,
+    },
 }
 
 /// One source-text module record.
