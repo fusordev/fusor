@@ -220,18 +220,28 @@ fn unlink_all(runtime: &mut Runtime, modules: &[ModuleRecordId]) {
     }
 }
 
+/// ECMA-262 `ResolveExport` result: a resolved binding, `null`, or the
+/// `ambiguous` sentinel. Ambiguity is a *value*, not an error: namespace
+/// enumeration omits ambiguous names, while an explicit import binding of one
+/// is a link-time `SyntaxError`.
+enum ExportResolution {
+    Resolved(ResolvedExport),
+    Null,
+    Ambiguous,
+}
+
 /// Resolves an export of a module to a binding cell (ResolveExport).
 fn resolve_export(
     runtime: &Runtime,
     module: ModuleRecordId,
     export_name: &[u8],
     resolve_set: &mut Vec<(ModuleRecordId, Vec<u8>)>,
-) -> Result<Option<ResolvedExport>, ModuleError> {
+) -> Result<ExportResolution, ModuleError> {
     if resolve_set
         .iter()
         .any(|(m, name)| *m == module && name.as_slice() == export_name)
     {
-        return Ok(None);
+        return Ok(ExportResolution::Null);
     }
     resolve_set.push((module, export_name.to_vec()));
 
@@ -259,23 +269,26 @@ fn resolve_export(
                     }
                     quickjs_frontend::ModuleExportLocalName::Null => {
                         resolve_set.pop();
-                        return Ok(None);
+                        return Ok(ExportResolution::Null);
                     }
                     _ => {
                         resolve_set.pop();
-                        return Ok(None);
+                        return Ok(ExportResolution::Null);
                     }
                 };
                 let result = resolve_local_export(runtime, module, &local_bytes);
                 resolve_set.pop();
-                return result;
+                return Ok(match result? {
+                    Some(r) => ExportResolution::Resolved(r),
+                    None => ExportResolution::Null,
+                });
             }
             quickjs_frontend::ModuleExportEntryRole::Indirect => {
                 let request_idx = match entry.request() {
                     Some(idx) => idx.as_usize() as u32,
                     None => {
                         resolve_set.pop();
-                        return Ok(None);
+                        return Ok(ExportResolution::Null);
                     }
                 };
                 let dep = resolve_request(runtime, module, request_idx)?;
@@ -286,7 +299,7 @@ fn resolve_export(
                     quickjs_frontend::ModuleExportImportName::Default(_) => b"default".to_vec(),
                     _ => {
                         resolve_set.pop();
-                        return Ok(None);
+                        return Ok(ExportResolution::Null);
                     }
                 };
                 let result = resolve_export(runtime, dep, &import_bytes, resolve_set)?;
@@ -301,7 +314,6 @@ fn resolve_export(
     // Star re-exports (export * from) - excludes "default"
     if export_name != b"default" {
         let mut found: Option<ResolvedExport> = None;
-        let mut ambiguous = false;
         for entry in syntax.export_entries() {
             if entry.role() != quickjs_frontend::ModuleExportEntryRole::Star {
                 continue;
@@ -311,27 +323,34 @@ fn resolve_export(
                 None => continue,
             };
             let dep = resolve_request(runtime, module, request_idx)?;
-            if let Some(r) = resolve_export(runtime, dep, export_name, resolve_set)? {
-                if found.is_some() {
-                    ambiguous = true;
-                    break;
+            match resolve_export(runtime, dep, export_name, resolve_set)? {
+                ExportResolution::Ambiguous => {
+                    resolve_set.pop();
+                    return Ok(ExportResolution::Ambiguous);
                 }
-                found = Some(r);
+                ExportResolution::Null => {}
+                ExportResolution::Resolved(r) => match found {
+                    None => found = Some(r),
+                    // Two star paths reaching the *same* binding stay
+                    // unambiguous (ECMA-262 ResolveExport, star-export
+                    // resolution dedup).
+                    Some(f) if f.module == r.module && f.cell == r.cell => {}
+                    Some(_) => {
+                        resolve_set.pop();
+                        return Ok(ExportResolution::Ambiguous);
+                    }
+                },
             }
         }
-        if ambiguous {
-            resolve_set.pop();
-            return Err(ModuleError::link(format!(
-                "ambiguous export '{}'",
-                String::from_utf8_lossy(export_name)
-            )));
-        }
         resolve_set.pop();
-        return Ok(found);
+        return Ok(match found {
+            Some(r) => ExportResolution::Resolved(r),
+            None => ExportResolution::Null,
+        });
     }
 
     resolve_set.pop();
-    Ok(None)
+    Ok(ExportResolution::Null)
 }
 
 fn resolve_local_export(
@@ -424,37 +443,25 @@ fn module_export_names_inner(
             quickjs_frontend::ModuleExportName::Null => continue,
             _ => continue,
         };
+        if entry.role() == quickjs_frontend::ModuleExportEntryRole::Star {
+            continue;
+        }
         if !seen.insert(export_name.clone()) {
             continue;
         }
-        let import_name = match entry.role() {
-            quickjs_frontend::ModuleExportEntryRole::Local => match entry.local_name() {
-                quickjs_frontend::ModuleExportLocalName::Name(name) => {
-                    units_to_utf8(name.code_units())
-                }
-                quickjs_frontend::ModuleExportLocalName::SyntheticDefault => {
-                    SYNTHETIC_DEFAULT_BINDING_NAME.to_vec()
-                }
-                quickjs_frontend::ModuleExportLocalName::Null => continue,
-                _ => continue,
-            },
-            quickjs_frontend::ModuleExportEntryRole::Indirect => match entry.import_name() {
-                quickjs_frontend::ModuleExportImportName::Name(name) => {
-                    units_to_utf8(name.code_units())
-                }
-                quickjs_frontend::ModuleExportImportName::Default(_) => b"default".to_vec(),
-                _ => continue,
-            },
-            quickjs_frontend::ModuleExportEntryRole::Star => continue,
-            _ => continue,
-        };
+        // Resolve by the *export* name: a local entry's local binding name
+        // (e.g. the synthetic `default` binding) is not itself an export.
         let mut rs = Vec::new();
-        if let Some(r) = resolve_export(runtime, module, &import_name, &mut rs)? {
+        if let ExportResolution::Resolved(r) = resolve_export(runtime, module, &export_name, &mut rs)?
+        {
             result.push((export_name, r));
         }
     }
 
-    // Star re-exports (all except "default")
+    // Star re-exports (all except "default"): names that resolve to a single
+    // binding through this module join the namespace; ambiguous and null
+    // resolutions are omitted (ECMA-262 GetExportedNames star handling).
+    let mut star_candidates = Vec::new();
     for entry in syntax.export_entries() {
         if entry.role() != quickjs_frontend::ModuleExportEntryRole::Star {
             continue;
@@ -465,13 +472,19 @@ fn module_export_names_inner(
         };
         let dep = resolve_request(runtime, module, request_idx)?;
         let dep_names = module_export_names_inner(runtime, dep, export_star_set)?;
-        for (name, r) in dep_names {
-            if name == b"default" {
-                continue;
+        for (name, _) in dep_names {
+            if name != b"default" {
+                star_candidates.push(name);
             }
-            if seen.insert(name.clone()) {
-                result.push((name, r));
-            }
+        }
+    }
+    for name in star_candidates {
+        if !seen.insert(name.clone()) {
+            continue;
+        }
+        let mut rs = Vec::new();
+        if let ExportResolution::Resolved(r) = resolve_export(runtime, module, &name, &mut rs)? {
+            result.push((name, r));
         }
     }
 
@@ -613,12 +626,21 @@ fn resolve_and_forward_import(
 
     let dep = resolve_request(runtime, module, request_idx)?;
     let mut rs = Vec::new();
-    let resolved = resolve_export(runtime, dep, &export_name, &mut rs)?.ok_or_else(|| {
-        ModuleError::link(format!(
-            "unresolved import '{}'",
-            String::from_utf8_lossy(&export_name)
-        ))
-    })?;
+    let resolved = match resolve_export(runtime, dep, &export_name, &mut rs)? {
+        ExportResolution::Resolved(r) => r,
+        ExportResolution::Null => {
+            return Err(ModuleError::link(format!(
+                "unresolved import '{}'",
+                String::from_utf8_lossy(&export_name)
+            )));
+        }
+        ExportResolution::Ambiguous => {
+            return Err(ModuleError::link(format!(
+                "ambiguous export '{}'",
+                String::from_utf8_lossy(&export_name)
+            )));
+        }
+    };
 
     runtime
         .cells
