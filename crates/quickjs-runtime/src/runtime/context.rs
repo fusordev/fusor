@@ -1061,6 +1061,54 @@ impl Context<'_> {
         Ok(())
     }
 
+    /// Records a host resolution edge from `referrer` to `dependency` for the
+    /// raw import `specifier` text.
+    ///
+    /// This is the host-driven half of ECMA-262 `HostResolveImportedModule`:
+    /// resolution is per (referrer, specifier), not per specifier text, so two
+    /// modules importing the same specifier text may resolve to different
+    /// records, and one record may be the target of many specifier texts.
+    /// Both modules must already be registered through
+    /// [`Self::register_module`]; `specifier` is stored exactly as passed (the
+    /// facade passes the raw specifier text from the syntax record).
+    pub fn register_module_dependency(
+        &mut self,
+        referrer: &super::ModuleKey,
+        specifier: &str,
+        dependency: &super::ModuleKey,
+    ) -> Result<(), super::ModuleError> {
+        let realm_state = self
+            .runtime
+            .realms
+            .get(self.realm)
+            .ok_or_else(|| super::ModuleError::link("realm disappeared"))?;
+        let referrer_id = realm_state
+            .module_registry
+            .get(referrer)
+            .copied()
+            .ok_or_else(|| {
+                super::ModuleError::link(format!("referrer module '{referrer}' is not registered"))
+            })?;
+        let dependency_id = realm_state
+            .module_registry
+            .get(dependency)
+            .copied()
+            .ok_or_else(|| {
+                super::ModuleError::link(format!(
+                    "dependency module '{dependency}' is not registered"
+                ))
+            })?;
+        let record = self
+            .runtime
+            .modules
+            .get_mut(referrer_id)
+            .ok_or_else(|| super::ModuleError::link("referrer record disappeared"))?;
+        record
+            .resolved_dependencies
+            .insert(specifier.to_owned(), dependency_id);
+        Ok(())
+    }
+
     /// Links a module graph starting from the given root key.
     pub fn link_module(
         &mut self,

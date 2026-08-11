@@ -16,27 +16,18 @@
 //!   the builtin table. Any other bare specifier is rejected (no
 //!   `node_modules` lookup).
 //!
-//! # Canonical keys — current facade constraint
+//! # Canonical keys
 //!
-//! The intended canonical key is the absolute, lexically normalized path
+//! The issued [`ModuleKey`] is the absolute, lexically normalized path
 //! (`.`/`..` resolved without touching symlinks) prefixed with `file://`, or
-//! the `node:<name>` specifier for builtins. The runtime linker, however,
-//! currently resolves every import request by its *raw specifier text*
-//! against the realm module registry, so a module must be registered under
-//! the exact specifier that imported it. This resolver therefore returns the
-//! raw specifier text as the [`ModuleKey`] and exposes the canonical
-//! `file://` path through the display name. Consequences, all documented
-//! host-sugar limitations:
-//!
-//! - The same file imported through two different specifier texts is
-//!   registered and evaluated once per text.
-//! - One specifier text resolving to two different files (e.g. `./dep.mjs`
-//!   from two directories) cannot be represented; the resolver detects the
-//!   collision and fails the load with a clear error instead of silently
-//!   linking the wrong file.
+//! the canonical `node:<name>` specifier for builtins (a bare builtin name
+//! like `assert` canonicalizes to `node:assert`). The facade records a
+//! (referrer, specifier) resolution edge for every successful load, so the
+//! same file imported through two different specifier texts is registered and
+//! evaluated exactly once, and one specifier text resolving to different files
+//! from different referrers links each referrer to its own file.
 
 use std::{
-    collections::HashMap,
     fs,
     path::{Component, Path, PathBuf},
     sync::Arc,
@@ -54,28 +45,21 @@ const NODE_SCHEME: &str = "node:";
 pub(crate) struct NodeLikeResolver {
     cwd: PathBuf,
     argv: Vec<String>,
-    /// Maps each loaded specifier text to the file it resolved to, both for
-    /// nested referrer resolution and for collision detection.
-    loaded_paths: HashMap<String, PathBuf>,
 }
 
 impl NodeLikeResolver {
     /// Creates a resolver observing `cwd` (for `node:path`/`node:process`) and
     /// exposing `argv` through `node:process`.
     pub(crate) fn new(cwd: PathBuf, argv: Vec<String>) -> Self {
-        Self {
-            cwd,
-            argv,
-            loaded_paths: HashMap::new(),
-        }
+        Self { cwd, argv }
     }
 
     fn load_builtin(&self, specifier: &str) -> Option<Result<LoadedModuleSource, ModuleSourceError>> {
         if let Some(name) = specifier.strip_prefix(NODE_SCHEME) {
-            return Some(builtin_source(name, specifier, &self.cwd, &self.argv));
+            return Some(builtin_source(name, &self.cwd, &self.argv));
         }
         if builtins::is_builtin(specifier) {
-            return Some(builtin_source(specifier, specifier, &self.cwd, &self.argv));
+            return Some(builtin_source(specifier, &self.cwd, &self.argv));
         }
         None
     }
@@ -90,16 +74,12 @@ impl NodeLikeResolver {
             let referrer = referrer.ok_or_else(|| {
                 ModuleSourceError::new(format!("relative specifier '{specifier}' has no referrer"))
             })?;
-            let referrer_file = if let Some(path) = referrer.strip_prefix(FILE_SCHEME) {
-                PathBuf::from(path)
-            } else if let Some(path) = self.loaded_paths.get(referrer) {
-                path.clone()
-            } else {
+            let Some(referrer_file) = referrer.strip_prefix(FILE_SCHEME) else {
                 return Err(ModuleSourceError::new(format!(
                     "relative specifier '{specifier}' cannot resolve against unknown referrer '{referrer}'"
                 )));
             };
-            let directory = referrer_file.parent().map_or_else(|| PathBuf::from("/"), Path::to_path_buf);
+            let directory = Path::new(referrer_file).parent().map_or_else(|| PathBuf::from("/"), Path::to_path_buf);
             return Ok(normalize_path(&directory.join(specifier)));
         }
         Err(ModuleSourceError::new(format!(
@@ -110,16 +90,16 @@ impl NodeLikeResolver {
 
 fn builtin_source(
     name: &str,
-    specifier: &str,
     cwd: &Path,
     argv: &[String],
 ) -> Result<LoadedModuleSource, ModuleSourceError> {
     let source = builtins::source(name, cwd, argv)
-        .ok_or_else(|| ModuleSourceError::new(format!("no such builtin module '{specifier}'")))?;
+        .ok_or_else(|| ModuleSourceError::new(format!("no such builtin module '{NODE_SCHEME}{name}'")))?;
+    let canonical = format!("{NODE_SCHEME}{name}");
     Ok(LoadedModuleSource {
-        key: ModuleKey::new(Arc::from(specifier)),
+        key: ModuleKey::new(Arc::from(canonical.as_str())),
         source,
-        display_name: format!("{NODE_SCHEME}{name}"),
+        display_name: canonical,
     })
 }
 
@@ -155,7 +135,7 @@ fn directory_error(path: &Path) -> ModuleSourceError {
     ))
 }
 
-/// The canonical `file://` name for a resolved path, used for display.
+/// The canonical `file://` name for a resolved path.
 fn canonical_name(path: &Path) -> String {
     format!("{FILE_SCHEME}{}", path.display())
 }
@@ -190,25 +170,14 @@ impl ModuleSourceLoader for NodeLikeResolver {
         }
         let candidate = self.resolve_path(specifier, referrer)?;
         let path = resolve_file(&candidate)?;
-        if let Some(previous) = self.loaded_paths.get(specifier) {
-            if *previous != path {
-                return Err(ModuleSourceError::new(format!(
-                    "specifier '{specifier}' resolved to both '{}' and '{}'; \
-                     specifier-text keys cannot represent both (facade gap)",
-                    previous.display(),
-                    path.display()
-                )));
-            }
-        } else {
-            self.loaded_paths.insert(specifier.to_owned(), path.clone());
-        }
         let source = fs::read_to_string(&path).map_err(|error| {
             ModuleSourceError::new(format!("cannot read '{}': {error}", path.display()))
         })?;
+        let canonical = canonical_name(&path);
         Ok(LoadedModuleSource {
-            key: ModuleKey::new(Arc::from(specifier)),
+            key: ModuleKey::new(Arc::from(canonical.as_str())),
             source,
-            display_name: canonical_name(&path),
+            display_name: canonical,
         })
     }
 }
@@ -297,7 +266,7 @@ mod tests {
     }
 
     #[test]
-    fn node_builtins_use_specifier_text_keys() {
+    fn node_builtins_use_canonical_node_keys() {
         let mut resolver = resolver();
         let loaded = resolver
             .load_module("node:assert", None)
@@ -306,8 +275,9 @@ mod tests {
         assert_eq!(loaded.display_name, "node:assert");
         assert!(loaded.source.contains("strictEqual"));
 
+        // A bare builtin name canonicalizes to its `node:` key.
         let bare = resolver.load_module("assert", None).expect("bare builtin loads");
-        assert_eq!(bare.key.as_str(), "assert");
+        assert_eq!(bare.key.as_str(), "node:assert");
         assert_eq!(bare.display_name, "node:assert");
 
         let path = resolver.load_module("node:path", None).expect("node:path loads");
@@ -343,13 +313,13 @@ mod tests {
             .load_module("./dep.mjs", Some(&referrer))
             .expect("exact file loads");
         assert_eq!(loaded.source, "export const v = 1;");
-        assert_eq!(loaded.key.as_str(), "./dep.mjs");
         let expected_name = format!("file://{}/dep.mjs", directory.display());
+        assert_eq!(loaded.key.as_str(), expected_name);
         assert_eq!(loaded.display_name, expected_name);
     }
 
     #[test]
-    fn nested_referrers_resolve_through_loaded_specifiers() {
+    fn nested_referrers_resolve_through_canonical_keys() {
         let directory = temp_dir("nested");
         let _cleanup = Cleanup(directory.clone());
         fs::create_dir_all(directory.join("lib")).expect("create lib");
@@ -358,20 +328,21 @@ mod tests {
 
         let mut resolver = resolver();
         let referrer = format!("file://{}/main.mjs", directory.display());
-        resolver
+        let util = resolver
             .load_module("./lib/util.mjs", Some(&referrer))
             .expect("util loads");
-        // util.mjs was registered under its raw specifier text, so its own
-        // imports arrive with that text as the referrer.
+        // util.mjs was registered under its canonical `file://` key, so its
+        // own imports arrive with that key as the referrer.
         let loaded = resolver
-            .load_module("./helper.mjs", Some("./lib/util.mjs"))
-            .expect("nested relative load resolves through the specifier map");
+            .load_module("./helper.mjs", Some(util.key.as_str()))
+            .expect("nested relative load resolves against the canonical key");
         let expected_name = format!("file://{}/lib/helper.mjs", directory.display());
+        assert_eq!(loaded.key.as_str(), expected_name);
         assert_eq!(loaded.display_name, expected_name);
     }
 
     #[test]
-    fn conflicting_specifier_reuse_is_a_clear_error() {
+    fn same_specifier_text_from_two_referrers_yields_distinct_keys() {
         let directory = temp_dir("conflict");
         let _cleanup = Cleanup(directory.clone());
         fs::create_dir_all(directory.join("a")).expect("create a");
@@ -382,13 +353,15 @@ mod tests {
         let mut resolver = resolver();
         let referrer_a = format!("file://{}/a/main.mjs", directory.display());
         let referrer_b = format!("file://{}/b/main.mjs", directory.display());
-        resolver
+        let dep_a = resolver
             .load_module("./dep.mjs", Some(&referrer_a))
             .expect("first load");
-        let error = resolver
+        let dep_b = resolver
             .load_module("./dep.mjs", Some(&referrer_b))
-            .expect_err("conflicting reuse must error");
-        assert!(error.to_string().contains("facade gap"));
+            .expect("second load");
+        assert_ne!(dep_a.key, dep_b.key);
+        assert!(dep_a.key.as_str().ends_with("/a/dep.mjs"));
+        assert!(dep_b.key.as_str().ends_with("/b/dep.mjs"));
     }
 
     #[test]

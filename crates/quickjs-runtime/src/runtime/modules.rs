@@ -8,6 +8,7 @@
 //! `import()` can later emit a host load request event completed by an
 //! explicit host call without rework.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use quickjs_bytecode::{ModuleDeclarationRecord, VerifiedBytecode};
@@ -216,6 +217,10 @@ pub(crate) struct SourceTextModuleRecord {
     pub(crate) syntax_record: ModuleSyntaxRecord,
     pub(crate) authority: Arc<VerifiedBytecode>,
     pub(crate) status: ModuleStatus,
+    /// Host-recorded resolution edges (ECMA-262 `HostResolveImportedModule`):
+    /// maps each raw import specifier text of this module to the module record
+    /// the host resolved it to at load time.
+    pub(crate) resolved_dependencies: HashMap<String, ModuleRecordId>,
     pub(crate) dfs_index: Option<u32>,
     pub(crate) dfs_ancestor_index: Option<u32>,
     pub(crate) cycle_root: Option<ModuleRecordId>,
@@ -245,6 +250,7 @@ impl SourceTextModuleRecord {
             syntax_record,
             authority,
             status: ModuleStatus::New,
+            resolved_dependencies: HashMap::new(),
             dfs_index: None,
             dfs_ancestor_index: None,
             cycle_root: None,

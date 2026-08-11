@@ -955,6 +955,9 @@ pub fn evaluate_module(
                 .collect();
             let loaded = loader.load_module(&specifier, Some(referrer_key.as_str()))?;
             if !seen.insert(loaded.key.as_str().to_owned()) {
+                // Cycle/diamond edge to an already-registered record: record
+                // the (referrer, specifier) edge and skip re-registration.
+                context.register_module_dependency(&referrer_key, &specifier, &loaded.key)?;
                 continue;
             }
             let compiled = compile_module_source(
@@ -968,6 +971,9 @@ pub fn evaluate_module(
                 compiled.syntax_record.clone(),
                 compiled.authority.clone(),
             )?;
+            // HostResolveImportedModule: record the (referrer, specifier)
+            // edge now that both records are registered.
+            context.register_module_dependency(&referrer_key, &specifier, &loaded.key)?;
             queue.push((compiled.key, compiled.syntax_record));
         }
     }
@@ -998,6 +1004,11 @@ fn gather_dynamic_import_graph(
     let loaded = loader.load_module(&specifier, referrer.as_deref())?;
     let root_key = loaded.key.clone();
     if context.has_module(&root_key) {
+        // The graph root is already registered; record the referring module's
+        // (referrer, specifier) edge and reuse the existing record.
+        if let Some(referrer_key) = import.referrer() {
+            context.register_module_dependency(referrer_key, &specifier, &root_key)?;
+        }
         return Ok(root_key);
     }
 
@@ -1008,6 +1019,12 @@ fn gather_dynamic_import_graph(
         root_compiled.syntax_record.clone(),
         root_compiled.authority.clone(),
     )?;
+    // A module-level import() records the (referrer, specifier) edge on the
+    // referring module; a script-level import() has no referrer record, so no
+    // edge is needed.
+    if let Some(referrer_key) = import.referrer() {
+        context.register_module_dependency(referrer_key, &specifier, &root_key)?;
+    }
 
     // BFS: gather all dependencies, as in `evaluate_module`.
     let mut queue: Vec<(quickjs_runtime::ModuleKey, quickjs_frontend::ModuleSyntaxRecord)> =
@@ -1027,6 +1044,9 @@ fn gather_dynamic_import_graph(
                 .collect();
             let loaded = loader.load_module(&specifier, Some(referrer_key.as_str()))?;
             if context.has_module(&loaded.key) || !seen.insert(loaded.key.as_str().to_owned()) {
+                // Cycle/diamond edge to an already-registered record: record
+                // the (referrer, specifier) edge and skip re-registration.
+                context.register_module_dependency(&referrer_key, &specifier, &loaded.key)?;
                 continue;
             }
             let compiled = compile_module_source(
@@ -1040,6 +1060,9 @@ fn gather_dynamic_import_graph(
                 compiled.syntax_record.clone(),
                 compiled.authority.clone(),
             )?;
+            // HostResolveImportedModule: record the (referrer, specifier)
+            // edge now that both records are registered.
+            context.register_module_dependency(&referrer_key, &specifier, &loaded.key)?;
             queue.push((compiled.key, compiled.syntax_record));
         }
     }

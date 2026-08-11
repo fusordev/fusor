@@ -121,10 +121,13 @@ fn run_file(file: &str, as_script: bool, argv: Vec<String>) -> u8 {
             }
         }
     } else {
-        let root_name = format!("file://{display_name}");
+        // The root key is canonical: the absolute, lexically normalized path
+        // prefixed with `file://`, matching the keys the resolver issues.
+        let cwd = std::env::current_dir().unwrap_or_else(|_| Path::new("/").to_path_buf());
+        let root_path = resolver::normalize_path(&cwd.join(&path));
+        let root_name = format!("file://{}", root_path.display());
         let mut process_argv = vec!["qjs".to_owned(), display_name];
         process_argv.extend(argv);
-        let cwd = std::env::current_dir().unwrap_or_else(|_| Path::new("/").to_path_buf());
         let mut resolver = NodeLikeResolver::new(cwd, process_argv);
         match evaluate_module(&mut context, &source, &root_name, &mut resolver, ScriptLimits::default()) {
             Ok(_) => 0,

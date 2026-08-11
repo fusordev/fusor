@@ -1282,15 +1282,18 @@ fn execute_case(
 
 /// Filesystem-backed module loader for Test262 module-goal tests.
 ///
-/// The runtime linker currently looks dependencies up in the realm registry by
-/// their *raw specifier text*, so every issued key equals the specifier exactly
-/// as written in the importing module. File resolution still happens against
-/// normalized `test/`-relative paths: `resolved` maps each issued key (and the
-/// root test path) to the suite-relative path it was loaded from, so nested
-/// fixtures resolve against the referring file's directory. Only relative
-/// specifiers (`./`, `../`) that stay inside the test root resolve; anything
-/// else surfaces as a resolution failure, which Test262 negative tests expect
-/// at the `resolution` phase.
+/// Issued keys are canonical: the normalized suite-relative path of the file
+/// the specifier resolved to (the root test's key is its own suite-relative
+/// path). The facade records a (referrer, specifier) resolution edge for every
+/// successful load, so the runtime linker resolves each import through the
+/// referring module's edges — two files reached through the same specifier
+/// text no longer collide, and one file reached through two specifier texts is
+/// registered and evaluated exactly once. `resolved` maps each issued key to
+/// the suite-relative path it was loaded from, so nested fixtures resolve
+/// against the referring file's directory. Only relative specifiers (`./`,
+/// `../`) that stay inside the test root resolve; anything else surfaces as a
+/// resolution failure, which Test262 negative tests expect at the
+/// `resolution` phase.
 struct Test262ModuleLoader<'a> {
     test_root: &'a Path,
     resolved: BTreeMap<String, String>,
@@ -1326,9 +1329,9 @@ impl ModuleSourceLoader for Test262ModuleLoader<'_> {
             ))
         })?;
         self.resolved
-            .insert(specifier.to_owned(), resolved.clone());
+            .insert(resolved.clone(), resolved.clone());
         Ok(LoadedModuleSource {
-            key: ModuleKey::new(Arc::from(specifier)),
+            key: ModuleKey::new(Arc::from(resolved.as_str())),
             source,
             display_name: format!("test/{resolved}"),
         })

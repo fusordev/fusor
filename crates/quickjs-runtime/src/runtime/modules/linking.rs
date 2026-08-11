@@ -4,11 +4,10 @@
 //! and 16.2.1.7 (InitializeEnvironment) using an explicit-stack DFS.
 
 use std::collections::HashSet;
-use std::sync::Arc;
 
 use quickjs_bytecode::{CompilerInitializationPolicy, ModuleBindingOrigin, ModuleImportName};
 
-use super::{BindingCell, ModuleError, ModuleKey, ModuleRecordId, ModuleStatus, ResolvedExport};
+use super::{BindingCell, ModuleError, ModuleRecordId, ModuleStatus, ResolvedExport};
 use crate::runtime::{
     BindingCellId, RealmId, Runtime, SlotValue, StoredValue, usize_to_u64,
 };
@@ -433,16 +432,17 @@ fn resolve_request(
         .get(request_index as usize)
         .ok_or_else(|| ModuleError::link("request index out of range"))?;
     let specifier = units_to_utf8(request.specifier().code_units());
-    let key = ModuleKey::new(Arc::from(String::from_utf8_lossy(&specifier).as_ref()));
-    let realm_state = runtime.realms.get(record.realm).expect("realm exists");
-    let dep = realm_state
-        .module_registry
-        .get(&key)
+    let specifier = String::from_utf8_lossy(&specifier);
+    // HostResolveImportedModule: the host recorded the resolution edge for
+    // this (referrer, specifier) pair at load time; a missing edge means the
+    // host never resolved this request.
+    let dep = record
+        .resolved_dependencies
+        .get(specifier.as_ref())
         .copied()
         .ok_or_else(|| {
             ModuleError::link(format!(
-                "dependency '{}' is not registered",
-                String::from_utf8_lossy(&specifier)
+                "dependency '{specifier}' has no registered resolution edge"
             ))
         })?;
     Ok(dep)
