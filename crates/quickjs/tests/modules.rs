@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use quickjs::{
     LoadedModuleSource, ModuleSourceError, ModuleSourceLoader, ScriptLimits, evaluate_module,
-    evaluate_script,
+    evaluate_script, pump_dynamic_imports,
 };
 use quickjs_runtime::{JsNumber, ModuleKey, Runtime, RuntimeLimits};
 
@@ -412,3 +412,215 @@ fn import_meta_in_a_script_is_a_syntax_error() {
         "import.meta outside a module must be a syntax error"
     );
 }
+
+// ---- Dynamic import() through the host-load boundary ----
+
+/// Evaluates `root` as a module, pumps every parked dynamic import to
+/// quiescence, then evaluates `probe` as a Script. The probe throws on any
+/// assertion failure.
+fn evaluate_dynamic(root: &str, entries: &[(&str, &str)], probe: &str) -> Result<(), String> {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let mut loader = MapLoader::new(entries);
+    evaluate_module(
+        &mut context,
+        root,
+        "root.mjs",
+        &mut loader,
+        ScriptLimits::default(),
+    )
+    .map_err(|error| format!("evaluate_module: {error}"))?;
+    pump_dynamic_imports(&mut context, &mut loader, ScriptLimits::default())
+        .map_err(|error| format!("pump: {error}"))?;
+    evaluate_script(&mut context, probe, "probe.js", ScriptLimits::default())
+        .map(|_| ())
+        .map_err(|error| format!("probe: {error}"))
+}
+
+#[test]
+fn dynamic_import_fulfills_with_namespace_and_live_bindings() {
+    evaluate_dynamic(
+        "import('./dep.mjs').then(function (ns) { globalThis.ns = ns; globalThis.named = ns.value; globalThis.def = ns.default; });",
+        &[(
+            "./dep.mjs",
+            "export const value = 7;\n\
+             export default 9;\n\
+             export let counter = 0;\n\
+             export function bump() { counter += 1; }",
+        )],
+        "if (globalThis.named !== 7) { throw new Error('named ' + globalThis.named); }\n\
+         if (globalThis.def !== 9) { throw new Error('default ' + globalThis.def); }\n\
+         if (globalThis.ns.counter !== 0) { throw new Error('initial'); }\n\
+         globalThis.ns.bump();\n\
+         if (globalThis.ns.counter !== 1) { throw new Error('not live'); }\n\
+         if (Object.getPrototypeOf(globalThis.ns) !== null) { throw new Error('prototype'); }",
+    )
+    .expect("dynamic import fulfills with the namespace object");
+}
+
+#[test]
+fn dynamic_import_from_a_script_has_no_referrer_module() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let mut loader = MapLoader::new(&[("./dep.mjs", "export const value = 11;")]);
+    evaluate_script(
+        &mut context,
+        "import('./dep.mjs').then((ns) => { globalThis.value = ns.value; });",
+        "entry.js",
+        ScriptLimits::default(),
+    )
+    .expect("script evaluates");
+    pump_dynamic_imports(&mut context, &mut loader, ScriptLimits::default())
+        .expect("pump completes");
+    evaluate_script(
+        &mut context,
+        "if (globalThis.value !== 11) { throw new Error('value ' + globalThis.value); }",
+        "probe.js",
+        ScriptLimits::default(),
+    )
+    .expect("script dynamic import settles");
+}
+
+#[test]
+fn dynamic_import_rejects_for_a_missing_module() {
+    evaluate_dynamic(
+        "import('./missing.mjs').then(\n\
+             function () { globalThis.settled = 'fulfilled'; },\n\
+             function (error) { globalThis.settled = 'rejected'; globalThis.reason = String(error); });",
+        &[],
+        "if (globalThis.settled !== 'rejected') { throw new Error('settled ' + globalThis.settled); }\n\
+         if (!globalThis.reason.includes('missing.mjs')) { throw new Error('reason ' + globalThis.reason); }",
+    )
+    .expect("a load failure rejects the import promise");
+}
+
+#[test]
+fn dynamic_import_rejects_unsupported_attributes() {
+    evaluate_dynamic(
+        "import('./dep.mjs', { with: { type: 'json' } }).then(\n\
+             function () { globalThis.settled = 'fulfilled'; },\n\
+             function (error) { globalThis.settled = 'rejected'; globalThis.reason = String(error); });",
+        &[("./dep.mjs", "export const value = 1;")],
+        "if (globalThis.settled !== 'rejected') { throw new Error('settled ' + globalThis.settled); }\n\
+         if (!globalThis.reason.includes('unsupported dynamic import attribute')) { throw new Error('reason ' + globalThis.reason); }",
+    )
+    .expect("non-empty attributes still reject before the host boundary");
+}
+
+#[test]
+fn dynamic_import_rejects_with_the_evaluation_exception() {
+    evaluate_dynamic(
+        "import('./boom.mjs').then(\n\
+             function () { globalThis.settled = 'fulfilled'; },\n\
+             function (error) {\n\
+                 globalThis.settled = 'rejected';\n\
+                 globalThis.isTypeError = error instanceof TypeError;\n\
+                 globalThis.reason = error.message; });",
+        &[("./boom.mjs", "throw new TypeError('boom-eval');")],
+        "if (globalThis.settled !== 'rejected') { throw new Error('settled ' + globalThis.settled); }\n\
+         if (globalThis.isTypeError !== true) { throw new Error('error class'); }\n\
+         if (globalThis.reason !== 'boom-eval') { throw new Error('reason ' + globalThis.reason); }",
+    )
+    .expect("an evaluation failure rejects with the original exception");
+}
+
+#[test]
+fn dynamic_import_rejects_with_a_syntax_error_for_a_link_failure() {
+    evaluate_dynamic(
+        "import('./bad.mjs').then(\n\
+             function () { globalThis.settled = 'fulfilled'; },\n\
+             function (error) {\n\
+                 globalThis.settled = 'rejected';\n\
+                 globalThis.isSyntaxError = error instanceof SyntaxError;\n\
+                 globalThis.reason = String(error); });",
+        &[
+            ("./bad.mjs", "import { missing } from './dep.mjs';"),
+            ("./dep.mjs", "export const present = 1;"),
+        ],
+        "if (globalThis.settled !== 'rejected') { throw new Error('settled ' + globalThis.settled); }\n\
+         if (globalThis.isSyntaxError !== true) { throw new Error('error class'); }",
+    )
+    .expect("a link failure rejects with a SyntaxError");
+}
+
+#[test]
+fn concurrent_dynamic_imports_all_settle() {
+    evaluate_dynamic(
+        "Promise.all([import('./a.mjs'), import('./b.mjs')])\n\
+             .then(function (pair) { globalThis.sum = pair[0].value + pair[1].value; });",
+        &[
+            ("./a.mjs", "export const value = 20;"),
+            ("./b.mjs", "export const value = 22;"),
+        ],
+        "if (globalThis.sum !== 42) { throw new Error('sum ' + globalThis.sum); }",
+    )
+    .expect("concurrent dynamic imports all settle");
+}
+
+#[test]
+fn repeated_dynamic_imports_share_one_module_instance() {
+    evaluate_dynamic(
+        "Promise.all([import('./dep.mjs'), import('./dep.mjs')])\n\
+             .then(function (pair) { globalThis.same = pair[0] === pair[1]; globalThis.value = pair[0].value; });",
+        &[(
+            "./dep.mjs",
+            "globalThis.evalCount = (globalThis.evalCount || 0) + 1;\nexport const value = 3;",
+        )],
+        "if (globalThis.same !== true) { throw new Error('namespace identity'); }\n\
+         if (globalThis.value !== 3) { throw new Error('value ' + globalThis.value); }\n\
+         if (globalThis.evalCount !== 1) { throw new Error('evaluated ' + globalThis.evalCount); }",
+    )
+    .expect("the registry deduplicates repeated imports of one module");
+}
+
+#[test]
+fn dynamic_import_of_a_statically_imported_module_reuses_the_record() {
+    evaluate_dynamic(
+        "import { value } from './dep.mjs';\n\
+         globalThis.staticValue = value;\n\
+         import('./dep.mjs').then(function (ns) { globalThis.dynamicValue = ns.value; });",
+        &[(
+            "./dep.mjs",
+            "globalThis.evalCount = (globalThis.evalCount || 0) + 1;\nexport const value = 5;",
+        )],
+        "if (globalThis.staticValue !== 5) { throw new Error('static ' + globalThis.staticValue); }\n\
+         if (globalThis.dynamicValue !== 5) { throw new Error('dynamic ' + globalThis.dynamicValue); }\n\
+         if (globalThis.evalCount !== 1) { throw new Error('evaluated ' + globalThis.evalCount); }",
+    )
+    .expect("a dynamic import of an evaluated module reuses its record");
+}
+
+#[test]
+fn dynamic_import_cycle_back_into_the_referrer_settles() {
+    evaluate_dynamic(
+        "export function fromRoot() { return 'root'; }\n\
+         import('./a.mjs').then(function (ns) { globalThis.cycleResult = ns.fromA(); });",
+        &[
+            (
+                "./a.mjs",
+                "import { fromRoot } from 'root.mjs';\n\
+                 export function fromA() { return fromRoot() + '+a'; }",
+            ),
+            ("root.mjs", ""),
+        ],
+        "if (globalThis.cycleResult !== 'root+a') { throw new Error('cycle ' + globalThis.cycleResult); }",
+    )
+    .expect("a dynamic import cycle back into the referrer settles");
+}
+
+#[test]
+fn dynamic_import_of_a_top_level_await_module_rejects_during_load() {
+    // Top-level await is still compiler-rejected, so the graph never reaches
+    // the runtime: the load fails and rejects the import promise.
+    evaluate_dynamic(
+        "import('./tla.mjs').then(\n\
+             function () { globalThis.settled = 'fulfilled'; },\n\
+             function (error) { globalThis.settled = 'rejected'; globalThis.reason = String(error); });",
+        &[("./tla.mjs", "export const value = await Promise.resolve(1);")],
+        "if (globalThis.settled !== 'rejected') { throw new Error('settled ' + globalThis.settled); }",
+    )
+    .expect("a TLA module rejects the import promise while loading");
+}
+

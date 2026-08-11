@@ -5,7 +5,7 @@ use super::async_function::begin_async_function_resume;
 use super::async_generator::begin_async_generator_await_resume;
 use super::{
     Arc, CallArguments, CallInputs, CallReturn, CollectionRoot, EngineFault, ExceptionKind,
-    ExecutionBudget, ExecutionError, FunctionId, HeapFunction, HeapReference,
+    ExecutionBudget, ExecutionError, ExecutionLimits, FunctionId, HeapFunction, HeapReference,
     IntrinsicGetContinuation, JsStackFrame, JsString, NativeCall, NativeContinuation,
     NativeDispatch, NativeFailure, NativeFunction, ObjectId, OrdinaryDynamicFunctionCompiler,
     PendingException, PendingExceptionPayload, PredefinedAtom, PromiseCapabilityCapture,
@@ -2289,6 +2289,21 @@ pub(super) fn drain_host_jobs(
         }
         return Ok(());
     }
+}
+
+/// Drains queued host jobs (Promise reactions, finalization cleanup, ready
+/// `Atomics.waitAsync` completions) to quiescence under a fresh budget.
+///
+/// This is the host-turn checkpoint a driver runs after completing parked
+/// dynamic `import()` loads outside an interpreter call, so reactions queued
+/// by the settlements run before the host considers the turn finished.
+pub(crate) fn drain_host_jobs_with_limits(
+    runtime: &mut Runtime,
+    compiler: Option<&Arc<dyn OrdinaryDynamicFunctionCompiler>>,
+    limits: ExecutionLimits,
+) -> Result<(), ExecutionError> {
+    let mut execution_budget = ExecutionBudget::new(limits);
+    drain_host_jobs(runtime, compiler, &mut execution_budget)
 }
 
 /// Completes one host turn and performs its Promise-job checkpoint plus queued

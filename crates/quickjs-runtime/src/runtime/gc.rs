@@ -208,6 +208,7 @@ impl Runtime {
             pending_releases: usize_to_u64(self.mailbox.pending_len()),
             pending_promise_jobs: usize_to_u64(self.promise_jobs.len()),
             pending_atomics_waiters: usize_to_u64(self.atomics_waiters.len()),
+            pending_dynamic_imports: usize_to_u64(self.pending_dynamic_imports.len()),
             pending_finalization_jobs: usize_to_u64(self.finalization_jobs.len()),
             kept_alive: usize_to_u64(self.kept_alive.len()),
         }
@@ -898,6 +899,14 @@ impl Runtime {
         for waiter in self.atomics_waiters.values() {
             mark_heap_reference(
                 HeapReference::Object(waiter.promise),
+                &mut marked_functions,
+                &mut marked_objects,
+                &mut work,
+            );
+        }
+        for import in &self.pending_dynamic_imports {
+            mark_heap_reference(
+                HeapReference::Object(import.promise),
                 &mut marked_functions,
                 &mut marked_objects,
                 &mut work,

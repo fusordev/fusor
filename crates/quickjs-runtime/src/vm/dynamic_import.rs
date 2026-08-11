@@ -3,9 +3,14 @@
 //! This module owns the observable front half of `EvaluateImportCall`:
 //! a fresh intrinsic Promise, `ToString(specifier)`, the `options.with` Get,
 //! enumerable own import-attribute reads, and rejection of every abrupt
-//! completion after the argument expressions have been evaluated. Source Text
-//! Module graph loading is deliberately not synthesized here; until a typed
-//! module-record loader is installed, the host boundary rejects the Promise.
+//! completion after the argument expressions have been evaluated. Once the
+//! import attributes are known, `HostLoadImportedModule` crosses the typed
+//! host boundary: the runtime parks a `PendingDynamicImport` record (referrer
+//! key, specifier, attributes, Promise) and the host later completes it
+//! through [`complete_dynamic_import_load`] / [`reject_dynamic_import_load`]
+//! (`ContinueDynamicImport` / `FinishDynamicImport`), which link and evaluate
+//! the registered graph and settle the Promise with the module namespace
+//! object or the corresponding error.
 
 #[allow(
     clippy::wildcard_imports,
@@ -26,6 +31,7 @@ pub(super) struct DynamicImportContinuation {
     stage: DynamicImportStage,
     realm: RealmId,
     origin: JsStackFrame,
+    referrer: Option<crate::ids::ModuleRecordId>,
 }
 
 impl DynamicImportContinuation {
@@ -46,6 +52,7 @@ pub(super) fn begin_dynamic_import(
     realm: RealmId,
     return_to: Option<CallReturn>,
     origin: JsStackFrame,
+    referrer: Option<crate::ids::ModuleRecordId>,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     let promise = runtime.allocate_intrinsic_promise(realm)?;
@@ -56,6 +63,7 @@ pub(super) fn begin_dynamic_import(
         stage: DynamicImportStage::AwaitWith,
         realm,
         origin: origin.clone(),
+        referrer,
     };
     begin_operator_primitive_conversion(
         runtime,
@@ -93,12 +101,10 @@ fn begin_dynamic_import_options(
     return_to: Option<CallReturn>,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
+    // No options argument: the attribute set is empty and the import crosses
+    // HostLoadImportedModule immediately.
     if matches!(state.options, StoredValue::Undefined) {
-        return reject_dynamic_import_message(
-            runtime,
-            &state,
-            "dynamic module loading is not configured",
-        );
+        return park_dynamic_import_load(runtime, &state, Vec::new());
     }
     let Some(reference) = state.options.heap_reference() else {
         return reject_dynamic_import_message(
@@ -132,12 +138,9 @@ pub(super) fn advance_dynamic_import(
 ) -> Result<NativeDispatch, NativeFailure> {
     match state.stage {
         DynamicImportStage::AwaitWith => {
+            // `options.with === undefined` carries no attributes.
             if matches!(completion, StoredValue::Undefined) {
-                return reject_dynamic_import_message(
-                    runtime,
-                    &state,
-                    "dynamic module loading is not configured",
-                );
+                return park_dynamic_import_load(runtime, &state, Vec::new());
             }
             if completion.heap_reference().is_none() {
                 return reject_dynamic_import_message(
@@ -261,13 +264,38 @@ fn finish_dynamic_import_attributes(
     attributes.sort_unstable_by(|left, right| left.0.cmp(&right.0));
 
     if attributes.is_empty() {
-        reject_dynamic_import_message(runtime, state, "dynamic module loading is not configured")
+        // HostLoadImportedModule: the runtime parks the continuation and the
+        // host completes the load through the pending-import queue.
+        park_dynamic_import_load(runtime, state, attributes)
     } else {
-        // No host module loader is installed yet, so its supported import
-        // attribute key set is empty. AllImportAttributesSupported therefore
-        // rejects before HostLoadImportedModule.
+        // The host module loader's supported import attribute key set is
+        // empty for now. AllImportAttributesSupported therefore rejects
+        // before HostLoadImportedModule.
         reject_dynamic_import_message(runtime, state, "unsupported dynamic import attribute")
     }
+}
+
+fn park_dynamic_import_load(
+    runtime: &mut Runtime,
+    state: &DynamicImportContinuation,
+    attributes: Vec<(JsString, JsString)>,
+) -> Result<NativeDispatch, NativeFailure> {
+    let referrer = state
+        .referrer
+        .and_then(|module| runtime.modules.get(module))
+        .map(|record| record.key.clone());
+    let specifier = state
+        .specifier
+        .clone()
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "dynamic import parking lost its specifier",
+        })?;
+    runtime
+        .park_dynamic_import(state.realm, referrer, specifier, attributes, state.promise)
+        .map_err(NativeFailure::Execution)?;
+    Ok(NativeDispatch::Immediate(StoredValue::Object(
+        state.promise,
+    )))
 }
 
 fn read_dense_array_value(
@@ -319,4 +347,144 @@ fn reject_dynamic_import_pending(
     Ok(NativeDispatch::Immediate(StoredValue::Object(
         state.promise,
     )))
+}
+
+// ---- Host completion (`ContinueDynamicImport` / `FinishDynamicImport`) ----
+
+/// Completes a parked dynamic `import()` after the host registered the loaded
+/// module graph under `root`.
+///
+/// This is the host-driven `FinishDynamicImport`: the graph is linked and
+/// evaluated *synchronously at completion time* (evaluation errors reject the
+/// Promise with the escaping exception, link errors with a `SyntaxError`), and
+/// a successful evaluation fulfills the import Promise with the module
+/// namespace exotic object. Promise reactions queue as ordinary Promise jobs
+/// and drain at the next host-job checkpoint; they never run inline here.
+///
+/// Only internal runtime failures (allocation, invariant violations) surface
+/// as `Err`; every spec-level failure settles the Promise instead.
+pub(crate) fn complete_dynamic_import_load(
+    runtime: &mut Runtime,
+    import: crate::runtime::PendingDynamicImport,
+    root: &crate::runtime::ModuleKey,
+    limits: ExecutionLimits,
+) -> Result<(), ExecutionError> {
+    let record = import.record;
+    let realm = record.realm;
+    let promise = record.promise;
+    let Some(module) = runtime.registered_module(realm, root) else {
+        let message = format!("module '{root}' is not registered");
+        return reject_parked_import(runtime, realm, promise, ExceptionKind::TypeError, &message);
+    };
+    if let Err(error) = crate::runtime::modules::link_module(runtime, realm, module) {
+        return reject_parked_import(
+            runtime,
+            realm,
+            promise,
+            ExceptionKind::SyntaxError,
+            error.message(),
+        );
+    }
+    if let Err(error) = crate::runtime::modules::evaluate_module(runtime, realm, module, limits) {
+        let reason = module_error_rejection_value(runtime, realm, &error)?;
+        return settle_parked_import(runtime, promise, reason, true);
+    }
+    let namespace = crate::runtime::modules::get_or_create_namespace(runtime, module).map_err(
+        |_| EngineFault::RuntimeInvariant {
+            message: "namespace creation failed after successful module evaluation",
+        },
+    )?;
+    settle_parked_import(runtime, promise, StoredValue::Object(namespace), false)
+}
+
+/// Rejects a parked dynamic `import()` with a `TypeError` carrying the host's
+/// load or resolution failure message.
+pub(crate) fn reject_dynamic_import_load(
+    runtime: &mut Runtime,
+    import: crate::runtime::PendingDynamicImport,
+    message: &str,
+) -> Result<(), ExecutionError> {
+    let record = import.record;
+    reject_parked_import(
+        runtime,
+        record.realm,
+        record.promise,
+        ExceptionKind::TypeError,
+        message,
+    )
+}
+
+fn reject_parked_import(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    promise: ObjectId,
+    kind: ExceptionKind,
+    message: &str,
+) -> Result<(), ExecutionError> {
+    let object = runtime.materialize_error_object(
+        realm,
+        kind,
+        JsString::from_utf8(message)?,
+        None,
+    )?;
+    settle_parked_import(runtime, promise, StoredValue::Object(object), true)
+}
+
+/// Builds the rejection value for a module link/evaluation failure.
+///
+/// An escaping JavaScript exception rejects with the original thrown value;
+/// an engine-created error is re-materialized with its kind and message; a
+/// phase-only error falls back to `SyntaxError` (link) or `TypeError`
+/// (evaluation).
+fn module_error_rejection_value(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    error: &crate::ModuleError,
+) -> Result<StoredValue, ExecutionError> {
+    if let Some(exception) = error.exception() {
+        if let Some(value) = exception.thrown_value() {
+            return Ok(value.stored()?.duplicate());
+        }
+        if let (Some(kind), Some(message)) = (exception.kind(), exception.message()) {
+            let object = runtime.materialize_error_object(realm, kind, message.clone(), None)?;
+            return Ok(StoredValue::Object(object));
+        }
+    }
+    let kind = match error.phase() {
+        crate::ModuleErrorPhase::Link => ExceptionKind::SyntaxError,
+        crate::ModuleErrorPhase::Evaluate => ExceptionKind::TypeError,
+    };
+    let object = runtime.materialize_error_object(
+        realm,
+        kind,
+        JsString::from_utf8(error.message())?,
+        None,
+    )?;
+    Ok(StoredValue::Object(object))
+}
+
+fn settle_parked_import(
+    runtime: &mut Runtime,
+    promise: ObjectId,
+    value: StoredValue,
+    reject: bool,
+) -> Result<(), ExecutionError> {
+    let settlement = if reject {
+        reject_promise(runtime, promise, value)
+    } else {
+        fulfill_promise(runtime, promise, value)
+    };
+    settlement.map_err(native_failure_to_execution)
+}
+
+fn native_failure_to_execution(failure: NativeFailure) -> ExecutionError {
+    match failure {
+        NativeFailure::Execution(error) => error,
+        NativeFailure::Abrupt(_) | NativeFailure::AbruptAfterTransient(_) => {
+            EngineFault::RuntimeInvariant {
+                message: "dynamic import promise settlement completed abruptly",
+            }
+            .into()
+        }
+    }
 }

@@ -65,6 +65,7 @@ mod array_buffers;
 mod async_functions;
 mod atomics_waiters;
 mod data_views;
+mod dynamic_imports;
 mod dates;
 mod intls;
 mod iterators;
@@ -5520,6 +5521,8 @@ pub struct Runtime {
         tokio::sync::mpsc::UnboundedReceiver<crate::shared_array_buffer::AtomicsWakeEvent>,
     pub(crate) atomics_agent_id: usize,
     pub(crate) atomics_timer: Option<atomics_waiters::AtomicsTimerDriver>,
+    pub(crate) pending_dynamic_imports:
+        VecDeque<dynamic_imports::PendingDynamicImportRecord>,
     pub(crate) finalization_jobs: VecDeque<ObjectId>,
     pub(crate) kept_alive: Vec<StoredValue>,
     pub(crate) generator_states: HashMap<ObjectId, crate::vm::GeneratorRecord>,
@@ -5628,6 +5631,7 @@ pub use modules::{
     ImportMetaHook, ModuleError, ModuleErrorPhase, ModuleEvaluationError, ModuleKey,
     ModuleLinkError, ModuleLoader, ModuleResolveError, default_import_meta_resolve,
 };
+pub use dynamic_imports::PendingDynamicImport;
 #[cfg(test)]
 mod realm_snapshot;
 mod template_objects;

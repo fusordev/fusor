@@ -550,6 +550,7 @@ impl Runtime {
             atomics_wake_receiver,
             atomics_agent_id,
             atomics_timer: None,
+            pending_dynamic_imports: VecDeque::new(),
             finalization_jobs: VecDeque::new(),
             kept_alive: Vec::new(),
             generator_states: HashMap::new(),

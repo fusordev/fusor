@@ -26,6 +26,7 @@ mod namespace;
 
 pub use host::{ImportMetaHook, ModuleLoader, ModuleResolveError, default_import_meta_resolve};
 pub use linking::{ModuleLinkError, link_module};
+pub(crate) use linking::get_or_create_namespace;
 pub use evaluation::{ModuleEvaluationError, evaluate_module};
 pub(crate) use namespace::ModuleNamespaceState;
 pub(crate) use import_meta::get_or_create_import_meta;

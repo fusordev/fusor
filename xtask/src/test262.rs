@@ -4,7 +4,7 @@ use crate::DEFAULT_TIMEOUT_MS;
 use quickjs::{
     DynamicFunctionLimits, LoadedModuleSource, ModuleEvaluationError, ModuleSourceError,
     ModuleSourceLoader, ScriptEvaluationError, ScriptLimits,
-    call_with_dynamic_function_support, evaluate_module, evaluate_script,
+    call_with_dynamic_function_support, evaluate_module, evaluate_script, pump_dynamic_imports,
 };
 use quickjs_frontend::DiagnosticStage;
 use quickjs_runtime::{
@@ -1241,7 +1241,18 @@ fn execute_case(
     let outcome = if mode == TestMode::Module {
         let mut loader = Test262ModuleLoader::new(&harness.test_root, &plan.relative);
         match evaluate_module(&mut context, source, &plan.relative, &mut loader, limits) {
-            Ok(_) => Ok(()),
+            Ok(_) => match pump_dynamic_imports(&mut context, &mut loader, limits) {
+                Ok(()) => Ok(()),
+                Err(error) => Err((
+                    classify_module_error(
+                        &mut context,
+                        &error,
+                        test262_error_classifier.as_ref(),
+                        classifier_limits,
+                    ),
+                    error.to_string(),
+                )),
+            },
             Err(error) => Err((
                 classify_module_error(
                     &mut context,
@@ -1554,6 +1565,10 @@ fn classify_module_error(
                     )
                 }),
             },
+        },
+        ModuleEvaluationError::Execution(_) => ActualError {
+            phase: "runtime".to_owned(),
+            error_type: None,
         },
     }
 }

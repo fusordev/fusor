@@ -1634,6 +1634,13 @@ pub(super) fn execute_one(
                     },
                 )?);
             let origin = instruction_location(runtime, frame, source_pc)?;
+            // As for ImportMeta, the importing module is found by its
+            // installed code id; a plain Script has no referrer module.
+            let referrer = runtime
+                .modules
+                .iter()
+                .find(|(_, record)| record.installed_code == Some(frame.code))
+                .map(|(id, _)| id);
             return native_step(
                 begin_dynamic_import(
                     runtime,
@@ -1642,6 +1649,7 @@ pub(super) fn execute_one(
                     realm,
                     Some(return_to),
                     origin,
+                    referrer,
                     execution_budget,
                 ),
                 return_to,

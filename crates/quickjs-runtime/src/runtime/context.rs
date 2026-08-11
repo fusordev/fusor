@@ -1089,4 +1089,91 @@ impl Context<'_> {
             .ok_or_else(|| super::ModuleError::link("module is not registered"))?;
         super::modules::evaluate_module(self.runtime, self.realm, id, limits)
     }
+
+    // ---- Dynamic import host-load boundary ----
+
+    /// Removes the oldest parked dynamic `import()` load request, if any.
+    ///
+    /// The host resolves [`PendingDynamicImport::specifier`] (relative to
+    /// [`PendingDynamicImport::referrer`] when present), loads and compiles
+    /// the module graph, registers every record through
+    /// [`Self::register_module`], and then settles the import through
+    /// [`Self::complete_dynamic_import`] or [`Self::reject_dynamic_import`].
+    pub fn take_pending_dynamic_import(&mut self) -> Option<super::PendingDynamicImport> {
+        self.runtime.take_pending_dynamic_import()
+    }
+
+    /// Returns the number of parked dynamic `import()` load requests.
+    #[must_use]
+    pub fn pending_dynamic_import_count(&self) -> usize {
+        self.runtime.pending_dynamic_import_count()
+    }
+
+    /// Returns whether a module record is registered under `key` in this
+    /// context's realm. A registered module must not be registered again;
+    /// completing a dynamic import against it reuses the existing record
+    /// (link and evaluation are idempotent per ECMA-262).
+    #[must_use]
+    pub fn has_module(&self, key: &super::ModuleKey) -> bool {
+        self.runtime.registered_module(self.realm, key).is_some()
+    }
+
+    /// Completes a parked dynamic `import()` (`FinishDynamicImport`).
+    ///
+    /// The host must have registered the loaded graph under `root`. The graph
+    /// is linked and evaluated synchronously at completion time; the import
+    /// Promise then fulfills with the module namespace exotic object, or
+    /// rejects with the link error (`SyntaxError`) or the evaluation
+    /// exception. Promise reactions queue as ordinary jobs and run at the
+    /// next host-job checkpoint (see [`Self::drain_host_jobs`]).
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`ExecutionError`] only for internal runtime failures;
+    /// spec-level load, link, and evaluation failures settle the Promise.
+    pub fn complete_dynamic_import(
+        &mut self,
+        import: super::PendingDynamicImport,
+        root: &super::ModuleKey,
+        limits: ExecutionLimits,
+    ) -> Result<(), crate::ExecutionError> {
+        crate::vm::complete_dynamic_import_load(self.runtime, import, root, limits)
+    }
+
+    /// Rejects a parked dynamic `import()` with a `TypeError` carrying the
+    /// host's load or resolution failure message. Use this when the module
+    /// graph could not be produced at all (resolution miss, IO error, parse
+    /// or compile failure); the failure never throws synchronously.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`ExecutionError`] only for internal runtime failures.
+    pub fn reject_dynamic_import(
+        &mut self,
+        import: super::PendingDynamicImport,
+        message: &str,
+    ) -> Result<(), crate::ExecutionError> {
+        crate::vm::reject_dynamic_import_load(self.runtime, import, message)
+    }
+
+    /// Drains queued host jobs (Promise reactions, finalization cleanup,
+    /// ready `Atomics.waitAsync` completions) to quiescence.
+    ///
+    /// Host-turn checkpoint for drivers that settle parked dynamic `import()`
+    /// loads outside an interpreter call: run this after
+    /// [`Self::complete_dynamic_import`] / [`Self::reject_dynamic_import`] so
+    /// the queued reactions (which may park further dynamic imports) execute.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`ExecutionError`] when a job fails with an uncatchable
+    /// host/runtime failure; ordinary JavaScript exceptions inside jobs are
+    /// delivered to their Promise reactions and do not surface here.
+    pub fn drain_host_jobs(
+        &mut self,
+        limits: ExecutionLimits,
+        compiler: Option<&Arc<dyn OrdinaryDynamicFunctionCompiler>>,
+    ) -> Result<(), crate::ExecutionError> {
+        crate::vm::drain_host_jobs_with_limits(self.runtime, compiler, limits)
+    }
 }

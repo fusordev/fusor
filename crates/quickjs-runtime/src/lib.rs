@@ -68,8 +68,8 @@ pub use property::{
 };
 pub use runtime::{
     CollectionReport, Context, ModuleError, ModuleErrorPhase, ModuleEvaluationError,
-    ModuleKey, ModuleLinkError, ModuleLoader, ModuleResolveError, Realm, Runtime, RuntimeLimits,
-    RuntimeUsage,
+    ModuleKey, ModuleLinkError, ModuleLoader, ModuleResolveError, PendingDynamicImport, Realm,
+    Runtime, RuntimeLimits, RuntimeUsage,
 };
 pub use shared_array_buffer::SharedArrayBufferHandle;
 pub use string::{CodeUnits, JsString, JsStringError, MAX_STRING_CODE_UNITS};

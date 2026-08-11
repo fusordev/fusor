@@ -790,6 +790,9 @@ pub enum ModuleEvaluationError {
     Compiler(ScriptCompilerError),
     /// Linking or evaluation failure.
     Runtime(quickjs_runtime::ModuleError),
+    /// Host-job execution failure while settling parked dynamic `import()`
+    /// loads.
+    Execution(ExecutionError),
 }
 
 impl fmt::Display for ModuleEvaluationError {
@@ -799,6 +802,7 @@ impl fmt::Display for ModuleEvaluationError {
             Self::Frontend(error) => error.fmt(formatter),
             Self::Compiler(error) => error.fmt(formatter),
             Self::Runtime(error) => error.fmt(formatter),
+            Self::Execution(error) => error.fmt(formatter),
         }
     }
 }
@@ -810,6 +814,7 @@ impl Error for ModuleEvaluationError {
             Self::Frontend(error) => Some(error),
             Self::Compiler(error) => Some(error),
             Self::Runtime(error) => Some(error),
+            Self::Execution(error) => Some(error),
         }
     }
 }
@@ -835,6 +840,12 @@ impl From<ScriptCompilerError> for ModuleEvaluationError {
 impl From<quickjs_runtime::ModuleError> for ModuleEvaluationError {
     fn from(error: quickjs_runtime::ModuleError) -> Self {
         Self::Runtime(error)
+    }
+}
+
+impl From<ExecutionError> for ModuleEvaluationError {
+    fn from(error: ExecutionError) -> Self {
+        Self::Execution(error)
     }
 }
 
@@ -968,6 +979,111 @@ pub fn evaluate_module(
     context.evaluate_module(&root_compiled.key, limits.execution)?;
 
     Ok(context.undefined_value())
+}
+
+/// Loads, registers, and compiles the graph requested by one parked dynamic
+/// `import()`, returning the resolved root key.
+///
+/// Modules already registered in the realm (static graph, earlier imports)
+/// are reused rather than re-registered, preserving registry dedup and
+/// single-evaluation semantics.
+fn gather_dynamic_import_graph(
+    context: &mut Context<'_>,
+    loader: &mut dyn ModuleSourceLoader,
+    import: &quickjs_runtime::PendingDynamicImport,
+    limits: ScriptLimits,
+) -> Result<quickjs_runtime::ModuleKey, ModuleEvaluationError> {
+    let specifier = import.specifier();
+    let referrer = import.referrer().map(|key| key.as_str().to_owned());
+    let loaded = loader.load_module(&specifier, referrer.as_deref())?;
+    let root_key = loaded.key.clone();
+    if context.has_module(&root_key) {
+        return Ok(root_key);
+    }
+
+    let root_compiled =
+        compile_module_source(&loaded.source, &loaded.display_name, limits, root_key.clone())?;
+    context.register_module(
+        root_compiled.key.clone(),
+        root_compiled.syntax_record.clone(),
+        root_compiled.authority.clone(),
+    )?;
+
+    // BFS: gather all dependencies, as in `evaluate_module`.
+    let mut queue: Vec<(quickjs_runtime::ModuleKey, quickjs_frontend::ModuleSyntaxRecord)> =
+        vec![(root_compiled.key.clone(), root_compiled.syntax_record.clone())];
+    let mut seen: HashSet<String> = HashSet::new();
+    seen.insert(root_compiled.key.as_str().to_owned());
+
+    while let Some((referrer_key, syntax)) = queue.pop() {
+        for request in syntax.requests() {
+            let specifier: String = request
+                .specifier()
+                .code_units()
+                .iter()
+                .copied()
+                .map(u32::from)
+                .filter_map(char::from_u32)
+                .collect();
+            let loaded = loader.load_module(&specifier, Some(referrer_key.as_str()))?;
+            if context.has_module(&loaded.key) || !seen.insert(loaded.key.as_str().to_owned()) {
+                continue;
+            }
+            let compiled = compile_module_source(
+                &loaded.source,
+                &loaded.display_name,
+                limits,
+                loaded.key.clone(),
+            )?;
+            context.register_module(
+                compiled.key.clone(),
+                compiled.syntax_record.clone(),
+                compiled.authority.clone(),
+            )?;
+            queue.push((compiled.key, compiled.syntax_record));
+        }
+    }
+    Ok(root_key)
+}
+
+/// Drives parked dynamic `import()` loads to quiescence.
+///
+/// Contract: call this after [`evaluate_script`] or [`evaluate_module`] (and
+/// again whenever a pump round may have parked new loads — the loop already
+/// covers reactions and freshly evaluated modules that call `import()`).
+/// Each round takes the oldest parked load from the runtime queue, resolves
+/// and loads its graph through `loader`, registers the compiled records,
+/// completes the import (link + evaluate + Promise settlement), and drains
+/// queued Promise reaction jobs before taking the next load. Load,
+/// resolution, and compile failures reject the import Promise; they never
+/// throw out of this function. The function returns `Ok` once the queue is
+/// empty.
+///
+/// # Errors
+///
+/// Returns a [`ModuleEvaluationError`] only for internal runtime failures
+/// while settling imports or draining jobs.
+pub fn pump_dynamic_imports(
+    context: &mut Context<'_>,
+    loader: &mut dyn ModuleSourceLoader,
+    limits: ScriptLimits,
+) -> Result<(), ModuleEvaluationError> {
+    let dynamic_service: Arc<dyn DynamicFunctionCompiler> = Arc::new(
+        OxcDynamicFunctionCompiler::new(limits.dynamic_function_limits()),
+    );
+    loop {
+        // Drain first: reactions queued by an earlier settlement (or by a
+        // rejection that never parked, such as unsupported attributes) run
+        // before the next load, and may themselves park new imports.
+        context.drain_host_jobs(limits.execution, Some(&dynamic_service))?;
+        let Some(import) = context.take_pending_dynamic_import() else {
+            return Ok(());
+        };
+        match gather_dynamic_import_graph(context, loader, &import, limits) {
+            Ok(root_key) => context.complete_dynamic_import(import, &root_key, limits.execution)?,
+            Err(error) => context.reject_dynamic_import(import, &error.to_string())?,
+        }
+    }
 }
 
 // ---- Dynamic function support continues ----

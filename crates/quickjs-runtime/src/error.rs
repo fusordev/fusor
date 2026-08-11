@@ -172,6 +172,8 @@ pub enum RuntimeResource {
     PromiseJobs,
     /// Pending `Atomics.waitAsync` waiter records and timeout registrations.
     AtomicsWaiters,
+    /// Parked dynamic `import()` load requests awaiting host completion.
+    DynamicImportLoads,
     /// Cleanup jobs retained for live `FinalizationRegistry` objects.
     FinalizationJobs,
     /// Weak targets retained until the current ECMAScript job completes.
@@ -206,6 +208,7 @@ impl fmt::Display for RuntimeResource {
             Self::ReleaseMailbox => "release mailbox",
             Self::PromiseJobs => "Promise jobs",
             Self::AtomicsWaiters => "Atomics waiters",
+            Self::DynamicImportLoads => "dynamic import loads",
             Self::FinalizationJobs => "finalization jobs",
             Self::KeptAlive => "kept-alive weak targets",
             Self::RegExpBacktrackStates => "RegExp backtracking states",
