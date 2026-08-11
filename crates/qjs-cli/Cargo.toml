@@ -1,0 +1,19 @@
+[package]
+name = "qjs-cli"
+version = "0.0.1"
+description = "Node-like resolver, `qjs` module runner, and ESM REPL for the pure-Rust QuickJS port"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "qjs"
+path = "src/main.rs"
+
+[dependencies]
+quickjs = { path = "../quickjs" }
+quickjs-runtime = { path = "../quickjs-runtime" }
+
+[lints]
+workspace = true

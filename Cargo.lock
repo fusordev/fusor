@@ -1236,6 +1236,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "qjs-cli"
+version = "0.0.1"
+dependencies = [
+ "quickjs",
+ "quickjs-runtime",
+]
+
+[[package]]
 name = "quickjs"
 version = "0.0.1"
 dependencies = [
