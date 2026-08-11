@@ -777,7 +777,7 @@ fn module_export_default_expression_stores_at_statement_position() {
                 .control_flow()
                 .instructions();
             // The synthetic *default* cell receives the default expression value
-            // via a TDZ-checked PutVarRef at the export default statement.
+            // via the TDZ-initializing PutVarRef at the export default statement.
             let put = instructions
                 .iter()
                 .find(|instruction| {
@@ -786,10 +786,10 @@ fn module_export_default_expression_stores_at_statement_position() {
                             instruction.decoded().instruction().opcode(),
                             instruction.decoded().instruction().operands(),
                         ),
-                        (FinalOpcode::PutVarRefCheck, Operands::VarRef(_))
+                        (FinalOpcode::PutVarRefCheckInit, Operands::VarRef(_))
                     )
                 })
-                .expect("export default stores to the synthetic cell");
+                .expect("export default initializes the synthetic cell");
             // A checked read of the exported `x` precedes the store.
             assert!(instructions.iter().any(|instruction| {
                 matches!(

@@ -1172,11 +1172,17 @@ impl CompilationContext<'_, '_, '_> {
             });
         }
         let realm_globals = self.compiled_realm_globals(executable_id, tree_layout, constants)?;
-        if !realm_globals.is_empty() {
-            return Err(LeafCompilationError::SemanticInvariant {
-                invariant: "Module root declares no realm-global bindings",
-                span: Some(program.span),
-            });
+        for global in &realm_globals {
+            let declares = tree_layout
+                .realm_globals
+                .binding(global.id())
+                .is_some_and(|binding| binding.declaration.is_some());
+            if declares {
+                return Err(LeafCompilationError::SemanticInvariant {
+                    invariant: "Module root declares no realm-global bindings",
+                    span: Some(program.span),
+                });
+            }
         }
         let mut variable_definitions = self.compiled_variable_definitions(
             executable_id,

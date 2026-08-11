@@ -5361,6 +5361,24 @@ impl Context<'_> {
         complete_host_turn(self.runtime, compiler, &mut execution_budget, completion)
     }
 
+    pub(crate) fn execute_module_frame(
+        &mut self,
+        function: FunctionId,
+        receiver: StoredValue,
+        limits: ExecutionLimits,
+    ) -> Result<StoredValue, ExecutionError> {
+        execute_module_frame_internal(self.runtime, function, receiver, limits)
+    }
+
+    pub(crate) fn execute_module_frame_on_runtime(
+        runtime: &mut Runtime,
+        function: FunctionId,
+        receiver: StoredValue,
+        limits: ExecutionLimits,
+    ) -> Result<StoredValue, ExecutionError> {
+        execute_module_frame_internal(runtime, function, receiver, limits)
+    }
+
     pub(crate) fn execute_internal_root(
         &mut self,
         root: &mut InstalledRoot,
@@ -5406,6 +5424,27 @@ impl Context<'_> {
         )?;
         execute_frames(self.runtime, frame, limits, compiler, Some(root))
     }
+}
+
+pub(crate) fn execute_module_frame_internal(
+    runtime: &mut Runtime,
+    function: FunctionId,
+    receiver: StoredValue,
+    limits: ExecutionLimits,
+) -> Result<StoredValue, ExecutionError> {
+    let plan = plan_frame(runtime, function, 0, 0, 0, FrameEntryKind::Call)?;
+    let frame = create_frame(
+        runtime,
+        plan,
+        receiver,
+        None,
+        FrameArguments::Owned(CallArguments::empty()),
+        None,
+        None,
+    )?;
+    let mut execution_budget = ExecutionBudget::new(limits);
+    let compiler: Option<&Arc<dyn OrdinaryDynamicFunctionCompiler>> = None;
+    execute_frames_with_budget(runtime, frame, compiler, None, &mut execution_budget)
 }
 
 fn execute_frames(

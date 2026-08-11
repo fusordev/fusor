@@ -184,6 +184,27 @@ pub(in crate::lowering) fn plan_external_put(
     PlannedInstruction::new(opcode, operands, span)
 }
 
+/// Plans the *initialization* store of a lexical declaration, as opposed to a
+/// later assignment. A temporal-dead-zone captured binding starts uninitialized,
+/// so the declaration store uses `put_var_ref_check_init`, which requires the
+/// uninitialized state and bypasses the immutable-write policy exactly once.
+pub(in crate::lowering) fn plan_external_put_init(
+    binding: CompilerClosureBinding,
+    slot: u16,
+    span: Span,
+) -> PlannedInstruction {
+    match binding {
+        CompilerClosureBinding::Captured(policy) if policy.has_temporal_dead_zone() => {
+            PlannedInstruction::new(
+                FinalOpcode::PutVarRefCheckInit,
+                Operands::VarRef(slot),
+                span,
+            )
+        }
+        _ => plan_external_put(binding, slot, span),
+    }
+}
+
 impl LoweredReference {
     pub(in crate::lowering) const fn access(self) -> ReferenceAccess {
         match self {
@@ -455,6 +476,25 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
         let write = plan_external_put(binding, slot, assignment.left.span());
         match assignment.operator {
             AssignmentOperator::Assign => {
+                if matches!(binding, CompilerClosureBinding::Captured(_)) {
+                    // Module-scope bindings are captured cells and module code
+                    // is always strict, so no `with` object environment can
+                    // intercept the write; upstream lowers the store to the
+                    // policy-checked `put_var_ref_check`, not a var-ref
+                    // reference. The reference atom is only retained for
+                    // realm-global writes.
+                    work.push(ExpressionWork::Emit(write));
+                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::Dup,
+                        Operands::None,
+                        assignment.left.span(),
+                    )));
+                    if let Some(set_name) = inferred_name {
+                        work.push(ExpressionWork::Emit(set_name));
+                    }
+                    work.push(ExpressionWork::Visit(&assignment.right));
+                    return Ok(());
+                }
                 return Self::push_retained_identifier_simple_assignment(
                     assignment,
                     identifier,
@@ -1836,7 +1876,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                         if let Some(set_name) = set_name {
                             flow.emit(set_name)?;
                         }
-                        flow.emit(plan_external_put(binding_kind, slot, identifier.span))?;
+                        flow.emit(plan_external_put_init(binding_kind, slot, identifier.span))?;
                     }
                     None if declaration_kind == VariableDeclarationKind::Let => {
                         flow.emit(PlannedInstruction::new(
@@ -1844,7 +1884,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                             Operands::None,
                             identifier.span,
                         ))?;
-                        flow.emit(plan_external_put(binding_kind, slot, identifier.span))?;
+                        flow.emit(plan_external_put_init(binding_kind, slot, identifier.span))?;
                     }
                     None if declaration_kind == VariableDeclarationKind::Var => {
                         // `var` is initialized to `undefined` at instantiation;
@@ -2193,7 +2233,9 @@ impl CompilationContext<'_, '_, '_> {
                 span: Some(span),
             });
         }
-        if !crate::is_supported_script_compilation_goal(self.unit.goal()) {
+        if !crate::is_supported_script_compilation_goal(self.unit.goal())
+            && !crate::is_supported_module_goal(self.unit.goal())
+        {
             return unsupported(UnsupportedLeafFeature::UnresolvedReference, span);
         }
         let global = tree_layout.realm_globals.for_unresolved(unresolved).ok_or(
@@ -2229,7 +2271,9 @@ impl CompilationContext<'_, '_, '_> {
         layout: &FrameLayout,
         tree_layout: &FunctionTreeLayout,
     ) -> Result<LoweredReference, LeafCompilationError> {
-        if !crate::is_supported_realm_global_binding_goal(self.unit.goal()) {
+        if !crate::is_supported_realm_global_binding_goal(self.unit.goal())
+            && !crate::is_supported_module_goal(self.unit.goal())
+        {
             return unsupported(UnsupportedLeafFeature::GlobalEnvironment, span);
         }
         let global = tree_layout

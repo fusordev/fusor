@@ -830,6 +830,7 @@ pub(super) fn create_frame(
                 .cells
                 .try_insert(BindingCell {
                     value: SlotValue::Uninitialized,
+                    forward: None,
                 })
                 .map_err(|_| ExecutionError::AllocationFailed {
                     resource: RuntimeResource::BindingCells,
@@ -3833,6 +3834,19 @@ pub(super) fn execute_one(
                     write_environment(runtime, frame, index, SlotValue::Value(value))?;
                 }
             }
+        }
+        FinalOpcode::PutVarRefCheckInit => {
+            let index = closure_index(opcode, operands)?;
+            if !environment_is_uninitialized(runtime, frame, index)? {
+                return Ok(Step::Abrupt(lexical_reinitialization_exception(
+                    runtime,
+                    frame,
+                    BindingName::Closure(index),
+                    source_pc,
+                )?));
+            }
+            let value = pop(frame)?;
+            write_environment(runtime, frame, index, SlotValue::Value(value))?;
         }
         FinalOpcode::CloseLoc => {
             let index = local_index(opcode, operands)?;

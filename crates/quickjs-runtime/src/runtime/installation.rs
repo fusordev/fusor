@@ -28,16 +28,17 @@
 use std::sync::Arc;
 
 use super::{
-    BindingCell, CompilerCaptureLayout, CompilerCapturedBinding, CompilerClosureBinding,
-    CompilerConstant, CompilerConstantValue, EnvironmentBinding, FrameBindingAddress, FunctionId,
-    GlobalDeclarationRejectionKind, HashSet, HeapReference, InstallError, InstalledCodeId,
-    InstalledConstant, InstalledRoot, InstalledTemplate, InstalledTemplateElement,
-    InstalledTemplateObject, JsBigInt, JsNumber, JsValue, OwnProperty, PropertyKey,
-    RealmGlobalBinding, RealmGlobalBindingState, RealmGlobalRequest, RealmId, RootEnvironment,
-    RootTarget, Runtime, RuntimeError, RuntimeResource, SlotValue, StoredValue, VerifiedBytecode,
-    check_execution_limit, check_install_limit, global_declaration_property_layout,
-    global_function_replacement_layout, rejected_global_declaration, runtime_string,
-    stale_heap_reference, usize_to_u64,
+    BindingCell, BindingCellId, BytecodeFunction, CompilerCaptureLayout, CompilerCapturedBinding,
+    CompilerClosureBinding, CompilerClosureSource, CompilerConstant, CompilerConstantValue,
+    EnvironmentBinding, FrameBindingAddress, FunctionId, FunctionImplementation, FunctionTemplateId,
+    GlobalDeclarationRejectionKind, HeapFunction, HashSet, HeapReference, InstallError,
+    InstalledCode, InstalledCodeId, InstalledConstant, InstalledRoot, InstalledTemplate,
+    InstalledTemplateElement, InstalledTemplateObject, JsBigInt, JsNumber, JsValue, OwnProperty,
+    PropertyKey, RealmGlobalBinding, RealmGlobalBindingState, RealmGlobalRequest, RealmId,
+    RootEnvironment, RootTarget, Runtime, RuntimeError, RuntimeResource, SlotValue, StoredValue,
+    VerifiedBytecode, check_execution_limit, check_install_limit, preflight_opcodes,
+    global_declaration_property_layout, global_function_replacement_layout,
+    rejected_global_declaration, runtime_string, stale_heap_reference, usize_to_u64,
 };
 
 fn stage_constant(constant: &CompilerConstant) -> Result<InstalledConstant, InstallError> {
@@ -85,6 +86,216 @@ fn stage_constant(constant: &CompilerConstant) -> Result<InstalledConstant, Inst
 }
 
 impl Runtime {
+    /// Installs module code and creates the module root function with a
+    /// pre-built module environment. Returns (code_id, function_id).
+    pub(crate) fn install_module_root(
+        &mut self,
+        realm: RealmId,
+        authority: Arc<VerifiedBytecode>,
+        module_environment: &[BindingCellId],
+    ) -> Result<(InstalledCodeId, FunctionId), InstallError> {
+        preflight_opcodes(&authority)?;
+        let graph_usage = authority.compiler_graph().usage();
+        let functions = graph_usage.functions();
+        let atoms = graph_usage.atoms();
+        let constants = graph_usage.constants();
+        check_install_limit(
+            RuntimeResource::InstalledCode,
+            self.limits.max_installed_code,
+            usize_to_u64(self.code.len()).saturating_add(1),
+        )?;
+        check_install_limit(
+            RuntimeResource::InstalledTemplates,
+            self.limits.max_installed_templates,
+            self.installed_templates.saturating_add(functions),
+        )?;
+        check_install_limit(
+            RuntimeResource::InstalledAtoms,
+            self.limits.max_installed_atoms,
+            self.installed_atoms.saturating_add(atoms),
+        )?;
+        check_install_limit(
+            RuntimeResource::InstalledConstants,
+            self.limits.max_installed_constants,
+            self.installed_constants.saturating_add(constants),
+        )?;
+        check_install_limit(
+            RuntimeResource::HeapFunctions,
+            self.limits.max_heap_functions,
+            usize_to_u64(self.functions.len()).saturating_add(1),
+        )?;
+        self.code
+            .try_reserve(1)
+            .map_err(|_| InstallError::AllocationFailed {
+                resource: RuntimeResource::InstalledCode,
+                additional: 1,
+            })?;
+        self.functions
+            .try_reserve(1)
+            .map_err(|_| InstallError::AllocationFailed {
+                resource: RuntimeResource::HeapFunctions,
+                additional: 1,
+            })?;
+        let templates = self.stage_templates(&authority)?;
+        let root_template = authority.root_id();
+        let root_environment = self.materialize_root_environment(
+            realm,
+            &authority,
+            &templates,
+            None,
+            Some(module_environment),
+        )?;
+        let environment = root_environment.bindings.clone();
+        let eval_shadows = vec![None; environment.len()];
+        let code = self
+            .code
+            .try_insert(InstalledCode {
+                authority,
+                realm,
+                templates,
+                live_functions: 1,
+            })
+            .map_err(|_| InstallError::AllocationFailed {
+                resource: RuntimeResource::InstalledCode,
+                additional: 1,
+            })?;
+        let function_prototype = HeapReference::Function(
+            self.realm_function_prototype(realm).map_err(|_| InstallError::AuthorityInvariant {
+                message: "constructor realm has no Function.prototype intrinsic",
+            })?,
+        );
+        let function_record = crate::object::ObjectRecord::empty(Some(function_prototype));
+        let function = self
+            .insert_heap_function(HeapFunction {
+                implementation: FunctionImplementation::Bytecode(BytecodeFunction {
+                    code,
+                    template: root_template,
+                    environment,
+                    environment_eval_shadows: eval_shadows,
+                    eval_environment: None,
+                    lexical_receiver: None,
+                    lexical_eval_in_function: false,
+                    lexical_eval_in_class_field_initializer: false,
+                    lexical_new_target: None,
+                    lexical_derived_constructor: None,
+                    lexical_derived_this: None,
+                    has_instance_elements: false,
+                    home_object: None,
+                }),
+                object: function_record,
+                public_roots: 0,
+            })
+            .map_err(|_| InstallError::AllocationFailed {
+                resource: RuntimeResource::HeapFunctions,
+                additional: 1,
+            })?;
+        self.installed_templates += functions;
+        self.installed_atoms += atoms;
+        self.installed_constants += constants;
+        Ok((code, function))
+    }
+
+    /// Creates a hoisted module-level function from its template, capturing the
+    /// module environment cells. Used during InitializeEnvironment.
+    pub(crate) fn create_module_closure(
+        &mut self,
+        realm: RealmId,
+        code: InstalledCodeId,
+        authority: &VerifiedBytecode,
+        child: FunctionTemplateId,
+        module_environment: &[BindingCellId],
+    ) -> Result<FunctionId, InstallError> {
+        let installed = self.code.get(code).ok_or(InstallError::AuthorityInvariant {
+            message: "module installed code is stale",
+        })?;
+        let installed_index = usize::try_from(child.get()).map_err(|_| {
+            InstallError::AuthorityInvariant {
+                message: "function template index is not representable",
+            }
+        })?;
+        let template = installed.templates.get(installed_index).ok_or(
+            InstallError::AuthorityInvariant {
+                message: "module function template is missing",
+            },
+        )?;
+        let child_function = authority.function(child).ok_or(InstallError::AuthorityInvariant {
+            message: "module function template not found in authority",
+        })?;
+        let sources = child_function.function().closure_sources();
+        let mut environment = Vec::new();
+        environment
+            .try_reserve_exact(sources.len())
+            .map_err(|_| InstallError::AllocationFailed {
+                resource: RuntimeResource::BindingCells,
+                additional: sources.len(),
+            })?;
+        for source in sources {
+            match *source {
+                CompilerClosureSource::Module { index } => {
+                    let cell = module_environment.get(index as usize).copied().ok_or(
+                        InstallError::AuthorityInvariant {
+                            message: "module closure source index out of range",
+                        },
+                    )?;
+                    environment.push(EnvironmentBinding::Captured(cell));
+                }
+                _ => {
+                    return Err(InstallError::AuthorityInvariant {
+                        message: "module-level function has unsupported closure source",
+                    });
+                }
+            }
+        }
+        let eval_shadows = vec![None; environment.len()];
+        let function_prototype = HeapReference::Function(
+            self.realm_function_prototype(realm).map_err(|_| {
+                InstallError::AuthorityInvariant {
+                    message: "constructor realm has no Function.prototype intrinsic",
+                }
+            })?,
+        );
+        let function_record = crate::object::ObjectRecord::empty(Some(function_prototype));
+        check_install_limit(
+            RuntimeResource::HeapFunctions,
+            self.limits.max_heap_functions,
+            usize_to_u64(self.functions.len()).saturating_add(1),
+        )?;
+        self.functions
+            .try_reserve(1)
+            .map_err(|_| InstallError::AllocationFailed {
+                resource: RuntimeResource::HeapFunctions,
+                additional: 1,
+            })?;
+        let function = self
+            .insert_heap_function(HeapFunction {
+                implementation: FunctionImplementation::Bytecode(BytecodeFunction {
+                    code,
+                    template: child,
+                    environment,
+                    environment_eval_shadows: eval_shadows,
+                    eval_environment: None,
+                    lexical_receiver: None,
+                    lexical_eval_in_function: false,
+                    lexical_eval_in_class_field_initializer: false,
+                    lexical_new_target: None,
+                    lexical_derived_constructor: None,
+                    lexical_derived_this: None,
+                    has_instance_elements: false,
+                    home_object: None,
+                }),
+                object: function_record,
+                public_roots: 0,
+            })
+            .map_err(|_| InstallError::AllocationFailed {
+                resource: RuntimeResource::HeapFunctions,
+                additional: 1,
+            })?;
+        if let Some(installed) = self.code.get_mut(code) {
+            installed.live_functions += 1;
+        }
+        Ok(function)
+    }
+
     pub(crate) fn prepare_execution_safe_point(&mut self) -> Result<(), crate::ExecutionError> {
         self.collect_if_pending().map_err(|error| match error {
             RuntimeError::LimitExceeded {
@@ -300,7 +511,7 @@ impl Runtime {
         true
     }
 
-    pub(super) fn stage_templates(
+    pub(crate) fn stage_templates(
         &mut self,
         authority: &VerifiedBytecode,
     ) -> Result<Vec<InstalledTemplate>, InstallError> {
@@ -398,6 +609,7 @@ impl Runtime {
         authority: &VerifiedBytecode,
         templates: &[InstalledTemplate],
         external_environment: Option<&[Option<EnvironmentBinding>]>,
+        module_environment: Option<&[BindingCellId]>,
     ) -> Result<RootEnvironment, InstallError> {
         let root = authority.root();
         let executable_kind = root.metadata().executable_kind();
@@ -513,10 +725,27 @@ impl Runtime {
                         message: "root closure source requires an omitted parent",
                     });
                 }
-                quickjs_bytecode::CompilerClosureSource::Module { .. } => {
-                    return Err(InstallError::AuthorityInvariant {
-                        message: "module execution is not yet implemented in the runtime",
-                    });
+                quickjs_bytecode::CompilerClosureSource::Module { index } => {
+                    if !matches!(definition.binding(), CompilerClosureBinding::Captured(_)) {
+                        return Err(InstallError::AuthorityInvariant {
+                            message: "module closure source has realm-global metadata",
+                        });
+                    }
+                    let environment =
+                        module_environment.ok_or(InstallError::AuthorityInvariant {
+                            message: "module environment is missing",
+                        })?;
+                    let cell = environment.get(index as usize).copied().ok_or(
+                        InstallError::AuthorityInvariant {
+                            message: "module closure source index out of range",
+                        },
+                    )?;
+                    if !self.cells.contains(cell) {
+                        return Err(InstallError::AuthorityInvariant {
+                            message: "module environment cell is stale",
+                        });
+                    }
+                    binding_slots[closure] = Some(EnvironmentBinding::Captured(cell));
                 }
             }
         }
@@ -733,6 +962,7 @@ impl Runtime {
             let lexical_state = if let Some(mutable) = request.lexical_mutability() {
                 let Ok(cell) = self.cells.try_insert(BindingCell {
                     value: SlotValue::Uninitialized,
+                    forward: None,
                 }) else {
                     let partial = RootEnvironment {
                         bindings,

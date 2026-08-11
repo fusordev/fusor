@@ -472,6 +472,7 @@ const fn supported_compiler_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::SetLocCheck
             | FinalOpcode::GetVarRefCheck
             | FinalOpcode::PutVarRefCheck
+            | FinalOpcode::PutVarRefCheckInit
             | FinalOpcode::CloseLoc
             | FinalOpcode::PrivateSymbol
             | FinalOpcode::GetField

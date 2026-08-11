@@ -6,7 +6,7 @@
 
 #![forbid(unsafe_code)]
 
-use std::{error::Error, fmt, sync::Arc};
+use std::{collections::HashSet, error::Error, fmt, sync::Arc};
 
 use quickjs_bytecode::{
     BytecodeGraphVerificationLimits, CompilerBindingKind, CompilerBindingPolicy,
@@ -716,6 +716,261 @@ pub fn evaluate_registered_script(
             )
         })
 }
+
+// ---- Module evaluation ----
+
+/// A module source loaded by the host.
+#[derive(Clone, Debug)]
+pub struct LoadedModuleSource {
+    /// Canonical key for this module within the realm.
+    pub key: quickjs_runtime::ModuleKey,
+    /// Module source text.
+    pub source: String,
+    /// Display name for diagnostics.
+    pub display_name: String,
+}
+
+/// A host-side error loading module source.
+#[derive(Debug)]
+pub struct ModuleSourceError {
+    message: String,
+}
+
+impl ModuleSourceError {
+    /// Creates a load error.
+    #[must_use]
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+impl fmt::Display for ModuleSourceError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "module load error: {}", self.message)
+    }
+}
+
+impl Error for ModuleSourceError {}
+
+/// Host loader for module source text and resolution.
+///
+/// The facade calls `load_module` for each unique specifier it encounters while
+/// gathering the module graph. The returned [`LoadedModuleSource`] provides the
+/// canonical key (for deduplication), source text, and display name.
+pub trait ModuleSourceLoader {
+    /// Loads a module by specifier, resolving relative to the referrer.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ModuleSourceError`] when the module cannot be found or loaded.
+    fn load_module(
+        &mut self,
+        specifier: &str,
+        referrer: Option<&str>,
+    ) -> Result<LoadedModuleSource, ModuleSourceError>;
+}
+
+/// A compiled module entry: syntax record + verified bytecode.
+struct CompiledModule {
+    key: quickjs_runtime::ModuleKey,
+    syntax_record: quickjs_frontend::ModuleSyntaxRecord,
+    authority: Arc<VerifiedBytecode>,
+}
+
+/// Failure of the Module host pipeline.
+#[derive(Debug)]
+pub enum ModuleEvaluationError {
+    /// Host loader failed to resolve or load a module.
+    Loader(ModuleSourceError),
+    /// Parsing, compatibility, or early errors.
+    Frontend(FrontendError),
+    /// Compilation or verification failure.
+    Compiler(ScriptCompilerError),
+    /// Linking or evaluation failure.
+    Runtime(quickjs_runtime::ModuleError),
+}
+
+impl fmt::Display for ModuleEvaluationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Loader(error) => error.fmt(formatter),
+            Self::Frontend(error) => error.fmt(formatter),
+            Self::Compiler(error) => error.fmt(formatter),
+            Self::Runtime(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl Error for ModuleEvaluationError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Loader(error) => Some(error),
+            Self::Frontend(error) => Some(error),
+            Self::Compiler(error) => Some(error),
+            Self::Runtime(error) => Some(error),
+        }
+    }
+}
+
+impl From<ModuleSourceError> for ModuleEvaluationError {
+    fn from(error: ModuleSourceError) -> Self {
+        Self::Loader(error)
+    }
+}
+
+impl From<FrontendError> for ModuleEvaluationError {
+    fn from(error: FrontendError) -> Self {
+        Self::Frontend(error)
+    }
+}
+
+impl From<ScriptCompilerError> for ModuleEvaluationError {
+    fn from(error: ScriptCompilerError) -> Self {
+        Self::Compiler(error)
+    }
+}
+
+impl From<quickjs_runtime::ModuleError> for ModuleEvaluationError {
+    fn from(error: quickjs_runtime::ModuleError) -> Self {
+        Self::Runtime(error)
+    }
+}
+
+fn compile_module_source(
+    source_text: &str,
+    source_name: &str,
+    limits: ScriptLimits,
+    key: quickjs_runtime::ModuleKey,
+) -> Result<CompiledModule, ModuleEvaluationError> {
+    let source_name: Arc<str> = Arc::from(source_name);
+    let compiled = with_parsed_program(
+        source_text,
+        FrontendOptions::for_goal(CompilationGoal::Module).with_limits(limits.frontend),
+        move |unit| {
+            let syntax_record = unit.module_syntax().clone();
+            let compiler = CompilationContext::new_with_source_name(unit, source_name)
+                .map_err(ScriptCompilerError::Planning)?;
+            let tree = compiler
+                .compile_module_with_all_limits(
+                    limits.bytecode,
+                    limits.function_graph,
+                    limits.final_graph,
+                )
+                .map_err(ScriptCompilerError::Lowering)?;
+            Ok::<_, ScriptCompilerError>((syntax_record, tree))
+        },
+    )
+    .map_err(ModuleEvaluationError::Frontend)?
+    .map_err(ModuleEvaluationError::Compiler)?;
+
+    let (syntax_record, tree) = compiled;
+    let authority = Arc::new(tree.verified_bytecode().clone());
+
+    // Reject import attributes for now (JSON/text modules are a later step)
+    for request in syntax_record.requests() {
+        if request.attributes().is_some() {
+            return Err(ModuleEvaluationError::Loader(ModuleSourceError::new(format!(
+                "import attributes are not yet supported (request '{}')",
+                String::from_utf8_lossy(
+                    &request
+                        .specifier()
+                        .code_units()
+                        .iter()
+                        .copied()
+                        .map(u32::from)
+                        .filter_map(char::from_u32)
+                        .collect::<String>()
+                        .into_bytes(),
+                ),
+            ))));
+        }
+    }
+
+    Ok(CompiledModule {
+        key,
+        syntax_record,
+        authority,
+    })
+}
+
+/// Parses, compiles, links, and evaluates an ECMAScript Module graph.
+///
+/// The root source is compiled as a Module goal. The `loader` provides source
+/// text for each static import/re-export specifier encountered. All modules in
+/// the graph are registered, linked, and evaluated synchronously.
+///
+/// Returns `undefined` (module completion is discarded per spec). To observe
+/// module state, use `context.module_namespace` or evaluate a follow-up Script.
+///
+/// # Errors
+///
+/// Returns the exact failing frontend, compiler, loader, linking, or
+/// evaluation stage.
+pub fn evaluate_module(
+    context: &mut Context<'_>,
+    root_source: &str,
+    root_name: &str,
+    loader: &mut dyn ModuleSourceLoader,
+    limits: ScriptLimits,
+) -> Result<JsValue, ModuleEvaluationError> {
+    // Compile root
+    let root_key = quickjs_runtime::ModuleKey::new(Arc::from(root_name));
+    let root_compiled = compile_module_source(root_source, root_name, limits, root_key.clone())?;
+
+    // Register root
+    context.register_module(
+        root_compiled.key.clone(),
+        root_compiled.syntax_record.clone(),
+        root_compiled.authority.clone(),
+    )?;
+
+    // BFS: gather all dependencies
+    let mut queue: Vec<(quickjs_runtime::ModuleKey, quickjs_frontend::ModuleSyntaxRecord)> =
+        vec![(root_compiled.key.clone(), root_compiled.syntax_record.clone())];
+    let mut seen: HashSet<String> = HashSet::new();
+    seen.insert(root_compiled.key.as_str().to_owned());
+
+    while let Some((referrer_key, syntax)) = queue.pop() {
+        for request in syntax.requests() {
+            let specifier: String = request
+                .specifier()
+                .code_units()
+                .iter()
+                .copied()
+                .map(u32::from)
+                .filter_map(char::from_u32)
+                .collect();
+            let loaded = loader.load_module(&specifier, Some(referrer_key.as_str()))?;
+            if !seen.insert(loaded.key.as_str().to_owned()) {
+                continue;
+            }
+            let compiled = compile_module_source(
+                &loaded.source,
+                &loaded.display_name,
+                limits,
+                loaded.key.clone(),
+            )?;
+            context.register_module(
+                compiled.key.clone(),
+                compiled.syntax_record.clone(),
+                compiled.authority.clone(),
+            )?;
+            queue.push((compiled.key, compiled.syntax_record));
+        }
+    }
+
+    // Link
+    context.link_module(&root_compiled.key)?;
+
+    // Evaluate
+    context.evaluate_module(&root_compiled.key, limits.execution)?;
+
+    Ok(context.undefined_value())
+}
+
+// ---- Dynamic function support continues ----
 
 /// Resource limits applied across every supported dynamic-function stage.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

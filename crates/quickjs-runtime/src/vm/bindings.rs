@@ -353,6 +353,7 @@ pub(super) fn materialize_direct_eval_environment(
     for entry in &pending {
         let Ok(cell) = runtime.cells.try_insert(BindingCell {
             value: entry.value.duplicate(),
+            forward: None,
         }) else {
             for cell in new_cells {
                 let removed = runtime.cells.remove(cell);
@@ -368,6 +369,7 @@ pub(super) fn materialize_direct_eval_environment(
     for _ in &pending_variables {
         let Ok(cell) = runtime.cells.try_insert(BindingCell {
             value: SlotValue::Value(StoredValue::Undefined),
+            forward: None,
         }) else {
             for cell in new_cells {
                 let removed = runtime.cells.remove(cell);
@@ -1244,9 +1246,28 @@ pub(super) fn create_closure(
             }
             CompilerClosureSource::ConstructorRealmGlobal(_)
             | CompilerClosureSource::DirectEvalBinding { .. }
-            | CompilerClosureSource::DirectEvalVariable { .. }
-            | CompilerClosureSource::Module { .. } => {
+            | CompilerClosureSource::DirectEvalVariable { .. } => {
                 return Err(EngineFault::InvalidClosureEnvironment { function: child }.into());
+            }
+            CompilerClosureSource::Module { index } => {
+                let binding = *frame.environment.get(index as usize).ok_or(
+                    EngineFault::MissingPoolEntry {
+                        pool: "module cell",
+                        index,
+                    },
+                )?;
+                let EnvironmentBinding::Captured(cell) = binding else {
+                    return Err(EngineFault::InvalidClosureEnvironment { function: child }.into());
+                };
+                if !runtime.cells.contains(cell) {
+                    return Err(EngineFault::StaleHeapEdge {
+                        edge: "module cell",
+                        index: cell.index(),
+                        generation: cell.generation(),
+                    }
+                    .into());
+                }
+                capture_plans.push(ClosureCapturePlan::Existing(binding));
             }
         }
     }
@@ -1369,6 +1390,7 @@ pub(super) fn create_closure(
     for pending in &pending_cells {
         if let Ok(cell) = runtime.cells.try_insert(BindingCell {
             value: pending.value.duplicate(),
+            forward: None,
         }) {
             new_cells.push(cell);
         } else {
@@ -1599,14 +1621,16 @@ pub(super) fn duplicate_binding(
     let value = match binding {
         FrameBinding::Direct(value) => value,
         FrameBinding::Captured(cell) => {
+            let resolved = BindingCell::resolve_forward(runtime, *cell)
+                .map_err(BindingAccessError::Fault)?;
             &runtime
                 .cells
-                .get(*cell)
+                .get(resolved)
                 .ok_or_else(|| {
                     BindingAccessError::Fault(EngineFault::StaleHeapEdge {
                         edge: "binding cell",
-                        index: cell.index(),
-                        generation: cell.generation(),
+                        index: resolved.index(),
+                        generation: resolved.generation(),
                     })
                 })?
                 .value
@@ -1648,18 +1672,21 @@ pub(super) fn binding_is_uninitialized(
 ) -> Result<bool, EngineFault> {
     Ok(match binding {
         FrameBinding::Direct(value) => matches!(value, SlotValue::Uninitialized),
-        FrameBinding::Captured(cell) => matches!(
-            runtime
-                .cells
-                .get(*cell)
-                .ok_or(EngineFault::StaleHeapEdge {
-                    edge: "binding cell",
-                    index: cell.index(),
-                    generation: cell.generation(),
-                })?
-                .value,
-            SlotValue::Uninitialized
-        ),
+        FrameBinding::Captured(cell) => {
+            let resolved = BindingCell::resolve_forward(runtime, *cell)?;
+            matches!(
+                runtime
+                    .cells
+                    .get(resolved)
+                    .ok_or(EngineFault::StaleHeapEdge {
+                        edge: "binding cell",
+                        index: resolved.index(),
+                        generation: resolved.generation(),
+                    })?
+                    .value,
+                SlotValue::Uninitialized
+            )
+        }
     })
 }
 
@@ -1897,13 +1924,14 @@ pub(super) fn write_binding_cell(
     cell: BindingCellId,
     value: SlotValue,
 ) -> Result<(), ExecutionError> {
+    let resolved = BindingCell::resolve_forward(runtime, cell)?;
     runtime
         .cells
-        .get_mut(cell)
+        .get_mut(resolved)
         .ok_or(EngineFault::StaleHeapEdge {
             edge: "binding cell",
-            index: cell.index(),
-            generation: cell.generation(),
+            index: resolved.index(),
+            generation: resolved.generation(),
         })?
         .value = value;
     runtime.collection_pending = true;
@@ -1969,14 +1997,15 @@ pub(super) fn duplicate_environment(
             },
         ));
     };
+    let resolved = BindingCell::resolve_forward(runtime, cell).map_err(BindingAccessError::Fault)?;
     let value = &runtime
         .cells
-        .get(cell)
+        .get(resolved)
         .ok_or_else(|| {
             BindingAccessError::Fault(EngineFault::StaleHeapEdge {
                 edge: "binding cell",
-                index: cell.index(),
-                generation: cell.generation(),
+                index: resolved.index(),
+                generation: resolved.generation(),
             })
         })?
         .value;
@@ -2011,14 +2040,15 @@ pub(super) fn environment_is_uninitialized(
             function: frame.template,
         });
     };
+    let resolved = BindingCell::resolve_forward(runtime, cell)?;
     Ok(matches!(
         runtime
             .cells
-            .get(cell)
+            .get(resolved)
             .ok_or(EngineFault::StaleHeapEdge {
                 edge: "binding cell",
-                index: cell.index(),
-                generation: cell.generation(),
+                index: resolved.index(),
+                generation: resolved.generation(),
             })?
             .value,
         SlotValue::Uninitialized
@@ -2048,13 +2078,14 @@ pub(super) fn write_environment(
         }
         .into());
     };
+    let resolved = BindingCell::resolve_forward(runtime, cell)?;
     runtime
         .cells
-        .get_mut(cell)
+        .get_mut(resolved)
         .ok_or(EngineFault::StaleHeapEdge {
             edge: "binding cell",
-            index: cell.index(),
-            generation: cell.generation(),
+            index: resolved.index(),
+            generation: resolved.generation(),
         })?
         .value = value;
     runtime.collection_pending = true;

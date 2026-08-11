@@ -529,6 +529,7 @@ impl Runtime {
             shape_interner: Rc::new(RefCell::new(ShapeInterner::default())),
             cells: Arena::new(runtime_identity),
             global_bindings: Arena::new(runtime_identity),
+            modules: Arena::new(runtime_identity),
             limits,
             installed_templates: 0,
             installed_atoms: 0,

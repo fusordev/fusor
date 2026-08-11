@@ -66,7 +66,11 @@ pub use property::{
     CompletedPropertyDescriptor, DescriptorFields, PropertyDescriptor, PropertyDescriptorError,
     PropertyDescriptorKind, PropertyLayout, PropertyLayoutKind,
 };
-pub use runtime::{CollectionReport, Context, Realm, Runtime, RuntimeLimits, RuntimeUsage};
+pub use runtime::{
+    CollectionReport, Context, ModuleError, ModuleErrorPhase, ModuleEvaluationError,
+    ModuleKey, ModuleLinkError, ModuleLoader, ModuleResolveError, Realm, Runtime, RuntimeLimits,
+    RuntimeUsage,
+};
 pub use shared_array_buffer::SharedArrayBufferHandle;
 pub use string::{CodeUnits, JsString, JsStringError, MAX_STRING_CODE_UNITS};
 pub use value::{Function, JsValue, Object};

@@ -1143,6 +1143,11 @@ pub(super) fn heap_own_property(
     {
         return Ok(property);
     }
+    if let HeapReference::Object(object) = reference
+        && let Some(property) = runtime.module_namespace_export_property(object, key)?
+    {
+        return Ok(Some(property));
+    }
     if let Some(property) = string_exotic_index_property(runtime, reference, key)? {
         return Ok(Some(property));
     }
@@ -1493,6 +1498,17 @@ pub(super) fn write_static_property(
         StoredValue::Function(function) => HeapReference::Function(*function),
         StoredValue::Object(object) => HeapReference::Object(*object),
     };
+    if let HeapReference::Object(object) = reference
+        && runtime.is_module_namespace_object(object)?
+    {
+        // Module namespace exotic objects refuse every [[Set]] (ECMA-262
+        // 10.4.6.10): strict code throws, sloppy code ignores the write.
+        return Ok(if strict {
+            PropertyWriteOutcome::Failed(PropertyFailure::ReadOnly)
+        } else {
+            PropertyWriteOutcome::Complete
+        });
+    }
     let mapped_cell = match reference {
         HeapReference::Object(object) => runtime.mapped_arguments_cell(object, &key)?,
         HeapReference::Function(_) => None,

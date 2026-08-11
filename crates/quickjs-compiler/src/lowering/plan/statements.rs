@@ -822,7 +822,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                     constants,
                 )?)?;
                 flow.emit(PlannedInstruction::new(
-                    FinalOpcode::PutVarRefCheck,
+                    FinalOpcode::PutVarRefCheckInit,
                     Operands::VarRef(slot),
                     span,
                 ))
@@ -861,7 +861,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                     flow,
                 )?;
                 flow.emit(PlannedInstruction::new(
-                    FinalOpcode::PutVarRefCheck,
+                    FinalOpcode::PutVarRefCheckInit,
                     Operands::VarRef(slot),
                     span,
                 ))

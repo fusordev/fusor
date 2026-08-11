@@ -303,6 +303,36 @@ impl Runtime {
                 );
             }
         }
+        // Module records live for the lifetime of their realm; their
+        // environments, root functions, and namespace objects are roots so
+        // module bindings remain readable after evaluation.
+        for (_, module) in self.modules.iter() {
+            for &cell in &module.environment {
+                mark_collection_root(
+                    CollectionRoot::BindingCell(cell),
+                    &mut marked_functions,
+                    &mut marked_objects,
+                    &mut marked_cells,
+                    &mut work,
+                );
+            }
+            if let Some(function) = module.root_function {
+                mark_heap_reference(
+                    HeapReference::Function(function),
+                    &mut marked_functions,
+                    &mut marked_objects,
+                    &mut work,
+                );
+            }
+            if let Some(object) = module.namespace_object {
+                mark_heap_reference(
+                    HeapReference::Object(object),
+                    &mut marked_functions,
+                    &mut marked_objects,
+                    &mut work,
+                );
+            }
+        }
         for (_, realm) in self.realms.iter() {
             mark_heap_reference(
                 HeapReference::Object(realm.object_prototype),
@@ -1536,14 +1566,20 @@ impl Runtime {
                     }
                     GraphNode::Cell(id) => {
                         if let Some(cell) = self.cells.get(id) {
-                            match &cell.value {
-                                SlotValue::Uninitialized => {}
-                                SlotValue::Value(value) => mark_stored_value(
-                                    value,
-                                    &mut marked_functions,
-                                    &mut marked_objects,
-                                    &mut work,
-                                ),
+                            if let Some(forward) = cell.forward {
+                                if marked_cells.insert(forward) {
+                                    work.push(GraphNode::Cell(forward));
+                                }
+                            } else {
+                                match &cell.value {
+                                    SlotValue::Uninitialized => {}
+                                    SlotValue::Value(value) => mark_stored_value(
+                                        value,
+                                        &mut marked_functions,
+                                        &mut marked_objects,
+                                        &mut work,
+                                    ),
+                                }
                             }
                         }
                     }

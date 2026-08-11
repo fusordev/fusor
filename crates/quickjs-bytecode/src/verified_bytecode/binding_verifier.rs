@@ -310,7 +310,7 @@ fn verify_closure_opcode(
     }
     let checked = matches!(
         opcode,
-        FinalOpcode::GetVarRefCheck | FinalOpcode::PutVarRefCheck
+        FinalOpcode::GetVarRefCheck | FinalOpcode::PutVarRefCheck | FinalOpcode::PutVarRefCheckInit
     );
     if checked != policy.temporal_dead_zone {
         return Err(policy_error(

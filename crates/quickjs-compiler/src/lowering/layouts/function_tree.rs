@@ -75,8 +75,7 @@ impl FunctionTreeLayoutSeed {
             })?,
             module_bindings: ModuleBindingLayout::new(ModuleBindingLayoutInput {
                 plan,
-                enabled: !allow_realm_globals
-                    && matches!(plan.kind(), crate::storage::CompilationUnitKind::Module),
+                enabled: matches!(plan.kind(), crate::storage::CompilationUnitKind::Module),
             })?,
         })
     }

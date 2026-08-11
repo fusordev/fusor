@@ -750,7 +750,8 @@ impl CompilationContext<'_, '_, '_> {
                 }
                 match binding.root_source {
                     RealmGlobalRootSource::ConstructorRealm
-                        if crate::is_supported_script_compilation_goal(self.unit.goal()) =>
+                        if crate::is_supported_script_compilation_goal(self.unit.goal())
+                            || crate::is_supported_module_goal(self.unit.goal()) =>
                     {
                         CompiledRealmGlobalSource::ConstructorRealm
                     }

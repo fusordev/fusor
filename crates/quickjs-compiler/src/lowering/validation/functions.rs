@@ -188,6 +188,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             );
         }
         if !crate::is_supported_script_compilation_goal(self.unit.goal())
+            && !crate::is_supported_module_goal(self.unit.goal())
             && let Some(reference) = self
                 .planned
                 .plan

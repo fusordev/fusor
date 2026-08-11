@@ -32,8 +32,9 @@ use std::{
 
 use quickjs_bytecode::{
     CompilerBindingKind, CompilerBindingPolicy, CompilerCaptureLayout, CompilerCapturedBinding,
-    CompilerClosureBinding, CompilerConstant, CompilerConstantValue, CompilerExecutableKind,
-    FinalOpcode, FunctionTemplateId, Instruction, Operands, VerifiedBytecode,
+    CompilerClosureBinding, CompilerClosureSource, CompilerConstant, CompilerConstantValue,
+    CompilerExecutableKind, FinalOpcode, FunctionTemplateId, Instruction, Operands,
+    VerifiedBytecode,
 };
 
 use crate::promise_rejection::PromiseRejectionState;
@@ -44,7 +45,10 @@ use crate::{
     JsValue, OrdinaryDynamicFunctionCompiler, PredefinedAtom, PropertyKey, PropertyLayout,
     PropertyLayoutKind, RuntimeError, RuntimeResource,
     arena::{Arena, RuntimeIdentity},
-    ids::{BindingCellId, FunctionId, InstalledCodeId, ObjectId, RealmGlobalBindingId, RealmId},
+    ids::{
+        BindingCellId, FunctionId, InstalledCodeId, ObjectId, RealmGlobalBindingId, RealmId,
+        ModuleRecordId,
+    },
     interrupt::InterruptState,
     object::{
         ArrayBufferState, ArrayIterator, ArrayIteratorKind, ArrayState, BoxedPrimitive,
@@ -91,6 +95,8 @@ struct RealmState {
     /// Realm-local state for the implementation-defined `%Math.random%`
     /// pseudorandom sequence. Xorshift64* requires a non-zero state.
     math_random_state: u64,
+    /// Per-realm module registry: canonical key → module record id.
+    module_registry: HashMap<ModuleKey, ModuleRecordId>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -5134,7 +5140,47 @@ impl HeapFunction {
 
 pub(crate) struct BindingCell {
     pub(crate) value: SlotValue,
+    /// When set, this cell aliases another exporter cell. Reads and writes
+    /// resolve the forwarding chain before accessing `.value`. Module linking
+    /// guarantees acyclic forwarding, so the chain length is bounded by the
+    /// module graph depth.
+    pub(crate) forward: Option<BindingCellId>,
 }
+
+impl BindingCell {
+    /// Resolves a forwarding chain to the terminal cell that holds the value.
+    ///
+    /// Returns the original `cell` when no forwarding is set. The hop limit
+    /// guards against a hypothetical cycle; module linking guarantees acyclic
+    /// forwarding, so a well-formed graph never reaches the limit.
+    pub(crate) fn resolve_forward(
+        runtime: &Runtime,
+        cell: BindingCellId,
+    ) -> Result<BindingCellId, crate::EngineFault> {
+        let mut current = cell;
+        for _ in 0..MAX_FORWARD_HOPS {
+            let Some(binding) = runtime.cells.get(current) else {
+                return Err(crate::EngineFault::StaleHeapEdge {
+                    edge: "binding cell",
+                    index: current.index(),
+                    generation: current.generation(),
+                });
+            };
+            match binding.forward {
+                Some(next) => current = next,
+                None => return Ok(current),
+            }
+        }
+        Err(crate::EngineFault::RuntimeInvariant {
+            message: "binding cell forwarding chain exceeded the hop limit",
+        })
+    }
+}
+
+/// Upper bound on forwarding-chain traversal. Module graphs with N modules can
+/// have at most N-1 forwarding hops; this constant is generous relative to any
+/// practical module count and guards against pathological states.
+const MAX_FORWARD_HOPS: u32 = 100_000;
 
 #[derive(Clone)]
 pub(crate) struct EvalVariableBinding {
@@ -5448,6 +5494,7 @@ pub struct Runtime {
     pub(crate) shape_interner: Rc<RefCell<ShapeInterner>>,
     pub(crate) cells: Arena<crate::ids::BindingCellMarker, BindingCell>,
     pub(crate) global_bindings: Arena<crate::ids::RealmGlobalBindingMarker, RealmGlobalBinding>,
+    pub(crate) modules: Arena<crate::ids::ModuleRecordMarker, modules::SourceTextModuleRecord>,
     pub(crate) limits: RuntimeLimits,
     installed_templates: u64,
     installed_atoms: u64,
@@ -5544,7 +5591,12 @@ pub use gc::CollectionReport;
 pub(crate) use gc::CollectionRoot;
 mod heap;
 mod installation;
+pub(crate) mod modules;
 mod realm;
+pub use modules::{
+    ModuleError, ModuleErrorPhase, ModuleEvaluationError, ModuleKey, ModuleLinkError, ModuleLoader,
+    ModuleResolveError,
+};
 #[cfg(test)]
 mod realm_snapshot;
 mod template_objects;
@@ -5675,7 +5727,7 @@ fn require_root_kind(
     Err(InstallError::AuthorityInvariant { message })
 }
 
-fn preflight_opcodes(authority: &VerifiedBytecode) -> Result<(), InstallError> {
+pub(crate) fn preflight_opcodes(authority: &VerifiedBytecode) -> Result<(), InstallError> {
     for (function_index, function) in authority.functions().enumerate() {
         let function_id = FunctionTemplateId::new(u32::try_from(function_index).map_err(|_| {
             InstallError::AuthorityInvariant {
@@ -5810,6 +5862,7 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::SetLocCheck
             | FinalOpcode::GetVarRefCheck
             | FinalOpcode::PutVarRefCheck
+            | FinalOpcode::PutVarRefCheckInit
             | FinalOpcode::CloseLoc
             | FinalOpcode::ForInStart
             | FinalOpcode::ForInNext
@@ -5979,7 +6032,7 @@ fn stale_heap_reference(reference: HeapReference) -> crate::EngineFault {
     }
 }
 
-fn check_install_limit(
+pub(crate) fn check_install_limit(
     resource: RuntimeResource,
     limit: u64,
     observed: u64,

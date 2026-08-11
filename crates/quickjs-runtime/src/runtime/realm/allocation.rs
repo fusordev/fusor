@@ -95,6 +95,7 @@ impl RealmBuildTransaction<'_> {
                 intrinsics: RealmIntrinsics::Initializing,
                 global_bindings: HashMap::new(),
                 math_random_state: 1,
+                module_registry: HashMap::new(),
             })
             .expect("the realm transaction reserved its realm slot");
         self.record_realm(realm);

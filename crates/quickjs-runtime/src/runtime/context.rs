@@ -798,6 +798,7 @@ impl Context<'_> {
             &authority,
             &templates,
             external_environment,
+            None,
         ) {
             Ok(environment) => environment,
             Err(error) => {
@@ -1023,5 +1024,69 @@ impl Context<'_> {
             false,
             Some(external_environment),
         )
+    }
+
+    // ---- Module API ----
+
+    /// Returns an undefined `JsValue` rooted in this context's release mailbox.
+    #[must_use]
+    pub fn undefined_value(&self) -> JsValue {
+        JsValue::primitive(&self.runtime.mailbox, PrimitiveValue::Undefined)
+    }
+
+    /// Registers a module record in this context's realm.
+    pub fn register_module(
+        &mut self,
+        key: super::ModuleKey,
+        syntax_record: quickjs_frontend::ModuleSyntaxRecord,
+        authority: Arc<VerifiedBytecode>,
+    ) -> Result<(), super::ModuleError> {
+        let record = super::modules::SourceTextModuleRecord::new(
+            self.realm,
+            key.clone(),
+            syntax_record,
+            authority,
+        );
+        let id = self
+            .runtime
+            .modules
+            .try_insert(record)
+            .map_err(|_| super::ModuleError::link("module allocation failed"))?;
+        let realm_state = self
+            .runtime
+            .realms
+            .get_mut(self.realm)
+            .ok_or_else(|| super::ModuleError::link("realm disappeared"))?;
+        realm_state.module_registry.insert(key, id);
+        Ok(())
+    }
+
+    /// Links a module graph starting from the given root key.
+    pub fn link_module(
+        &mut self,
+        root: &super::ModuleKey,
+    ) -> Result<(), super::ModuleError> {
+        let id = self
+            .runtime
+            .realms
+            .get(self.realm)
+            .and_then(|state| state.module_registry.get(root).copied())
+            .ok_or_else(|| super::ModuleError::link("module is not registered"))?;
+        super::modules::link_module(self.runtime, self.realm, id)
+    }
+
+    /// Evaluates a linked module graph starting from the given root key.
+    pub fn evaluate_module(
+        &mut self,
+        root: &super::ModuleKey,
+        limits: ExecutionLimits,
+    ) -> Result<(), super::ModuleError> {
+        let id = self
+            .runtime
+            .realms
+            .get(self.realm)
+            .and_then(|state| state.module_registry.get(root).copied())
+            .ok_or_else(|| super::ModuleError::link("module is not registered"))?;
+        super::modules::evaluate_module(self.runtime, self.realm, id, limits)
     }
 }

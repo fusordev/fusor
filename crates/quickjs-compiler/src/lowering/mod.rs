@@ -207,6 +207,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         let seed = FunctionTreeLayoutSeed::new(FunctionTreeLayoutSeedInput {
             plan: &self.planned.plan,
             allow_realm_globals: crate::is_supported_script_root_goal(self.unit.goal())
+                || crate::is_supported_module_goal(self.unit.goal())
                 || direct_eval.is_some(),
             direct_eval,
         })?;

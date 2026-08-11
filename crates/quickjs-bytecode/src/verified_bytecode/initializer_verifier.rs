@@ -888,7 +888,10 @@ fn verify_closures(
                     ) || authority_kind == CompilerExecutableKind::GlobalScript)
                     && match *staged_source {
                         CompilerClosureSource::ConstructorRealmGlobal(atom) => {
-                            if id != root || !is_script_authority_kind(authority_kind) {
+                            if id != root
+                                || !(is_script_authority_kind(authority_kind)
+                                    || authority_kind == CompilerExecutableKind::Module)
+                            {
                                 return Err(BytecodeVerificationError::function(
                                     id,
                                     BytecodeVerificationErrorKind::ConstructorRealmGlobalSourceRequiresDynamicFunctionScript {
