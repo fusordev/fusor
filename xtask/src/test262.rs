@@ -31,12 +31,6 @@ const STRICT_PREFIX: &str = "\"use strict\";\n";
 const TEST262_DYNAMIC_COMPILATIONS: u64 = 1 << 16;
 const TEST262_WORKER_STACK_SIZE: usize = 64 * 1024 * 1024;
 const TEST262_PROGRESS_CHANNEL_PER_WORKER: usize = 2;
-/// Module-goal tests that currently crash the engine (see `classify_skip`).
-const KNOWN_CRASHING_MODULE_TESTS: [&str; 3] = [
-    "language/module-code/eval-self-once.js",
-    "language/module-code/instn-once.js",
-    "language/module-code/instn-star-props-circular.js",
-];
 const TEST262_IS_HTML_DDA_SOURCE: &str = r#"
 var $262 = {
     IsHTMLDDA: value => value === undefined || value === "" ? null : undefined
@@ -651,13 +645,6 @@ fn classify_skip(
     admit_intl402: bool,
     harness_root: &Path,
 ) -> Result<Option<String>, String> {
-    // These two tests star-export their own module; the engine's export
-    // resolution recurses on that self-cycle without a guard and overflows any
-    // worker stack (engine bug, not a runner limit). Skip exactly them so the
-    // remaining module-goal tests can execute.
-    if KNOWN_CRASHING_MODULE_TESTS.contains(&relative) {
-        return Ok(Some("quickjs-known-crash:module-self-star-export".to_owned()));
-    }
     let is_intl402 = is_intl402_path(relative);
     if is_intl402 && !admit_intl402 {
         return Ok(Some("low-priority-intl402".to_owned()));

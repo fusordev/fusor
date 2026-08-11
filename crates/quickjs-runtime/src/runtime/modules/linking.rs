@@ -394,6 +394,22 @@ pub(crate) fn module_export_names(
     runtime: &Runtime,
     module: ModuleRecordId,
 ) -> Result<Vec<(Vec<u8>, ResolvedExport)>, ModuleError> {
+    let mut export_star_set = Vec::new();
+    module_export_names_inner(runtime, module, &mut export_star_set)
+}
+
+/// ECMA-262 `GetExportedNames`: `export_star_set` makes star re-export cycles
+/// (including a module star-exporting itself) contribute no names instead of
+/// recursing without bound.
+fn module_export_names_inner(
+    runtime: &Runtime,
+    module: ModuleRecordId,
+    export_star_set: &mut Vec<ModuleRecordId>,
+) -> Result<Vec<(Vec<u8>, ResolvedExport)>, ModuleError> {
+    if export_star_set.contains(&module) {
+        return Ok(Vec::new());
+    }
+    export_star_set.push(module);
     let syntax = runtime.modules.get(module).expect("module exists").syntax_record.clone();
     let mut result = Vec::new();
     let mut seen = HashSet::new();
@@ -445,7 +461,7 @@ pub(crate) fn module_export_names(
             None => continue,
         };
         let dep = resolve_request(runtime, module, request_idx)?;
-        let dep_names = module_export_names(runtime, dep)?;
+        let dep_names = module_export_names_inner(runtime, dep, export_star_set)?;
         for (name, r) in dep_names {
             if name == b"default" {
                 continue;
