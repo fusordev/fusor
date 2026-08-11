@@ -1135,7 +1135,24 @@ impl Context<'_> {
             .get(self.realm)
             .and_then(|state| state.module_registry.get(root).copied())
             .ok_or_else(|| super::ModuleError::link("module is not registered"))?;
-        super::modules::evaluate_module(self.runtime, self.realm, id, limits)
+        super::modules::evaluate_module(self.runtime, self.realm, id, limits, None)
+    }
+
+    /// Evaluates a linked module graph with a dynamic-function compiler
+    /// available for `eval`/`Function` created during module execution.
+    pub fn evaluate_module_with_dynamic_function_compiler(
+        &mut self,
+        root: &super::ModuleKey,
+        limits: ExecutionLimits,
+        compiler: &Arc<dyn OrdinaryDynamicFunctionCompiler>,
+    ) -> Result<(), super::ModuleError> {
+        let id = self
+            .runtime
+            .realms
+            .get(self.realm)
+            .and_then(|state| state.module_registry.get(root).copied())
+            .ok_or_else(|| super::ModuleError::link("module is not registered"))?;
+        super::modules::evaluate_module(self.runtime, self.realm, id, limits, Some(compiler))
     }
 
     // ---- Dynamic import host-load boundary ----
@@ -1184,8 +1201,9 @@ impl Context<'_> {
         import: super::PendingDynamicImport,
         root: &super::ModuleKey,
         limits: ExecutionLimits,
+        compiler: Option<&Arc<dyn OrdinaryDynamicFunctionCompiler>>,
     ) -> Result<(), crate::ExecutionError> {
-        crate::vm::complete_dynamic_import_load(self.runtime, import, root, limits)
+        crate::vm::complete_dynamic_import_load(self.runtime, import, root, limits, compiler)
     }
 
     /// Rejects a parked dynamic `import()` with a `TypeError` carrying the

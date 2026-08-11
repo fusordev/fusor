@@ -981,8 +981,16 @@ pub fn evaluate_module(
     // Link
     context.link_module(&root_compiled.key)?;
 
-    // Evaluate
-    context.evaluate_module(&root_compiled.key, limits.execution)?;
+    // Evaluate (with a dynamic-function compiler so `eval`/`Function` work
+    // inside module code).
+    let dynamic_service: Arc<dyn DynamicFunctionCompiler> = Arc::new(
+        OxcDynamicFunctionCompiler::new(limits.dynamic_function_limits()),
+    );
+    context.evaluate_module_with_dynamic_function_compiler(
+        &root_compiled.key,
+        limits.execution,
+        &dynamic_service,
+    )?;
 
     Ok(context.undefined_value())
 }
@@ -1103,7 +1111,12 @@ pub fn pump_dynamic_imports(
             return Ok(());
         };
         match gather_dynamic_import_graph(context, loader, &import, limits) {
-            Ok(root_key) => context.complete_dynamic_import(import, &root_key, limits.execution)?,
+            Ok(root_key) => context.complete_dynamic_import(
+                import,
+                &root_key,
+                limits.execution,
+                Some(&dynamic_service),
+            )?,
             Err(error) => context.reject_dynamic_import(import, &error.to_string())?,
         }
     }

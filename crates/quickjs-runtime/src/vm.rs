@@ -5370,7 +5370,7 @@ impl Context<'_> {
         receiver: StoredValue,
         limits: ExecutionLimits,
     ) -> Result<StoredValue, ExecutionError> {
-        execute_module_frame_internal(self.runtime, function, receiver, limits)
+        execute_module_frame_internal(self.runtime, function, receiver, limits, None)
     }
 
     pub(crate) fn execute_module_frame_on_runtime(
@@ -5379,7 +5379,7 @@ impl Context<'_> {
         receiver: StoredValue,
         limits: ExecutionLimits,
     ) -> Result<StoredValue, ExecutionError> {
-        execute_module_frame_internal(runtime, function, receiver, limits)
+        execute_module_frame_internal(runtime, function, receiver, limits, None)
     }
 
     pub(crate) fn execute_internal_root(
@@ -5434,6 +5434,7 @@ pub(crate) fn execute_module_frame_internal(
     function: FunctionId,
     receiver: StoredValue,
     limits: ExecutionLimits,
+    compiler: Option<&Arc<dyn OrdinaryDynamicFunctionCompiler>>,
 ) -> Result<StoredValue, ExecutionError> {
     let plan = plan_frame(runtime, function, 0, 0, 0, FrameEntryKind::Call)?;
     let frame = create_frame(
@@ -5446,7 +5447,6 @@ pub(crate) fn execute_module_frame_internal(
         None,
     )?;
     let mut execution_budget = ExecutionBudget::new(limits);
-    let compiler: Option<&Arc<dyn OrdinaryDynamicFunctionCompiler>> = None;
     execute_frames_with_budget(runtime, frame, compiler, None, &mut execution_budget)
 }
 

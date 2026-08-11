@@ -368,6 +368,7 @@ pub(crate) fn complete_dynamic_import_load(
     import: crate::runtime::PendingDynamicImport,
     root: &crate::runtime::ModuleKey,
     limits: ExecutionLimits,
+    compiler: Option<&Arc<dyn OrdinaryDynamicFunctionCompiler>>,
 ) -> Result<(), ExecutionError> {
     let record = import.record;
     let realm = record.realm;
@@ -385,7 +386,9 @@ pub(crate) fn complete_dynamic_import_load(
             error.message(),
         );
     }
-    if let Err(error) = crate::runtime::modules::evaluate_module(runtime, realm, module, limits) {
+    if let Err(error) =
+        crate::runtime::modules::evaluate_module(runtime, realm, module, limits, compiler)
+    {
         let reason = module_error_rejection_value(runtime, realm, &error)?;
         return settle_parked_import(runtime, promise, reason, true);
     }

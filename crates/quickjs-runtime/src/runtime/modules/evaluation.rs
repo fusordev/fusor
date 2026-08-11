@@ -4,8 +4,10 @@
 //! propagation through the strongly-connected component.
 
 use super::{ModuleError, ModuleRecordId, ModuleStatus};
+use crate::OrdinaryDynamicFunctionCompiler;
 use crate::runtime::{ExecutionLimits, RealmId, Runtime, StoredValue};
 use std::fmt;
+use std::sync::Arc;
 
 /// An evaluation failure retaining the error phase.
 #[derive(Debug)]
@@ -44,6 +46,7 @@ pub fn evaluate_module(
     _realm: RealmId,
     root: ModuleRecordId,
     limits: ExecutionLimits,
+    compiler: Option<&Arc<dyn OrdinaryDynamicFunctionCompiler>>,
 ) -> Result<(), ModuleError> {
     let mut stack: Vec<EvalWorkItem> = vec![EvalWorkItem::Enter(root)];
 
@@ -83,7 +86,7 @@ pub fn evaluate_module(
                 }
             }
             EvalWorkItem::Execute(module) => {
-                match execute_module_body(runtime, module, limits) {
+                match execute_module_body(runtime, module, limits, compiler) {
                     Ok(()) => {
                         set_module_status(runtime, module, ModuleStatus::Evaluated);
                     }
@@ -110,6 +113,7 @@ fn execute_module_body(
     runtime: &mut Runtime,
     module: ModuleRecordId,
     limits: ExecutionLimits,
+    compiler: Option<&Arc<dyn OrdinaryDynamicFunctionCompiler>>,
 ) -> Result<(), ModuleError> {
     let function = runtime
         .modules
@@ -122,6 +126,7 @@ fn execute_module_body(
         function,
         StoredValue::Undefined,
         limits,
+        compiler,
     );
     match result {
         Ok(_completion) => Ok(()),
