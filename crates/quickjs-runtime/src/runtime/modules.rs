@@ -19,14 +19,16 @@ use super::{
 };
 
 mod host;
+mod import_meta;
 mod linking;
 mod evaluation;
 mod namespace;
 
-pub use host::{ModuleLoader, ModuleResolveError};
+pub use host::{ImportMetaHook, ModuleLoader, ModuleResolveError, default_import_meta_resolve};
 pub use linking::{ModuleLinkError, link_module};
 pub use evaluation::{ModuleEvaluationError, evaluate_module};
 pub(crate) use namespace::ModuleNamespaceState;
+pub(crate) use import_meta::get_or_create_import_meta;
 pub(crate) use linking::get_or_create_namespace;
 
 use std::fmt;
@@ -215,6 +217,8 @@ pub(crate) struct SourceTextModuleRecord {
     pub(crate) environment: Vec<BindingCellId>,
     /// Lazily materialized namespace object.
     pub(crate) namespace_object: Option<ObjectId>,
+    /// Lazily materialized `import.meta` object.
+    pub(crate) meta_object: Option<ObjectId>,
     /// Installed code and root function for execution (set during linking).
     pub(crate) installed_code: Option<InstalledCodeId>,
     pub(crate) root_function: Option<FunctionId>,
@@ -239,6 +243,7 @@ impl SourceTextModuleRecord {
             evaluation_error: None,
             environment: Vec::new(),
             namespace_object: None,
+            meta_object: None,
             installed_code: None,
             root_function: None,
         }

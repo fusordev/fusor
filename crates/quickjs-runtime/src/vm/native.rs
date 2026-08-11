@@ -3169,6 +3169,13 @@ pub(super) fn dispatch_native_call_with_frames(
                 execution_budget,
             )
         }
+        NativeFunctionKind::ImportMetaResolve => import_meta_resolve(
+            runtime,
+            native.realm,
+            &inputs.receiver,
+            inputs.arguments.take_first_or_undefined(),
+            origin.unwrap_or_else(native_function_host_origin),
+        ),
         NativeFunctionKind::Reflect(method) => begin_reflect_method(
             runtime,
             native.realm,

@@ -143,6 +143,10 @@ fn collect_requirements(
                 push_requirement(requirements, ExecutionRequirement::OrdinaryObjects);
                 push_requirement(requirements, ExecutionRequirement::Strings);
             }
+            FinalOpcode::ImportMeta => {
+                push_requirement(requirements, ExecutionRequirement::OrdinaryObjects);
+                push_requirement(requirements, ExecutionRequirement::Strings);
+            }
             FinalOpcode::GetArrayEl
             | FinalOpcode::GetArrayEl2
             | FinalOpcode::GetArrayEl3

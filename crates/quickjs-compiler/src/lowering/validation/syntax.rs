@@ -149,7 +149,7 @@ impl CompilationContext<'_, '_, '_> {
     }
 
     /// Rejects Module features deferred from this compiler step: top-level
-    /// `await` and `import.meta`.
+    /// `await`.
     pub(in crate::lowering) fn reject_module_unsupported_features(
         &self,
         root: ExecutableId,
@@ -167,9 +167,7 @@ impl CompilationContext<'_, '_, '_> {
             })?;
         for (node_id, node) in nodes.iter_enumerated() {
             let span = node.kind().span();
-            let is_await = matches!(node.kind(), AstKind::AwaitExpression(_));
-            let is_import_meta = matches!(node.kind(), AstKind::ImportMeta(_));
-            if !is_await && !is_import_meta {
+            if !matches!(node.kind(), AstKind::AwaitExpression(_)) {
                 continue;
             }
             // Walk parents to the nearest enclosing function, arrow, class, or
@@ -195,12 +193,7 @@ impl CompilationContext<'_, '_, '_> {
                 current = parent;
             }
             if at_top_level {
-                let feature = if is_await {
-                    UnsupportedLeafFeature::TopLevelAwait
-                } else {
-                    UnsupportedLeafFeature::ImportMeta
-                };
-                return unsupported(feature, span);
+                return unsupported(UnsupportedLeafFeature::TopLevelAwait, span);
             }
         }
         Ok(())

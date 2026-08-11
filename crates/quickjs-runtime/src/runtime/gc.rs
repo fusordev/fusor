@@ -304,8 +304,9 @@ impl Runtime {
             }
         }
         // Module records live for the lifetime of their realm; their
-        // environments, root functions, and namespace objects are roots so
-        // module bindings remain readable after evaluation.
+        // environments, root functions, namespace objects, and import.meta
+        // objects are roots so module bindings remain readable after
+        // evaluation.
         for (_, module) in self.modules.iter() {
             for &cell in &module.environment {
                 mark_collection_root(
@@ -325,6 +326,14 @@ impl Runtime {
                 );
             }
             if let Some(object) = module.namespace_object {
+                mark_heap_reference(
+                    HeapReference::Object(object),
+                    &mut marked_functions,
+                    &mut marked_objects,
+                    &mut work,
+                );
+            }
+            if let Some(object) = module.meta_object {
                 mark_heap_reference(
                     HeapReference::Object(object),
                     &mut marked_functions,

@@ -57,8 +57,6 @@ pub enum UnsupportedLeafFeature {
     UnresolvedReference,
     /// A Module contains a top-level `await` expression.
     TopLevelAwait,
-    /// A Module references `import.meta`, which is not yet lowered.
-    ImportMeta,
 }
 
 /// Failure to lower or verify one executable body or complete subtree.

@@ -1609,6 +1609,9 @@ pub(crate) enum NativeFunctionKind {
     PromisePrototypeThen,
     PromisePrototypeCatch,
     PromisePrototypeFinally,
+    /// `import.meta.resolve`, resolving against the receiver meta object's
+    /// `url` own property.
+    ImportMetaResolve,
 }
 
 /// Operations exposed by the `%Atomics%` namespace.
@@ -5506,6 +5509,7 @@ pub struct Runtime {
     public_roots: u64,
     pub(crate) collection_pending: bool,
     pub(crate) interrupts: InterruptState,
+    pub(crate) import_meta_hook: Option<Arc<dyn ImportMetaHook>>,
     pub(crate) promise_rejections: PromiseRejectionState,
     pub(crate) promise_jobs: VecDeque<PromiseJob>,
     pub(crate) atomics_waiters: HashMap<u64, atomics_waiters::AsyncAtomicsWaiter>,
@@ -5551,6 +5555,33 @@ impl Runtime {
         self.interrupts.is_installed()
     }
 
+    /// Installs the host `import.meta` population hook, replacing any previous
+    /// one.
+    ///
+    /// The hook is consulted when a module's `import.meta` object is created
+    /// (`url`) and when `import.meta.resolve` runs. Without a hook, `url` is
+    /// the canonical module key and `resolve` applies
+    /// [`modules::default_import_meta_resolve`].
+    pub fn set_import_meta_hook(&mut self, hook: Arc<dyn ImportMetaHook>) {
+        self.import_meta_hook = Some(hook);
+    }
+
+    /// Removes the installed `import.meta` population hook.
+    pub fn clear_import_meta_hook(&mut self) {
+        self.import_meta_hook = None;
+    }
+
+    /// Returns whether an `import.meta` population hook is installed.
+    #[must_use]
+    pub fn has_import_meta_hook(&self) -> bool {
+        self.import_meta_hook.is_some()
+    }
+
+    /// Returns the installed `import.meta` population hook, if any.
+    pub(crate) fn import_meta_hook(&self) -> Option<Arc<dyn ImportMetaHook>> {
+        self.import_meta_hook.clone()
+    }
+
     /// Returns the predefined atom with the given descriptor.
     pub(crate) fn predefined_atom(&self, predefined: PredefinedAtom) -> Atom {
         self.atoms.predefined(predefined)
@@ -5594,8 +5625,8 @@ mod installation;
 pub(crate) mod modules;
 mod realm;
 pub use modules::{
-    ModuleError, ModuleErrorPhase, ModuleEvaluationError, ModuleKey, ModuleLinkError, ModuleLoader,
-    ModuleResolveError,
+    ImportMetaHook, ModuleError, ModuleErrorPhase, ModuleEvaluationError, ModuleKey,
+    ModuleLinkError, ModuleLoader, ModuleResolveError, default_import_meta_resolve,
 };
 #[cfg(test)]
 mod realm_snapshot;
@@ -5823,6 +5854,7 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::Eval
             | FinalOpcode::ApplyEval
             | FinalOpcode::Import
+            | FinalOpcode::ImportMeta
             | FinalOpcode::CheckCtorReturn
             | FinalOpcode::CheckCtor
             | FinalOpcode::InitCtor

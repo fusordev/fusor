@@ -1647,6 +1647,21 @@ pub(super) fn execute_one(
                 return_to,
             );
         }
+        FinalOpcode::ImportMeta => {
+            // Every function defined by a module — root or nested closure —
+            // executes with the module's installed code id, so the owning
+            // module record is found by that id.
+            let module = runtime
+                .modules
+                .iter()
+                .find(|(_, record)| record.installed_code == Some(frame.code))
+                .map(|(id, _)| id)
+                .ok_or(EngineFault::RuntimeInvariant {
+                    message: "import_meta executed outside an installed module",
+                })?;
+            let meta = crate::runtime::modules::get_or_create_import_meta(runtime, module)?;
+            push(frame, StoredValue::Object(meta));
+        }
         FinalOpcode::ArrayFrom => {
             let Operands::NPop { argument_count } = operands else {
                 return unsupported_dispatch(opcode);

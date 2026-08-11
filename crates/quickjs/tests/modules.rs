@@ -281,3 +281,80 @@ fn debug_exported_const_read_in_same_module() {
     evaluate("export const x = 3; globalThis.out = x;", &[])
         .expect("exported const round-trips");
 }
+
+#[test]
+fn import_meta_is_an_identity_stable_object() {
+    evaluate(
+        "const a = import.meta;\n\
+         const b = import.meta;\n\
+         if (typeof a !== 'object' || a === null) { throw new Error('not an object'); }\n\
+         if (a !== b) { throw new Error('not identity-stable'); }\n\
+         if (Object.getPrototypeOf(a) !== Object.prototype) { throw new Error('prototype'); }",
+        &[],
+    )
+    .expect("import.meta is one identity-stable ordinary object per module");
+}
+
+#[test]
+fn import_meta_url_is_the_module_key() {
+    evaluate(
+        "if (import.meta.url !== 'root.mjs') { throw new Error('url ' + import.meta.url); }",
+        &[],
+    )
+    .expect("import.meta.url reflects the canonical module key");
+}
+
+#[test]
+fn import_meta_resolve_resolves_relative_to_the_module() {
+    evaluate(
+        "if (import.meta.resolve('./x.js') !== 'x.js') { throw new Error(import.meta.resolve('./x.js')); }",
+        &[],
+    )
+    .expect("import.meta.resolve resolves relative to the module key");
+}
+
+#[test]
+fn import_meta_is_per_module_and_resolve_uses_the_referrer() {
+    evaluate(
+        "import './dep.mjs';\n\
+         if (globalThis.depMeta === import.meta) { throw new Error('meta object shared'); }\n\
+         if (globalThis.depMeta.url !== './dep.mjs') { throw new Error('dep url ' + globalThis.depMeta.url); }\n\
+         if (globalThis.depResolved !== './x.js') { throw new Error('dep resolve ' + globalThis.depResolved); }",
+        &[(
+            "./dep.mjs",
+            "globalThis.depMeta = import.meta;\n\
+             globalThis.depResolved = import.meta.resolve('./x.js');",
+        )],
+    )
+    .expect("each module gets its own import.meta with its own referrer");
+}
+
+#[test]
+fn import_meta_is_visible_inside_module_functions() {
+    // The module avoids realm-global references (`Error`, `globalThis`) at top
+    // level: a hoisted function declaration combined with realm-global closure
+    // sources is a separate, pre-existing linking limitation.
+    evaluate(
+        "function read() { return import.meta.url; }\n\
+         if (read() !== 'root.mjs') { throw 1; }",
+        &[],
+    )
+    .expect("import.meta resolves to the owning module inside nested functions");
+}
+
+#[test]
+fn import_meta_in_a_script_is_a_syntax_error() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let error = evaluate_script(
+        &mut context,
+        "const m = import.meta;",
+        "probe.js",
+        ScriptLimits::default(),
+    );
+    assert!(
+        error.is_err(),
+        "import.meta outside a module must be a syntax error"
+    );
+}

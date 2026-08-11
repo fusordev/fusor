@@ -877,20 +877,28 @@ fn module_top_level_await_is_rejected() {
 }
 
 #[test]
-fn module_import_meta_is_rejected() {
+fn module_import_meta_compiles() {
     with_parsed_program(
         "const m = import.meta;",
         FrontendOptions::for_goal(CompilationGoal::Module),
         |unit| {
             let context = CompilationContext::new(unit).expect("module storage plan");
-            let result = context.compile_module(VerificationLimits::default());
-            assert!(matches!(
-                result,
-                Err(LeafCompilationError::Unsupported {
-                    feature: UnsupportedLeafFeature::ImportMeta,
-                    ..
-                })
-            ));
+            let tree = context
+                .compile_module(VerificationLimits::default())
+                .expect("module compiles and verifies");
+            let bytecode = tree.verified_bytecode();
+            let opcodes: Vec<_> = bytecode
+                .root()
+                .function()
+                .control_flow()
+                .instructions()
+                .iter()
+                .map(|instruction| instruction.decoded().instruction().opcode())
+                .collect();
+            assert!(
+                opcodes.contains(&FinalOpcode::ImportMeta),
+                "module root emits import_meta, got: {opcodes:?}"
+            );
         },
     )
     .expect("front-end acceptance");

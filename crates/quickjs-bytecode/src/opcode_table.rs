@@ -302,5 +302,8 @@ define_opcode_tables! {
         // a proper tail transfer.
         TailEval => ("tail_eval", 5, 1, 0, NPopU16),
         TailApplyEval => ("tail_apply_eval", 3, 2, 0, U16),
+        // Appended rather than inserted at upstream's `import` adjacency so
+        // every pre-existing opcode encoding keeps its byte value.
+        ImportMeta => ("import_meta", 1, 0, 1, None),
     }
 }

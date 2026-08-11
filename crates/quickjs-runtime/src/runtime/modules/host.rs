@@ -37,6 +37,67 @@ impl std::fmt::Display for ModuleResolveError {
 
 impl std::error::Error for ModuleResolveError {}
 
+/// Host hook populating per-module `import.meta` properties.
+///
+/// The runtime creates the `import.meta` object lazily on first access and
+/// consults this hook for its observable properties. Both methods have
+/// defaults so a host can override only what it needs; with no hook installed
+/// the defaults apply: `url` is the canonical module key and `resolve`
+/// performs relative resolution against it ([`default_import_meta_resolve`]).
+///
+/// The hook runs while the interpreter is suspended at a step boundary, so it
+/// must not re-enter the runtime; it exists to consult host state such as a
+/// resolution cache.
+pub trait ImportMetaHook: Send + Sync {
+    /// Returns the value exposed as `import.meta.url` for the module.
+    fn url(&self, key: &ModuleKey) -> String {
+        key.as_str().to_owned()
+    }
+
+    /// Resolves an `import.meta.resolve(specifier)` call against the module's
+    /// `import.meta.url`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ModuleResolveError`] when the specifier cannot be resolved.
+    /// The runtime surfaces this as a `TypeError` thrown by `resolve`.
+    fn resolve(&self, specifier: &str, referrer_url: &str) -> Result<String, ModuleResolveError> {
+        Ok(default_import_meta_resolve(specifier, referrer_url))
+    }
+}
+
+/// The default `import.meta.resolve` policy: relative-URL resolution against
+/// the referrer, treating keys as plain paths.
+///
+/// Specifiers with a scheme (`scheme://...`) or a leading `/`, and bare
+/// specifiers, pass through unchanged; `./` and `../` specifiers join against
+/// the referrer's directory with `.` and `..` segments normalized away.
+#[must_use]
+pub fn default_import_meta_resolve(specifier: &str, referrer_url: &str) -> String {
+    let is_relative = specifier == "."
+        || specifier == ".."
+        || specifier.starts_with("./")
+        || specifier.starts_with("../");
+    if !is_relative || specifier.contains("://") {
+        return specifier.to_owned();
+    }
+    let base = match referrer_url.rfind('/') {
+        Some(index) => &referrer_url[..index],
+        None => "",
+    };
+    let mut segments: Vec<&str> = base.split('/').filter(|segment| !segment.is_empty()).collect();
+    for segment in specifier.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                segments.pop();
+            }
+            _ => segments.push(segment),
+        }
+    }
+    segments.join("/")
+}
+
 /// Host-supplied module resolution policy.
 ///
 /// The loader receives the specifier text (as UTF-8 bytes) and any import

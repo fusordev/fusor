@@ -1099,6 +1099,7 @@ fn execution_requirement_capacity_matches_the_exhaustive_sorted_family_set() {
         ExecutionRequirement::AbruptCompletions,
         ExecutionRequirement::LexicalBindings,
         ExecutionRequirement::RealmGlobalBindings,
+        ExecutionRequirement::ModuleBindings,
         ExecutionRequirement::ObjectOperators,
         ExecutionRequirement::DynamicOperators,
     ];

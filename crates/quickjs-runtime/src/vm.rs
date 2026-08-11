@@ -138,6 +138,7 @@ mod for_in;
 mod from_entries;
 mod generator;
 mod group_by;
+mod import_meta;
 mod instanceof;
 mod intl;
 mod iterators;
@@ -183,7 +184,8 @@ use {
     array_statics::*, async_from_sync::*, async_generator::*, atomics::*, bigint_intrinsics::*,
     bindings::*, conversions::*, data_view::*, date::*, define_property_intrinsics::*, dynamic::*,
     dynamic_import::*, error_stack::*, errors::*, exceptions::*, execution::*, for_in::*,
-    from_entries::*, generator::*, group_by::*, intl::*, iterators::*, json_parse::*,
+    from_entries::*, generator::*, group_by::*, import_meta::*, intl::*, iterators::*,
+    json_parse::*,
     json_stringify::*, locale_string::*, map::*, math::*, math_sum_precise::*, native::*,
     object_intrinsics::*, promise::*, promise_combinators::*, properties::*, proxy::*, reflect::*,
     regexp::*, set::*, stack::*, string_methods::*, string_raw::*, string_replace::*,

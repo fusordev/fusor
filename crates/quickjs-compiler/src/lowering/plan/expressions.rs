@@ -832,6 +832,15 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                         Expression::ThisExpression(this) => {
                             flow.emit(self.plan_this_expression(this.span, layout)?)?;
                         }
+                        Expression::ImportMeta(import_meta) => {
+                            // GetImportMeta materializes (once per module) and
+                            // pushes the module's import.meta object.
+                            flow.emit(PlannedInstruction::new(
+                                FinalOpcode::ImportMeta,
+                                Operands::None,
+                                import_meta.span,
+                            ))?;
+                        }
                         Expression::NewTarget(new_target) => {
                             let (opcode, operands) = if self
                                 .static_class_initializer_class_for_span(new_target.span)?
