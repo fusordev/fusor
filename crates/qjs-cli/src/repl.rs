@@ -103,6 +103,11 @@ pub(crate) fn run() -> u8 {
             let name = format!("{entry_prefix}/__repl_entry_{entry_index}.mjs");
             match evaluate_module(&mut context, &source, &name, &mut resolver, ScriptLimits::default()) {
                 Ok(value) => {
+                    if let Err(error) =
+                        crate::imports::drain_pending_imports(&mut context, &mut resolver, ScriptLimits::default())
+                    {
+                        report_error("module entry", &error);
+                    }
                     println!("{}", format_value(&value));
                     imports.extend(extract_imports(&entry));
                 }

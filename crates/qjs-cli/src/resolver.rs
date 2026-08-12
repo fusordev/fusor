@@ -86,6 +86,53 @@ impl NodeLikeResolver {
             "unsupported bare specifier '{specifier}' (no node_modules lookup)"
         )))
     }
+
+    /// Resolves a specifier to a [`ResolvedModuleRequest`] without reading any
+    /// module source, so the file read can happen on an async runtime.
+    pub(crate) fn resolve_request(
+        &self,
+        specifier: &str,
+        referrer: Option<&str>,
+    ) -> Result<ResolvedModuleRequest, ModuleSourceError> {
+        if let Some(result) = self.load_builtin(specifier) {
+            return result.map(ResolvedModuleRequest::Builtin);
+        }
+        let candidate = self.resolve_path(specifier, referrer)?;
+        let path = resolve_file(&candidate)?;
+        Ok(ResolvedModuleRequest::File {
+            canonical: canonical_name(&path),
+            path,
+        })
+    }
+}
+
+/// The resolution half of a module load: everything decided without reading
+/// the module source. Only pure data (`PathBuf`/`String`) crosses the await
+/// boundary when the source is read asynchronously.
+pub(crate) enum ResolvedModuleRequest {
+    /// Builtin module: the source is already materialized.
+    Builtin(LoadedModuleSource),
+    /// Filesystem module: the source must still be read from `path`.
+    File { path: PathBuf, canonical: String },
+}
+
+impl ResolvedModuleRequest {
+    /// Reads the source, completing the load.
+    pub(crate) async fn read(self) -> Result<LoadedModuleSource, ModuleSourceError> {
+        match self {
+            Self::Builtin(loaded) => Ok(loaded),
+            Self::File { path, canonical } => {
+                let source = tokio::fs::read_to_string(&path).await.map_err(|error| {
+                    ModuleSourceError::new(format!("cannot read '{}': {error}", path.display()))
+                })?;
+                Ok(LoadedModuleSource {
+                    key: ModuleKey::new(Arc::from(canonical.as_str())),
+                    source,
+                    display_name: canonical,
+                })
+            }
+        }
+    }
 }
 
 fn builtin_source(

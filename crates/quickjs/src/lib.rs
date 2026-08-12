@@ -995,8 +995,8 @@ pub fn evaluate_module(
     Ok(context.undefined_value())
 }
 
-/// Loads, registers, and compiles the graph requested by one parked dynamic
-/// `import()`, returning the resolved root key.
+/// Registers and compiles the graph below an already-loaded dynamic `import()`
+/// root, returning the root key.
 ///
 /// Modules already registered in the realm (static graph, earlier imports)
 /// are reused rather than re-registered, preserving registry dedup and
@@ -1005,12 +1005,11 @@ fn gather_dynamic_import_graph(
     context: &mut Context<'_>,
     loader: &mut dyn ModuleSourceLoader,
     import: &quickjs_runtime::PendingDynamicImport,
+    root_source: &LoadedModuleSource,
     limits: ScriptLimits,
 ) -> Result<quickjs_runtime::ModuleKey, ModuleEvaluationError> {
     let specifier = import.specifier();
-    let referrer = import.referrer().map(|key| key.as_str().to_owned());
-    let loaded = loader.load_module(&specifier, referrer.as_deref())?;
-    let root_key = loaded.key.clone();
+    let root_key = root_source.key.clone();
     if context.has_module(&root_key) {
         // The graph root is already registered; record the referring module's
         // (referrer, specifier) edge and reuse the existing record.
@@ -1021,7 +1020,7 @@ fn gather_dynamic_import_graph(
     }
 
     let root_compiled =
-        compile_module_source(&loaded.source, &loaded.display_name, limits, root_key.clone())?;
+        compile_module_source(&root_source.source, &root_source.display_name, limits, root_key.clone())?;
     context.register_module(
         root_compiled.key.clone(),
         root_compiled.syntax_record.clone(),
@@ -1082,13 +1081,16 @@ fn gather_dynamic_import_graph(
 /// Contract: call this after [`evaluate_script`] or [`evaluate_module`] (and
 /// again whenever a pump round may have parked new loads — the loop already
 /// covers reactions and freshly evaluated modules that call `import()`).
-/// Each round takes the oldest parked load from the runtime queue, resolves
-/// and loads its graph through `loader`, registers the compiled records,
-/// completes the import (link + evaluate + Promise settlement), and drains
-/// queued Promise reaction jobs before taking the next load. Load,
-/// resolution, and compile failures reject the import Promise; they never
-/// throw out of this function. The function returns `Ok` once the queue is
-/// empty.
+/// Each round drains queued Promise reaction jobs, takes the oldest parked
+/// load from the runtime queue, resolves and loads its graph through
+/// `loader`, registers the compiled records, and completes the import (link
+/// + evaluate + Promise settlement). Load, resolution, and compile failures
+/// reject the import Promise; they never throw out of this function. The
+/// function returns `Ok` once the queue is empty.
+///
+/// Asynchronous hosts can drive the same state machine one parked load at a
+/// time: drain with [`drain_dynamic_import_jobs`], read each pending root
+/// concurrently, then feed it to [`settle_dynamic_import`].
 ///
 /// # Errors
 ///
@@ -1099,27 +1101,80 @@ pub fn pump_dynamic_imports(
     loader: &mut dyn ModuleSourceLoader,
     limits: ScriptLimits,
 ) -> Result<(), ModuleEvaluationError> {
-    let dynamic_service: Arc<dyn DynamicFunctionCompiler> = Arc::new(
-        OxcDynamicFunctionCompiler::new(limits.dynamic_function_limits()),
-    );
     loop {
-        // Drain first: reactions queued by an earlier settlement (or by a
-        // rejection that never parked, such as unsupported attributes) run
-        // before the next load, and may themselves park new imports.
-        context.drain_host_jobs(limits.execution, Some(&dynamic_service))?;
+        drain_dynamic_import_jobs(context, limits)?;
         let Some(import) = context.take_pending_dynamic_import() else {
             return Ok(());
         };
-        match gather_dynamic_import_graph(context, loader, &import, limits) {
-            Ok(root_key) => context.complete_dynamic_import(
-                import,
-                &root_key,
-                limits.execution,
-                Some(&dynamic_service),
-            )?,
-            Err(error) => context.reject_dynamic_import(import, &error.to_string())?,
-        }
+        let specifier = import.specifier();
+        let referrer = import.referrer().map(|key| key.as_str().to_owned());
+        let root = loader.load_module(&specifier, referrer.as_deref());
+        settle_dynamic_import(context, loader, import, root, limits)?;
     }
+}
+
+/// Drains queued Promise reaction jobs between dynamic `import()` settlement
+/// rounds.
+///
+/// Hosts driving parked loads through [`settle_dynamic_import`] must run this
+/// before taking the next batch of pending imports, exactly as
+/// [`pump_dynamic_imports`] does each iteration: reactions queued by an
+/// earlier settlement (or by a rejection that never parked, such as
+/// unsupported attributes) run first and may themselves park new imports.
+///
+/// # Errors
+///
+/// Returns a [`ModuleEvaluationError`] only for internal runtime failures
+/// while executing jobs.
+pub fn drain_dynamic_import_jobs(
+    context: &mut Context<'_>,
+    limits: ScriptLimits,
+) -> Result<(), ModuleEvaluationError> {
+    let dynamic_service: Arc<dyn DynamicFunctionCompiler> = Arc::new(
+        OxcDynamicFunctionCompiler::new(limits.dynamic_function_limits()),
+    );
+    context.drain_host_jobs(limits.execution, Some(&dynamic_service))?;
+    Ok(())
+}
+
+/// Settles one parked dynamic `import()` whose root source the host has
+/// already loaded (for example read concurrently on an async runtime).
+///
+/// This is the per-import step of [`pump_dynamic_imports`] with the root load
+/// factored out: transitive dependencies of the root are still gathered
+/// synchronously through `loader`, and registry dedup, linking, evaluation,
+/// and Promise settlement match the pump exactly. A failed root load rejects
+/// the import Promise with the load error message.
+///
+/// # Errors
+///
+/// Returns a [`ModuleEvaluationError`] only for internal runtime failures
+/// while settling the import; load, resolution, and compile failures reject
+/// the import Promise instead.
+pub fn settle_dynamic_import(
+    context: &mut Context<'_>,
+    loader: &mut dyn ModuleSourceLoader,
+    import: quickjs_runtime::PendingDynamicImport,
+    root: Result<LoadedModuleSource, ModuleSourceError>,
+    limits: ScriptLimits,
+) -> Result<(), ModuleEvaluationError> {
+    let dynamic_service: Arc<dyn DynamicFunctionCompiler> = Arc::new(
+        OxcDynamicFunctionCompiler::new(limits.dynamic_function_limits()),
+    );
+    let root = match root {
+        Ok(root_source) => gather_dynamic_import_graph(context, loader, &import, &root_source, limits),
+        Err(error) => Err(error.into()),
+    };
+    match root {
+        Ok(root_key) => context.complete_dynamic_import(
+            import,
+            &root_key,
+            limits.execution,
+            Some(&dynamic_service),
+        )?,
+        Err(error) => context.reject_dynamic_import(import, &error.to_string())?,
+    }
+    Ok(())
 }
 
 // ---- Dynamic function support continues ----

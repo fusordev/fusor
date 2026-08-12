@@ -4,6 +4,7 @@
 
 mod builtins;
 mod format;
+mod imports;
 mod repl;
 mod resolver;
 
@@ -129,8 +130,11 @@ fn run_file(file: &str, as_script: bool, argv: Vec<String>) -> u8 {
         let mut process_argv = vec!["qjs".to_owned(), display_name];
         process_argv.extend(argv);
         let mut resolver = NodeLikeResolver::new(cwd, process_argv);
-        match evaluate_module(&mut context, &source, &root_name, &mut resolver, ScriptLimits::default()) {
-            Ok(_) => 0,
+        let limits = ScriptLimits::default();
+        match evaluate_module(&mut context, &source, &root_name, &mut resolver, limits)
+            .and_then(|_| imports::drain_pending_imports(&mut context, &mut resolver, limits))
+        {
+            Ok(()) => 0,
             Err(error) => {
                 report_error(&root_name, &error);
                 1
