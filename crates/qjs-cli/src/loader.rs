@@ -14,8 +14,8 @@
 use std::collections::{HashMap, HashSet};
 
 use quickjs::{
-    LoadedModuleSource, ModuleEvaluationError, ModuleSourceError, PreloadedModuleEdge, ScriptLimits,
-    module_import_requests,
+    LoadedModuleSource, ModuleEvaluationError, ModuleSourceError, ModuleSourceKind,
+    PreloadedModuleEdge, ScriptLimits, module_import_requests,
 };
 
 use crate::resolver::{NodeLikeResolver, ResolvedModuleRequest};
@@ -56,11 +56,12 @@ pub(crate) async fn gather_static_graph(
     while !frontier.is_empty() {
         // Parse this level's requests and resolve each specifier. Both steps
         // are synchronous; only the file reads below cross an await.
-        let mut requests: Vec<(String, String, ResolvedModuleRequest)> = Vec::new();
+        let mut requests: Vec<(String, String, ModuleSourceKind, ResolvedModuleRequest)> =
+            Vec::new();
         for (referrer, source) in &frontier {
-            for specifier in module_import_requests(source, limits)? {
-                let resolution = resolver.resolve_request(&specifier, Some(referrer))?;
-                requests.push((referrer.clone(), specifier, resolution));
+            for request in module_import_requests(source, limits)? {
+                let resolution = resolver.resolve_request(&request.specifier, Some(referrer))?;
+                requests.push((referrer.clone(), request.specifier, request.kind, resolution));
             }
         }
 
@@ -76,16 +77,19 @@ pub(crate) async fn gather_static_graph(
         > = Vec::new();
         let mut read_index_by_key: HashMap<String, usize> = HashMap::new();
         let mut fresh_keys: HashSet<String> = HashSet::new();
-        for (referrer, specifier, resolution) in requests {
+        let mut kind_by_key: HashMap<String, ModuleSourceKind> = HashMap::new();
+        for (referrer, specifier, kind, resolution) in requests {
             let target = match resolution {
                 ResolvedModuleRequest::Builtin(source) => {
                     let key = source.key.as_str().to_owned();
                     if !loaded.contains_key(&key) && fresh_keys.insert(key.clone()) {
                         fresh.push(source);
                     }
+                    kind_by_key.insert(key.clone(), kind);
                     Target::Loaded(key)
                 }
                 ResolvedModuleRequest::File { ref canonical, .. } => {
+                    kind_by_key.insert(canonical.clone(), kind);
                     if loaded.contains_key(canonical) {
                         Target::Loaded(canonical.clone())
                     } else if let Some(&index) = read_index_by_key.get(canonical) {
@@ -112,10 +116,17 @@ pub(crate) async fn gather_static_graph(
             fresh.push(source);
         }
 
-        // Newly loaded modules become the next BFS frontier.
+        // Newly loaded JavaScript modules become the next BFS frontier; a
+        // JSON/text module is a leaf with no further requests to parse.
         let mut next: Vec<(String, String)> = Vec::new();
         for source in fresh {
-            next.push((source.key.as_str().to_owned(), source.source.clone()));
+            let kind = kind_by_key
+                .get(source.key.as_str())
+                .copied()
+                .unwrap_or(ModuleSourceKind::JavaScript);
+            if kind == ModuleSourceKind::JavaScript {
+                next.push((source.key.as_str().to_owned(), source.source.clone()));
+            }
             loaded.insert(source.key.as_str().to_owned(), source);
         }
 

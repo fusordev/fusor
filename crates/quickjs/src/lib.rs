@@ -735,6 +735,26 @@ pub struct LoadedModuleSource {
     pub display_name: String,
 }
 
+/// How a requested module's source text is interpreted.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ModuleSourceKind {
+    /// A JavaScript Source Text Module.
+    JavaScript,
+    /// A JSON module: the source is JSON text, parsed to a value at evaluation.
+    Json,
+    /// A text module: the source is a plain string.
+    Text,
+}
+
+/// One static module request decoded from a source module.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ModuleRequest {
+    /// Decoded specifier text.
+    pub specifier: String,
+    /// The requested module kind, selected by the `with { type: ... }` clause.
+    pub kind: ModuleSourceKind,
+}
+
 /// A host-side error loading module source.
 #[derive(Debug)]
 pub struct ModuleSourceError {
@@ -916,27 +936,21 @@ fn compile_module_source(
     let (syntax_record, tree) = compiled;
     let authority = Arc::new(tree.verified_bytecode().clone());
 
-    // Reject non-empty import attributes for now (JSON/text modules are a
-    // later step). An empty `with {}` clause carries no type and is a no-op,
-    // so it is admitted exactly like an attribute-less request.
+    // Admit `type: "json"` and `type: "text"` attributes (handled by the graph
+    // pipeline as synthetic modules) and empty clauses; reject every other
+    // attribute.
     for request in syntax_record.requests() {
-        if let Some(attributes) = request.attributes()
-            && !attributes.entries().is_empty()
-        {
-            return Err(ModuleEvaluationError::Loader(ModuleSourceError::new(format!(
-                "import attributes are not yet supported (request '{}')",
-                String::from_utf8_lossy(
-                    &request
-                        .specifier()
-                        .code_units()
-                        .iter()
-                        .copied()
-                        .map(u32::from)
-                        .filter_map(char::from_u32)
-                        .collect::<String>()
-                        .into_bytes(),
-                ),
-            ))));
+        if let Some(attributes) = request.attributes() {
+            for entry in attributes.entries() {
+                let supported = entry.key().equals_utf8("type")
+                    && (entry.value().equals_utf8("json") || entry.value().equals_utf8("text"));
+                if !supported {
+                    return Err(ModuleEvaluationError::Loader(ModuleSourceError::new(format!(
+                        "unsupported import attribute (request '{}')",
+                        decode_request_specifier(request),
+                    ))));
+                }
+            }
         }
     }
 
@@ -959,14 +973,106 @@ fn decode_request_specifier(request: &quickjs_frontend::StaticModuleRequest) -> 
         .collect()
 }
 
+/// Selects the module kind a request's `with { type: ... }` clause requests.
+///
+/// An absent clause or an unrecognized `type` falls back to JavaScript; the
+/// unrecognized case is rejected later by [`compile_module_source`].
+fn request_module_kind(
+    attributes: Option<&quickjs_frontend::ImportAttributes>,
+) -> ModuleSourceKind {
+    let Some(attributes) = attributes else {
+        return ModuleSourceKind::JavaScript;
+    };
+    for entry in attributes.entries() {
+        if entry.key().equals_utf8("type") {
+            if entry.value().equals_utf8("json") {
+                return ModuleSourceKind::Json;
+            }
+            if entry.value().equals_utf8("text") {
+                return ModuleSourceKind::Text;
+            }
+        }
+    }
+    ModuleSourceKind::JavaScript
+}
+
+/// Escapes `value` as the body of a single-quoted JavaScript string literal.
+fn js_single_quoted(value: &str) -> String {
+    let mut out = String::with_capacity(value.len().saturating_add(2));
+    out.push('\'');
+    for character in value.chars() {
+        match character {
+            '\\' => out.push_str("\\\\"),
+            '\'' => out.push_str("\\'"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{2028}' => out.push_str("\\u2028"),
+            '\u{2029}' => out.push_str("\\u2029"),
+            character if (character as u32) < 0x20 => {
+                out.push_str(&format!("\\u{:04x}", character as u32));
+            }
+            character => out.push(character),
+        }
+    }
+    out.push('\'');
+    out
+}
+
+/// Produces the JavaScript source text a non-JavaScript module evaluates as.
+///
+/// A JSON module evaluates as `JSON.parse` of its source (spec-correct JSON
+/// semantics, including plain-object creation and no `__proto__` setter); a
+/// text module evaluates as the raw string. The JSON text is validated here so
+/// an invalid JSON module reports a resolution-phase `SyntaxError` (the JSON is
+/// parsed during instantiation, not evaluation).
+fn synthetic_module_source(
+    kind: ModuleSourceKind,
+    source: &str,
+) -> Result<String, ModuleEvaluationError> {
+    match kind {
+        ModuleSourceKind::JavaScript => Ok(source.to_owned()),
+        ModuleSourceKind::Json => {
+            serde_json::from_str::<serde_json::Value>(source).map_err(|error| {
+                ModuleEvaluationError::Loader(ModuleSourceError::new(format!(
+                    "invalid JSON module: {error}"
+                )))
+            })?;
+            Ok(format!(
+                "export default JSON.parse({});",
+                js_single_quoted(source)
+            ))
+        }
+        ModuleSourceKind::Text => Ok(format!("export default {};", js_single_quoted(source))),
+    }
+}
+
+/// Distinguishes a module's realm key by its source kind.
+///
+/// A file requested both as JavaScript and as JSON/text is two distinct module
+/// records (different kinds), so their keys must not collide. The suffix uses
+/// a NUL byte, which never appears in a canonical path or `node:` builtin key.
+fn kind_key(key: quickjs_runtime::ModuleKey, kind: ModuleSourceKind) -> quickjs_runtime::ModuleKey {
+    match kind {
+        ModuleSourceKind::JavaScript => key,
+        ModuleSourceKind::Json => {
+            quickjs_runtime::ModuleKey::new(Arc::from(format!("{}\0json", key.as_str())))
+        }
+        ModuleSourceKind::Text => {
+            quickjs_runtime::ModuleKey::new(Arc::from(format!("{}\0text", key.as_str())))
+        }
+    }
+}
+
 /// Parses `source` as a Module goal and returns its static import/re-export
-/// specifier strings in source order.
+/// requests in source order, each with the module kind its `with { type: ... }`
+/// clause selects.
 ///
 /// This is the request-listing half of module compilation: asynchronous hosts
 /// use it to resolve and preload a static graph before handing it to
 /// [`evaluate_preloaded_module_graph`]. Import attributes are not rejected
-/// here; compilation inside the evaluation entry points rejects them, so both
-/// the loader-driven and preloaded paths surface the same error.
+/// here; compilation inside the evaluation entry points rejects unsupported
+/// ones, so both the loader-driven and preloaded paths surface the same error.
 ///
 /// # Errors
 ///
@@ -974,7 +1080,7 @@ fn decode_request_specifier(request: &quickjs_frontend::StaticModuleRequest) -> 
 pub fn module_import_requests(
     source: &str,
     limits: ScriptLimits,
-) -> Result<Vec<String>, ModuleEvaluationError> {
+) -> Result<Vec<ModuleRequest>, ModuleEvaluationError> {
     with_parsed_program(
         source,
         FrontendOptions::for_goal(CompilationGoal::Module).with_limits(limits.frontend),
@@ -982,7 +1088,10 @@ pub fn module_import_requests(
             unit.module_syntax()
                 .requests()
                 .iter()
-                .map(decode_request_specifier)
+                .map(|request| ModuleRequest {
+                    specifier: decode_request_specifier(request),
+                    kind: request_module_kind(request.attributes()),
+                })
                 .collect()
         },
     )
@@ -1051,14 +1160,18 @@ pub fn evaluate_module(
             }
         })?;
         first = false;
-        for specifier in requests {
-            let loaded = loader.load_module(&specifier, Some(&referrer))?;
-            if seen.insert(loaded.key.as_str().to_owned()) {
+        for request in requests {
+            let loaded = loader.load_module(&request.specifier, Some(&referrer))?;
+            // Only JavaScript sources are parsed for their own further
+            // requests; a JSON/text module is a leaf with no imports.
+            if request.kind == ModuleSourceKind::JavaScript
+                && seen.insert(loaded.key.as_str().to_owned())
+            {
                 queue.push((loaded.key.as_str().to_owned(), loaded.source.clone()));
             }
             edges.push(PreloadedModuleEdge {
                 referrer: referrer.clone(),
-                specifier,
+                specifier: request.specifier,
                 source: loaded,
             });
         }
@@ -1132,17 +1245,20 @@ pub fn evaluate_preloaded_module_graph(
                         referrer_key.as_str()
                     ))
                 })?;
-            if !seen.insert(loaded.key.as_str().to_owned()) {
+            let kind = request_module_kind(request.attributes());
+            let key = kind_key(loaded.key.clone(), kind);
+            if !seen.insert(key.as_str().to_owned()) {
                 // Cycle/diamond edge to an already-registered record: record
                 // the (referrer, specifier) edge and skip re-registration.
-                context.register_module_dependency(&referrer_key, &specifier, &loaded.key)?;
+                context.register_module_dependency(&referrer_key, &specifier, &key)?;
                 continue;
             }
+            let source = synthetic_module_source(kind, &loaded.source)?;
             let compiled = compile_module_source(
-                &loaded.source,
+                &source,
                 &loaded.display_name,
                 limits,
-                loaded.key.clone(),
+                key.clone(),
             )
             .map_err(resolution_failure)?;
             context.register_module(
@@ -1152,7 +1268,7 @@ pub fn evaluate_preloaded_module_graph(
             )?;
             // HostResolveImportedModule: record the (referrer, specifier)
             // edge now that both records are registered.
-            context.register_module_dependency(&referrer_key, &specifier, &loaded.key)?;
+            context.register_module_dependency(&referrer_key, &specifier, &key)?;
             queue.push((compiled.key, compiled.syntax_record));
         }
     }
@@ -1243,17 +1359,20 @@ fn gather_dynamic_import_graph(
         for request in syntax.requests() {
             let specifier = decode_request_specifier(request);
             let loaded = loader.load_module(&specifier, Some(referrer_key.as_str()))?;
-            if context.has_module(&loaded.key) || !seen.insert(loaded.key.as_str().to_owned()) {
+            let kind = request_module_kind(request.attributes());
+            let key = kind_key(loaded.key.clone(), kind);
+            if context.has_module(&key) || !seen.insert(key.as_str().to_owned()) {
                 // Cycle/diamond edge to an already-registered record: record
                 // the (referrer, specifier) edge and skip re-registration.
-                context.register_module_dependency(&referrer_key, &specifier, &loaded.key)?;
+                context.register_module_dependency(&referrer_key, &specifier, &key)?;
                 continue;
             }
+            let source = synthetic_module_source(kind, &loaded.source)?;
             let compiled = compile_module_source(
-                &loaded.source,
+                &source,
                 &loaded.display_name,
                 limits,
-                loaded.key.clone(),
+                key.clone(),
             )
             .map_err(resolution_failure)?;
             context.register_module(
@@ -1263,7 +1382,7 @@ fn gather_dynamic_import_graph(
             )?;
             // HostResolveImportedModule: record the (referrer, specifier)
             // edge now that both records are registered.
-            context.register_module_dependency(&referrer_key, &specifier, &loaded.key)?;
+            context.register_module_dependency(&referrer_key, &specifier, &key)?;
             queue.push((compiled.key, compiled.syntax_record));
         }
     }
