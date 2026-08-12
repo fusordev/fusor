@@ -869,6 +869,15 @@ impl Runtime {
                                 &mut work,
                             );
                         }
+                        PromiseReactionTarget::AsyncModule { .. } => {}
+                        PromiseReactionTarget::FinishDynamicImport { promise, .. } => {
+                            mark_heap_reference(
+                                HeapReference::Object(*promise),
+                                &mut marked_functions,
+                                &mut marked_objects,
+                                &mut work,
+                            );
+                        }
                     }
                     mark_stored_value(
                         argument,
@@ -1555,6 +1564,20 @@ impl Runtime {
                                                 } => {
                                                     mark_heap_reference(
                                                         HeapReference::Object(*operation),
+                                                        &mut marked_functions,
+                                                        &mut marked_objects,
+                                                        &mut work,
+                                                    );
+                                                }
+                                                PromiseReactionTarget::AsyncModule {
+                                                    ..
+                                                } => {}
+                                                PromiseReactionTarget::FinishDynamicImport {
+                                                    promise,
+                                                    ..
+                                                } => {
+                                                    mark_heap_reference(
+                                                        HeapReference::Object(*promise),
                                                         &mut marked_functions,
                                                         &mut marked_objects,
                                                         &mut work,

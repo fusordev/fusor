@@ -1267,6 +1267,43 @@ pub(super) fn perform_array_from_async_await(
     perform_promise_reactions(runtime, promise, fulfill_reaction, reject_reaction)
 }
 
+/// Attaches fulfill and reject reactions sharing one runtime-owned target
+/// (async module continuations, deferred dynamic-import settlement).
+pub(crate) fn perform_targeted_promise_reactions(
+    runtime: &mut Runtime,
+    promise: ObjectId,
+    target: PromiseReactionTarget,
+) -> Result<(), NativeFailure> {
+    let fulfill_reaction = PromiseReaction {
+        kind: PromiseReactionKind::Fulfill,
+        target: target.clone(),
+    };
+    let reject_reaction = PromiseReaction {
+        kind: PromiseReactionKind::Reject,
+        target,
+    };
+    perform_promise_reactions(runtime, promise, fulfill_reaction, reject_reaction)
+}
+
+/// [`perform_targeted_promise_reactions`] for callers outside the VM, where
+/// the private [`NativeFailure`] type is not visible; an abrupt registration
+/// would indicate an internal invariant failure (see [`fulfill_promise_host`]).
+pub(crate) fn perform_targeted_promise_reactions_host(
+    runtime: &mut Runtime,
+    promise: ObjectId,
+    target: PromiseReactionTarget,
+) -> Result<(), ExecutionError> {
+    perform_targeted_promise_reactions(runtime, promise, target).map_err(|failure| match failure {
+        NativeFailure::Execution(error) => error,
+        NativeFailure::Abrupt(_) | NativeFailure::AbruptAfterTransient(_) => {
+            EngineFault::RuntimeInvariant {
+                message: "runtime-owned promise reaction registration completed abruptly",
+            }
+            .into()
+        }
+    })
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "all Promise reaction targets share one state transition and rejection-tracker order"
@@ -2156,6 +2193,38 @@ pub(super) fn begin_promise_job(
                 argument,
                 execution_budget,
             ),
+            PromiseReactionTarget::AsyncModule { module } => {
+                match reaction.kind {
+                    PromiseReactionKind::Fulfill => {
+                        crate::runtime::modules::async_module_execution_fulfilled(
+                            runtime, module,
+                        )?;
+                    }
+                    PromiseReactionKind::Reject => {
+                        crate::runtime::modules::async_module_execution_rejected(
+                            runtime, module, argument,
+                        )?;
+                    }
+                }
+                Ok(NativeDispatch::Immediate(StoredValue::Undefined))
+            }
+            PromiseReactionTarget::FinishDynamicImport { promise, module } => {
+                match reaction.kind {
+                    PromiseReactionKind::Fulfill => {
+                        let namespace = crate::runtime::modules::get_or_create_namespace(
+                            runtime, module,
+                        )
+                        .map_err(|_| EngineFault::RuntimeInvariant {
+                            message: "namespace creation failed after async module evaluation",
+                        })?;
+                        fulfill_promise(runtime, promise, StoredValue::Object(namespace))?;
+                    }
+                    PromiseReactionKind::Reject => {
+                        reject_promise(runtime, promise, argument)?;
+                    }
+                }
+                Ok(NativeDispatch::Immediate(StoredValue::Undefined))
+            }
         },
         PromiseJob::Thenable {
             promise,

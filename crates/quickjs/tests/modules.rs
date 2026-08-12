@@ -772,8 +772,9 @@ fn dynamic_import_cycle_back_into_the_referrer_settles() {
 fn dynamic_import_of_a_top_level_await_module_fulfills_with_the_namespace() {
     // The compiler admits top-level await and compiles the module root as an
     // async function, so loading succeeds and the pump drives the async root:
-    // the import promise fulfills with the evaluated namespace. Static-graph
-    // TLA evaluation order is refined in a later runtime step.
+    // once the asynchronous evaluation completes, the import promise fulfills
+    // with the evaluated namespace (ECMA-262 FinishDynamicImport waiting on
+    // the module's [[TopLevelCapability]]).
     evaluate_dynamic(
         "import('./tla.mjs').then(\n\
              function (ns) { globalThis.settled = 'fulfilled'; globalThis.imported = ns.value; },\n\
@@ -783,5 +784,205 @@ fn dynamic_import_of_a_top_level_await_module_fulfills_with_the_namespace() {
          if (globalThis.imported !== 1) { throw new Error('imported ' + globalThis.imported); }",
     )
     .expect("a TLA module fulfills the import promise with its namespace");
+}
+
+// ---- Top-level await: async module continuations ----
+
+#[test]
+fn top_level_await_completes_after_job_drain() {
+    evaluate_dynamic(
+        "const x = await Promise.resolve(41);\nglobalThis.x = x + 1;",
+        &[],
+        "if (globalThis.x !== 42) { throw new Error('x ' + globalThis.x); }",
+    )
+    .expect("a top-level await root completes once jobs drain");
+}
+
+#[test]
+fn sync_importer_waits_for_async_dependency() {
+    // The root has no top-level await of its own, but it depends on an async
+    // module: its execution is deferred ([[PendingAsyncDependencies]]) until
+    // the dependency fulfills, then runs synchronously in the same pass
+    // (GatherAvailableAncestors + AsyncModuleExecutionFulfilled).
+    evaluate_dynamic(
+        "import { v } from './dep.mjs';\nglobalThis.vAtEval = v;",
+        &[(
+            "./dep.mjs",
+            "export let v = 0;\nawait Promise.resolve();\nv = 7;",
+        )],
+        "if (globalThis.vAtEval !== 7) { throw new Error('v ' + globalThis.vAtEval); }",
+    )
+    .expect("a sync importer executes only after its async dependency completes");
+}
+
+#[test]
+fn top_level_await_rejection_records_evaluation_error() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    {
+        let mut context = runtime.context(&realm).expect("context");
+        let mut loader = MapLoader::new(&[]);
+        evaluate_module(
+            &mut context,
+            "await Promise.reject(new Error('boom'));",
+            "root.mjs",
+            &mut loader,
+            ScriptLimits::default(),
+        )
+        .expect("a rejecting TLA module still evaluates asynchronously");
+        pump_dynamic_imports(&mut context, &mut loader, ScriptLimits::default())
+            .expect("pump drains the rejection continuation");
+    }
+    let error = runtime
+        .module_evaluation_error(&realm, &ModuleKey::new("root.mjs".into()))
+        .expect("the module records its evaluation error");
+    assert!(
+        error.message().contains("boom"),
+        "expected the rejection message, got: {}",
+        error.message()
+    );
+}
+
+#[test]
+fn tla_cycle_defers_sync_member_until_async_evaluation_completes() {
+    // Cycle A (root, sync) <-> B (top-level await). B starts its asynchronous
+    // execution in the initial pass; A counts the on-stack B as a pending
+    // async dependency (ECMA-262 16.6.1.4 step 12.e) and executes only after
+    // B's evaluation completes, observing B's post-await binding value.
+    evaluate_dynamic(
+        "import { bValue } from './b.mjs';\n\
+         export let aValue = 1;\n\
+         globalThis.order.push('A');\n\
+         globalThis.aSawB = bValue;",
+        &[
+            (
+                "./b.mjs",
+                "import { aValue } from 'root.mjs';\n\
+                 globalThis.order = ['B'];\n\
+                 export let bValue = 0;\n\
+                 await Promise.resolve();\n\
+                 bValue = 7;",
+            ),
+            ("root.mjs", ""),
+        ],
+        "if (globalThis.order.join(',') !== 'B,A') { throw new Error('order ' + globalThis.order.join(',')); }\n\
+         if (globalThis.aSawB !== 7) { throw new Error('aSawB ' + globalThis.aSawB); }",
+    )
+    .expect("the sync cycle member executes after the async member completes");
+}
+
+#[test]
+fn tla_cycle_sync_prefix_sees_uninitialized_ancestor_bindings() {
+    // B's synchronous prefix runs while A (the cycle root) is still deferred,
+    // so reading A's uninitialized binding hits the TDZ and errors the cycle.
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    {
+        let mut context = runtime.context(&realm).expect("context");
+        let mut loader = MapLoader::new(&[
+            (
+                "./b.mjs",
+                "import { aValue } from 'root.mjs';\n\
+                 globalThis.seen = aValue;\n\
+                 await Promise.resolve();",
+            ),
+            ("root.mjs", ""),
+        ]);
+        evaluate_module(
+            &mut context,
+            "import './b.mjs';\nexport let aValue = 1;",
+            "root.mjs",
+            &mut loader,
+            ScriptLimits::default(),
+        )
+        .expect("the cycle evaluates asynchronously");
+        pump_dynamic_imports(&mut context, &mut loader, ScriptLimits::default())
+            .expect("pump drains the rejection continuation");
+    }
+    let error = runtime
+        .module_evaluation_error(&realm, &ModuleKey::new("root.mjs".into()))
+        .expect("the TDZ failure errors the whole cycle");
+    assert!(
+        error.message().contains("aValue") || error.message().contains("initialized"),
+        "expected a TDZ ReferenceError, got: {}",
+        error.message()
+    );
+}
+
+#[test]
+fn dynamic_import_of_tla_module_fulfills_after_evaluation() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let mut loader = MapLoader::new(&[(
+        "./tla.mjs",
+        "globalThis.stage = 'started';\n\
+         await globalThis.gate;\n\
+         globalThis.stage = 'finished';\n\
+         export const value = 5;",
+    )]);
+    evaluate_module(
+        &mut context,
+        "globalThis.gate = new Promise((resolve) => { globalThis.open = resolve; });\n\
+         import('./tla.mjs').then(\n\
+             function (ns) { globalThis.settled = globalThis.stage; globalThis.imported = ns.value; },\n\
+             function (error) { globalThis.settled = 'rejected'; globalThis.reason = String(error); });",
+        "root.mjs",
+        &mut loader,
+        ScriptLimits::default(),
+    )
+    .expect("module evaluates");
+    pump_dynamic_imports(&mut context, &mut loader, ScriptLimits::default())
+        .expect("first pump drives the async root to its await");
+    evaluate_script(
+        &mut context,
+        "if (globalThis.stage !== 'started') { throw new Error('stage ' + globalThis.stage); }\n\
+         if (globalThis.settled !== undefined) { throw new Error('settled early ' + globalThis.settled); }",
+        "probe.js",
+        ScriptLimits::default(),
+    )
+    .expect("the import promise stays pending while the module awaits");
+    evaluate_script(&mut context, "globalThis.open();", "release.js", ScriptLimits::default())
+        .expect("the gate opens");
+    pump_dynamic_imports(&mut context, &mut loader, ScriptLimits::default())
+        .expect("second pump completes the async evaluation");
+    evaluate_script(
+        &mut context,
+        "if (globalThis.stage !== 'finished') { throw new Error('stage ' + globalThis.stage); }\n\
+         if (globalThis.settled !== 'finished') { throw new Error('settled ' + globalThis.settled); }\n\
+         if (globalThis.imported !== 5) { throw new Error('imported ' + globalThis.imported); }",
+        "probe2.js",
+        ScriptLimits::default(),
+    )
+    .expect("the import fulfills only after the async evaluation completes");
+}
+
+#[test]
+fn tla_diamond_executes_in_spec_async_evaluation_order() {
+    // The spec's async-evaluation example graph (ECMA-262 16.6.1 example):
+    // A -> B, C; B -> D; C -> D, E; D -> A (cycle). Every module awaits, so
+    // the start order is D, E (kicked in the initial DFS pass), then B, C
+    // (unblocked by D and E in [[AsyncEvaluationOrder]] order), then A.
+    evaluate_dynamic(
+        "import './b.mjs';\nimport './c.mjs';\nglobalThis.log.push('A');\nawait Promise.resolve();",
+        &[
+            (
+                "./b.mjs",
+                "import './d.mjs';\nglobalThis.log.push('B');\nawait Promise.resolve();",
+            ),
+            (
+                "./c.mjs",
+                "import './d.mjs';\nimport './e.mjs';\nglobalThis.log.push('C');\nawait Promise.resolve();",
+            ),
+            (
+                "./d.mjs",
+                "import 'root.mjs';\nglobalThis.log = [];\nglobalThis.log.push('D');\nawait Promise.resolve();",
+            ),
+            ("./e.mjs", "globalThis.log.push('E');\nawait Promise.resolve();"),
+            ("root.mjs", ""),
+        ],
+        "if (globalThis.log.join(',') !== 'D,E,B,C,A') { throw new Error('order ' + globalThis.log.join(',')); }",
+    )
+    .expect("the async diamond starts modules in spec order");
 }
 

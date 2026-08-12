@@ -188,22 +188,19 @@ pub fn evaluate_module(
 
                 // Strongly-connected-component pop: this module is the cycle
                 // root, so every module above it on the DFS stack shares its
-                // cycle root and async evaluation order.
+                // cycle root. Each popped module keeps its own
+                // [[AsyncEvaluationOrder]] (ECMA-262 16.6.1.4 step 16.d):
+                // members that executed synchronously become Evaluated.
                 let (dfs, ancestor) = runtime
                     .modules
                     .get(module)
                     .map_or((None, None), |r| (r.dfs_index, r.dfs_ancestor_index));
                 if dfs.is_some() && dfs == ancestor {
-                    let order = runtime
-                        .modules
-                        .get(module)
-                        .and_then(|r| r.async_evaluation_order);
                     while let Some(popped) = stack.pop() {
                         if let Some(record) = runtime.modules.get_mut(popped) {
                             record.cycle_root = Some(module);
-                            record.async_evaluation_order = order;
                             if record.status != ModuleStatus::Errored {
-                                record.status = if order.is_some() {
+                                record.status = if record.async_evaluation_order.is_some() {
                                     ModuleStatus::EvaluatingAsync
                                 } else {
                                     ModuleStatus::Evaluated
@@ -321,11 +318,19 @@ fn execute_async_module(
         compiler,
     );
     match result {
-        Ok(StoredValue::Object(_activation_promise)) => {
-            // TODO(step D): attach fulfill/reject reactions to the activation
-            // promise (PromiseReactionTarget::AsyncModule) that decrement
-            // [[PendingAsyncDependencies]] of [[AsyncParentModules]], execute
-            // newly unblocked parents, and settle [[TopLevelCapability]].
+        Ok(StoredValue::Object(activation_promise)) => {
+            // ECMA-262 16.6.1.5 step 7: PerformPromiseThen on the activation
+            // promise with the AsyncModuleExecutionFulfilled/Rejected closures.
+            crate::vm::perform_targeted_promise_reactions_host(
+                runtime,
+                activation_promise,
+                crate::object::PromiseReactionTarget::AsyncModule { module },
+            )
+            .map_err(|error| {
+                ModuleError::evaluate(format!(
+                    "async module reaction registration failed: {error}"
+                ))
+            })?;
             Ok(())
         }
         Ok(_) => Err(ModuleError::evaluate(
@@ -335,6 +340,200 @@ fn execute_async_module(
             "async module root threw synchronously (engine invariant): {error}"
         ))),
     }
+}
+
+/// AsyncModuleExecutionFulfilled (ECMA-262 16.6.1.4.2).
+///
+/// Runs inside a Promise job with no interpreter frames active. Deferred
+/// module bodies execute under default limits with the self-contained dynamic
+/// function compiler (`None`): `begin_promise_job` does not carry the caller's
+/// compiler through.
+pub(crate) fn async_module_execution_fulfilled(
+    runtime: &mut Runtime,
+    module: ModuleRecordId,
+) -> Result<(), crate::ExecutionError> {
+    match module_status(runtime, module) {
+        ModuleStatus::Evaluated | ModuleStatus::Errored => return Ok(()),
+        status => debug_assert_eq!(status, ModuleStatus::EvaluatingAsync),
+    }
+    let capability = {
+        let Some(record) = runtime.modules.get_mut(module) else {
+            return Ok(());
+        };
+        record.async_evaluation_order = None;
+        record.status = ModuleStatus::Evaluated;
+        record.top_level_capability
+    };
+    if let Some(capability) = capability {
+        crate::vm::fulfill_promise_host(runtime, capability, StoredValue::Undefined)?;
+    }
+
+    let mut exec_list = Vec::new();
+    gather_available_ancestors(runtime, module, &mut exec_list);
+    exec_list.sort_by_key(|&ancestor| {
+        runtime
+            .modules
+            .get(ancestor)
+            .and_then(|r| r.async_evaluation_order)
+            .unwrap_or(u32::MAX)
+    });
+    for ancestor in exec_list {
+        match module_status(runtime, ancestor) {
+            ModuleStatus::Evaluated | ModuleStatus::Errored => continue,
+            _ => {}
+        }
+        if module_has_tla(runtime, ancestor) {
+            execute_async_module(runtime, ancestor, ExecutionLimits::default(), None).map_err(
+                |_| crate::EngineFault::RuntimeInvariant {
+                    message: "deferred async module kick failed after its dependencies fulfilled",
+                },
+            )?;
+            continue;
+        }
+        match execute_module_body(runtime, ancestor, ExecutionLimits::default(), None) {
+            Ok(()) => {
+                let capability = {
+                    let Some(record) = runtime.modules.get_mut(ancestor) else {
+                        continue;
+                    };
+                    record.async_evaluation_order = None;
+                    record.status = ModuleStatus::Evaluated;
+                    record.top_level_capability
+                };
+                if let Some(capability) = capability {
+                    crate::vm::fulfill_promise_host(runtime, capability, StoredValue::Undefined)?;
+                }
+            }
+            Err(error) => {
+                let realm = runtime
+                    .modules
+                    .get(ancestor)
+                    .map(|r| r.realm)
+                    .ok_or(crate::EngineFault::RuntimeInvariant {
+                        message: "executing deferred module body lost its record",
+                    })?;
+                let value = crate::vm::module_error_rejection_value(runtime, realm, &error)?;
+                reject_async_module_tree(runtime, ancestor, &value, &error)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// AsyncModuleExecutionRejected (ECMA-262 16.6.1.4.3): records `value` as the
+/// module's evaluation error and propagates it through [[AsyncParentModules]].
+pub(crate) fn async_module_execution_rejected(
+    runtime: &mut Runtime,
+    module: ModuleRecordId,
+    value: StoredValue,
+) -> Result<(), crate::ExecutionError> {
+    let error = ModuleError::evaluate_rejection(runtime, &value)?;
+    reject_async_module_tree(runtime, module, &value, &error)
+}
+
+/// Iterative (explicit-stack, spec DFS order) error propagation: every module
+/// still awaiting evaluation becomes Errored with `error` and its
+/// [[TopLevelCapability]] rejects with `value`.
+fn reject_async_module_tree(
+    runtime: &mut Runtime,
+    module: ModuleRecordId,
+    value: &StoredValue,
+    error: &ModuleError,
+) -> Result<(), crate::ExecutionError> {
+    let mut stack = vec![module];
+    while let Some(current) = stack.pop() {
+        match module_status(runtime, current) {
+            ModuleStatus::Evaluated | ModuleStatus::Errored => continue,
+            _ => {}
+        }
+        let (capability, parents) = {
+            let Some(record) = runtime.modules.get_mut(current) else {
+                continue;
+            };
+            record.evaluation_error = Some(error.clone());
+            record.status = ModuleStatus::Errored;
+            record.async_evaluation_order = None;
+            (
+                record.top_level_capability,
+                record.async_parent_modules.clone(),
+            )
+        };
+        if let Some(capability) = capability {
+            crate::vm::reject_promise_host(runtime, capability, value.duplicate())?;
+        }
+        for parent in parents.into_iter().rev() {
+            stack.push(parent);
+        }
+    }
+    Ok(())
+}
+
+/// GatherAvailableAncestors (ECMA-262 16.6.1.4.1): collects the modules whose
+/// last pending async dependency just fulfilled, in spec depth-first order.
+fn gather_available_ancestors(
+    runtime: &mut Runtime,
+    module: ModuleRecordId,
+    exec_list: &mut Vec<ModuleRecordId>,
+) {
+    // Explicit parent-list frames mirror the spec's recursion: a newly
+    // unblocked ancestor without top-level await gathers its own ancestors.
+    let mut frames = vec![(async_parent_modules(runtime, module), 0_usize)];
+    loop {
+        let Some((parents, index)) = frames.last_mut() else {
+            break;
+        };
+        let Some(ancestor) = parents.get(*index).copied() else {
+            frames.pop();
+            continue;
+        };
+        *index += 1;
+        if exec_list.contains(&ancestor) {
+            continue;
+        }
+        let cycle_root = runtime
+            .modules
+            .get(ancestor)
+            .and_then(|r| r.cycle_root)
+            .unwrap_or(ancestor);
+        if module_status(runtime, cycle_root) == ModuleStatus::Errored {
+            continue;
+        }
+        let Some(record) = runtime.modules.get_mut(ancestor) else {
+            continue;
+        };
+        record.pending_async_dependencies -= 1;
+        if record.pending_async_dependencies == 0 {
+            exec_list.push(ancestor);
+            if !module_has_tla(runtime, ancestor) {
+                let grandparents = async_parent_modules(runtime, ancestor);
+                frames.push((grandparents, 0));
+            }
+        }
+    }
+}
+
+fn async_parent_modules(runtime: &Runtime, module: ModuleRecordId) -> Vec<ModuleRecordId> {
+    runtime
+        .modules
+        .get(module)
+        .map(|r| r.async_parent_modules.clone())
+        .unwrap_or_default()
+}
+
+/// Whether the module's evaluation is still pending asynchronous completion.
+pub(crate) fn module_is_evaluating_async(runtime: &Runtime, module: ModuleRecordId) -> bool {
+    module_status(runtime, module) == ModuleStatus::EvaluatingAsync
+}
+
+/// Returns the module's [[TopLevelCapability]] promise, when allocated.
+pub(crate) fn module_top_level_capability(
+    runtime: &Runtime,
+    module: ModuleRecordId,
+) -> Option<crate::runtime::ObjectId> {
+    runtime
+        .modules
+        .get(module)
+        .and_then(|r| r.top_level_capability)
 }
 
 fn execute_module_body(

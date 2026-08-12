@@ -29,6 +29,10 @@ pub use host::{ImportMetaHook, ModuleLoader, ModuleResolveError, default_import_
 pub use linking::{ModuleLinkError, link_module};
 pub(crate) use linking::get_or_create_namespace;
 pub use evaluation::{ModuleEvaluationError, evaluate_module};
+pub(crate) use evaluation::{
+    async_module_execution_fulfilled, async_module_execution_rejected,
+    module_is_evaluating_async, module_top_level_capability,
+};
 pub(crate) use namespace::ModuleNamespaceState;
 pub(crate) use import_meta::get_or_create_import_meta;
 
@@ -94,6 +98,10 @@ pub struct ModuleError {
     pub(crate) phase: ModuleErrorPhase,
     pub(crate) message: String,
     pub(crate) exception: Option<crate::JsException>,
+    /// The original ECMAScript rejection value of an asynchronous evaluation
+    /// failure (ECMA-262 [[EvaluationError]] of an async module). A heap value
+    /// stays rooted by this public root until the error is dropped.
+    pub(crate) rejection_value: Option<crate::JsValue>,
 }
 
 impl ModuleError {
@@ -102,6 +110,7 @@ impl ModuleError {
             phase: ModuleErrorPhase::Link,
             message: message.into(),
             exception: None,
+            rejection_value: None,
         }
     }
 
@@ -110,6 +119,7 @@ impl ModuleError {
             phase: ModuleErrorPhase::Evaluate,
             message: message.into(),
             exception: None,
+            rejection_value: None,
         }
     }
 
@@ -119,7 +129,27 @@ impl ModuleError {
             phase: ModuleErrorPhase::Evaluate,
             message,
             exception: Some(exception),
+            rejection_value: None,
         }
+    }
+
+    /// Records an asynchronous evaluation rejection, preserving the original
+    /// rejection value for later `import()` settlement.
+    pub(crate) fn evaluate_rejection(
+        runtime: &mut Runtime,
+        value: &crate::runtime::StoredValue,
+    ) -> Result<Self, crate::ExecutionError> {
+        Ok(Self {
+            phase: ModuleErrorPhase::Evaluate,
+            message: rejection_value_message(runtime, value),
+            exception: None,
+            rejection_value: Some(runtime.public_value(value.duplicate())?),
+        })
+    }
+
+    /// Returns the original rejection value of an async evaluation failure.
+    pub(crate) fn rejection_value(&self) -> Option<&crate::JsValue> {
+        self.rejection_value.as_ref()
     }
 
     /// Returns the spec phase in which the error occurred.
@@ -189,6 +219,34 @@ fn exception_message(runtime: &Runtime, exception: &crate::JsException) -> Strin
                 return text;
             }
         }
+    }
+    "module evaluation error".to_owned()
+}
+
+/// Extracts a human-readable message from an async evaluation rejection value.
+///
+/// Mirrors the explicit-`throw` branch of [`exception_message`]: an Error
+/// object exposes its own `message` data property (user getters are not
+/// invoked at this boundary).
+fn rejection_value_message(runtime: &Runtime, value: &crate::runtime::StoredValue) -> String {
+    let reference = match value {
+        crate::runtime::StoredValue::Object(object) => {
+            crate::runtime::HeapReference::Object(*object)
+        }
+        crate::runtime::StoredValue::Function(function) => {
+            crate::runtime::HeapReference::Function(*function)
+        }
+        _ => return "module evaluation error".to_owned(),
+    };
+    let key = runtime.predefined_property_key(crate::PredefinedAtom::Message);
+    if let Ok(record) = runtime.object_record(reference)
+        && let Some(crate::object::OwnProperty::Data {
+            value: crate::runtime::StoredValue::String(text),
+            ..
+        }) = record.own_property(&key)
+        && let Ok(text) = text.to_utf8_lossy()
+    {
+        return text;
     }
     "module evaluation error".to_owned()
 }

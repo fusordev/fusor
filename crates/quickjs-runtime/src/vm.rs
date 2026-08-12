@@ -175,7 +175,10 @@ use async_function::{begin_async_await, suspend_async_function};
 pub(crate) use dynamic_import::{
     complete_dynamic_import_load, module_error_rejection_value, reject_dynamic_import_load,
 };
-pub(crate) use promise::{drain_host_jobs_with_limits, fulfill_promise_host, reject_promise_host};
+pub(crate) use promise::{
+    drain_host_jobs_with_limits, fulfill_promise_host, perform_targeted_promise_reactions_host,
+    reject_promise_host,
+};
 
 #[allow(
     clippy::wildcard_imports,

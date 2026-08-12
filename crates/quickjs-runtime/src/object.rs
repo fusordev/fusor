@@ -3302,6 +3302,13 @@ pub(crate) enum PromiseReactionTarget {
     ArrayFromAsync {
         operation: ObjectId,
     },
+    AsyncModule {
+        module: crate::ids::ModuleRecordId,
+    },
+    FinishDynamicImport {
+        promise: ObjectId,
+        module: crate::ids::ModuleRecordId,
+    },
 }
 
 pub(crate) enum PromiseState {

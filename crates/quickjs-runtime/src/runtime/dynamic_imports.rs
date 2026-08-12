@@ -137,4 +137,17 @@ impl Runtime {
     ) -> Option<super::ModuleRecordId> {
         self.realms.get(realm)?.module_registry.get(key).copied()
     }
+
+    /// Returns the recorded evaluation error of the module registered under
+    /// `key` in `realm`, if its evaluation failed (ECMA-262
+    /// [[EvaluationError]]).
+    #[must_use]
+    pub fn module_evaluation_error(
+        &self,
+        realm: &super::Realm,
+        key: &ModuleKey,
+    ) -> Option<crate::ModuleError> {
+        let module = self.registered_module(realm.0.id, key)?;
+        self.modules.get(module)?.evaluation_error.clone()
+    }
 }

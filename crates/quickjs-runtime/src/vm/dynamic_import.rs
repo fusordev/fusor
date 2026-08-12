@@ -355,11 +355,14 @@ fn reject_dynamic_import_pending(
 /// module graph under `root`.
 ///
 /// This is the host-driven `FinishDynamicImport`: the graph is linked and
-/// evaluated *synchronously at completion time* (evaluation errors reject the
-/// Promise with the escaping exception, link errors with a `SyntaxError`), and
-/// a successful evaluation fulfills the import Promise with the module
-/// namespace exotic object. Promise reactions queue as ordinary Promise jobs
-/// and drain at the next host-job checkpoint; they never run inline here.
+/// evaluated at completion time. A synchronously evaluated root settles the
+/// Promise immediately — evaluation errors reject with the escaping exception,
+/// link errors with a `SyntaxError`, and a successful evaluation fulfills with
+/// the module namespace exotic object. A root left in the evaluating-async
+/// status (top-level await) instead attaches reactions to its
+/// [[TopLevelCapability]] and settles the import Promise when the asynchronous
+/// evaluation completes. Promise reactions queue as ordinary Promise jobs and
+/// drain at the next host-job checkpoint; they never run inline here.
 ///
 /// Only internal runtime failures (allocation, invariant violations) surface
 /// as `Err`; every spec-level failure settles the Promise instead.
@@ -391,6 +394,21 @@ pub(crate) fn complete_dynamic_import_load(
     {
         let reason = module_error_rejection_value(runtime, realm, &error)?;
         return settle_parked_import(runtime, promise, reason, true);
+    }
+    if crate::runtime::modules::module_is_evaluating_async(runtime, module) {
+        // The root evaluates asynchronously: settle the import Promise when the
+        // module's [[TopLevelCapability]] settles (ECMA-262 FinishDynamicImport
+        // waiting on Evaluate()'s returned Promise).
+        let capability = crate::runtime::modules::module_top_level_capability(runtime, module)
+            .ok_or(EngineFault::RuntimeInvariant {
+                message: "evaluating-async module lacks its top-level capability",
+            })?;
+        return perform_targeted_promise_reactions(
+            runtime,
+            capability,
+            crate::object::PromiseReactionTarget::FinishDynamicImport { promise, module },
+        )
+        .map_err(native_failure_to_execution);
     }
     let namespace = crate::runtime::modules::get_or_create_namespace(runtime, module).map_err(
         |_| EngineFault::RuntimeInvariant {
@@ -435,15 +453,19 @@ fn reject_parked_import(
 
 /// Builds the rejection value for a module link/evaluation failure.
 ///
-/// An escaping JavaScript exception rejects with the original thrown value;
-/// an engine-created error is re-materialized with its kind and message; a
-/// phase-only error falls back to `SyntaxError` (link) or `TypeError`
-/// (evaluation).
+/// An asynchronous evaluation failure rejects with its preserved rejection
+/// value; an escaping JavaScript exception rejects with the original thrown
+/// value; an engine-created error is re-materialized with its kind and
+/// message; a phase-only error falls back to `SyntaxError` (link) or
+/// `TypeError` (evaluation).
 pub(crate) fn module_error_rejection_value(
     runtime: &mut Runtime,
     realm: RealmId,
     error: &crate::ModuleError,
 ) -> Result<StoredValue, ExecutionError> {
+    if let Some(value) = error.rejection_value() {
+        return Ok(value.stored()?.duplicate());
+    }
     if let Some(exception) = error.exception() {
         if let Some(value) = exception.thrown_value() {
             return Ok(value.stored()?.duplicate());
