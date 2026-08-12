@@ -53,6 +53,15 @@ const TEST262_ERROR_CLASSIFIER_SOURCE: &str = r#"
     };
 })()
 "#;
+const TEST262_ASYNC_PRINT_SOURCE: &str = r#"
+var __test262AsyncResult = "";
+function print(message) {
+    var text = String(message);
+    if (text.indexOf("Test262:AsyncTest") === 0) {
+        __test262AsyncResult = text;
+    }
+}
+"#;
 
 #[derive(Debug, Eq, PartialEq)]
 pub struct Test262Options {
@@ -670,9 +679,6 @@ fn classify_skip(
     if parse_negative {
         return Ok(None);
     }
-    if metadata.flags.contains("async") {
-        return Ok(Some("unsupported-async-host-print".to_owned()));
-    }
     if metadata.flags.contains("CanBlockIsFalse") {
         return Ok(Some("unsupported-can-block-false".to_owned()));
     }
@@ -829,6 +835,7 @@ impl FailureRecord {
 struct HarnessSources {
     assert: String,
     sta: String,
+    doneprint: String,
     root: PathBuf,
     test_root: PathBuf,
 }
@@ -839,6 +846,10 @@ impl HarnessSources {
         Ok(Self {
             assert: read_required(&root.join("assert.js"), "Test262 assert.js")?,
             sta: read_required(&root.join("sta.js"), "Test262 sta.js")?,
+            doneprint: read_required(
+                &root.join("doneprintHandle.js"),
+                "Test262 doneprintHandle.js",
+            )?,
             root,
             test_root: suite.join("test"),
         })
@@ -1214,6 +1225,28 @@ fn execute_case(
                 return Ok(Some(harness_failure(plan, mode, name, &error)));
             }
         }
+        if plan.metadata.flags.contains("async") {
+            // Async tests report completion through `print(...)`; install the
+            // host `print` recorder first, then `$DONE` (doneprintHandle.js).
+            if let Err(error) =
+                evaluate_script(&mut context, TEST262_ASYNC_PRINT_SOURCE, "harness/print.js", limits)
+            {
+                return Ok(Some(harness_failure(plan, mode, "harness/print.js", &error)));
+            }
+            if let Err(error) = evaluate_script(
+                &mut context,
+                &harness.doneprint,
+                "harness/doneprintHandle.js",
+                limits,
+            ) {
+                return Ok(Some(harness_failure(
+                    plan,
+                    mode,
+                    "harness/doneprintHandle.js",
+                    &error,
+                )));
+            }
+        }
         if plan
             .metadata
             .negative
@@ -1242,7 +1275,7 @@ fn execute_case(
         source
     };
     let source_name = format!("test/{}", plan.relative);
-    let outcome = if mode == TestMode::Module {
+    let mut outcome = if mode == TestMode::Module {
         let mut loader = Test262ModuleLoader::new(&harness.test_root, &plan.relative);
         match evaluate_module(&mut context, source, &plan.relative, &mut loader, limits) {
             Ok(_) => match pump_dynamic_imports(&mut context, &mut loader, limits) {
@@ -1296,7 +1329,65 @@ fn execute_case(
             )),
         }
     };
+    if plan.metadata.flags.contains("async") && outcome.is_ok() {
+        // Settle any parked dynamic imports and drain host jobs, then read the
+        // async completion signal.
+        let mut loader = Test262ModuleLoader::new(&harness.test_root, &plan.relative);
+        match pump_dynamic_imports(&mut context, &mut loader, limits) {
+            Ok(()) => outcome = read_async_completion(&mut context, limits)?,
+            Err(error) => {
+                outcome = Err((
+                    ActualError {
+                        phase: "runtime".to_owned(),
+                        error_type: None,
+                    },
+                    error.to_string(),
+                ));
+            }
+        }
+    }
     Ok(compare_result(plan, mode, outcome))
+}
+
+/// Reads the `$DONE`/`print` completion signal of an async test and maps it to
+/// a success or a typed runtime failure.
+fn read_async_completion(
+    context: &mut Context<'_>,
+    limits: ScriptLimits,
+) -> Result<Result<(), (ActualError, String)>, String> {
+    let value = evaluate_script(
+        context,
+        "__test262AsyncResult",
+        "harness/async-result.js",
+        limits,
+    )
+    .map_err(|error| format!("could not read async completion: {error}"))?;
+    let text = value
+        .as_string()
+        .ok()
+        .flatten()
+        .and_then(|string| string.to_utf8_lossy().ok())
+        .unwrap_or_default();
+    if text == "Test262:AsyncTestComplete" {
+        return Ok(Ok(()));
+    }
+    if let Some(rest) = text.strip_prefix("Test262:AsyncTestFailure:") {
+        let (name, detail) = rest.split_once(": ").unwrap_or(("Test262Error", rest));
+        return Ok(Err((
+            ActualError {
+                phase: "runtime".to_owned(),
+                error_type: Some(name.to_owned()),
+            },
+            detail.to_owned(),
+        )));
+    }
+    Ok(Err((
+        ActualError {
+            phase: "runtime".to_owned(),
+            error_type: None,
+        },
+        format!("async test did not report completion (last print: {text:?})"),
+    )))
 }
 
 /// Filesystem-backed module loader for Test262 module-goal tests.
