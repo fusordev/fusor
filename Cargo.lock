@@ -1239,6 +1239,7 @@ dependencies = [
 name = "qjs-cli"
 version = "0.0.1"
 dependencies = [
+ "miette",
  "quickjs",
  "quickjs-runtime",
  "tokio",

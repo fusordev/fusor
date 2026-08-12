@@ -170,14 +170,17 @@ async fn run_file(file: &str, as_script: bool, argv: Vec<String>) -> u8 {
     }
 }
 
-/// Prints an error and its `source` chain to stderr.
+/// Prints a top-level error through `miette`.
+///
+/// The facade errors (`ScriptEvaluationError`/`ModuleEvaluationError`) wrap the
+/// leaf failure in several Rust typing layers (`…` → `GlobalScriptError` →
+/// `ExecutionError`) whose `Display` all delegate to the same message. Those
+/// layers are not a user-facing cause chain, so they are deliberately not
+/// walked — reporting the top-level error once avoids the duplicate
+/// `caused by:` lines a naive `source()` walk would emit.
 pub(crate) fn report_error(origin: &str, error: &dyn Error) {
-    eprintln!("{origin}: {error}");
-    let mut source = error.source();
-    while let Some(cause) = source {
-        eprintln!("  caused by: {cause}");
-        source = cause.source();
-    }
+    let report = miette::Report::msg(format!("{origin}: {error}"));
+    eprintln!("{report:?}");
 }
 
 #[cfg(test)]
