@@ -401,6 +401,13 @@ pub(super) fn reflect_set_property(
     let Some(receiver_reference) = receiver.heap_reference() else {
         return Ok(NativeDispatch::Immediate(StoredValue::Boolean(false)));
     };
+    if let HeapReference::Object(object) = receiver_reference
+        && runtime.module_namespace_export_is_uninitialized(object, &key)?
+    {
+        return Err(NativeFailure::Abrupt(namespace_uninitialized_exception(
+            realm, origin,
+        )?));
+    }
     let definition = match own_property_of(runtime, receiver_reference, &key)? {
         Some(OwnProperty::Accessor { .. }) => {
             return Ok(NativeDispatch::Immediate(StoredValue::Boolean(false)));

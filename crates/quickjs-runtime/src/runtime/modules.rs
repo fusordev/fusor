@@ -33,7 +33,7 @@ pub(crate) use evaluation::{
     async_module_execution_fulfilled, async_module_execution_rejected,
     module_is_evaluating_async, module_top_level_capability,
 };
-pub(crate) use namespace::ModuleNamespaceState;
+pub(crate) use namespace::{ModuleNamespaceState, NamespaceExportState};
 pub(crate) use import_meta::get_or_create_import_meta;
 
 use std::fmt;

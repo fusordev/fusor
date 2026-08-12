@@ -223,6 +223,9 @@ pub(super) enum PropertyFailure {
     DeleteUndefined,
     /// `delete` refused a non-configurable property in strict code.
     NotDeletable,
+    /// A module namespace export read reached an uninitialized binding
+    /// (ECMA-262 10.4.6.2/10.4.6.3, the temporal dead zone).
+    Uninitialized,
 }
 
 pub(super) fn static_property_operand(
@@ -932,6 +935,13 @@ pub(super) fn read_observable_static_property(
                 |property| property_read_outcome(property, receiver),
             )));
         }
+        if let HeapReference::Object(object) = reference
+            && runtime.module_namespace_export_is_uninitialized(object, key)?
+        {
+            return Ok(ObservablePropertyReadOutcome::Complete(
+                PropertyReadOutcome::Failed(PropertyFailure::Uninitialized),
+            ));
+        }
         if let Some(property) = heap_own_property(runtime, reference, key)? {
             return Ok(ObservablePropertyReadOutcome::Complete(
                 property_read_outcome(property, receiver),
@@ -1068,6 +1078,11 @@ pub(super) fn read_heap_property_for_receiver(
     receiver: StoredValue,
     key: &PropertyKey,
 ) -> Result<PropertyReadOutcome, ExecutionError> {
+    if let HeapReference::Object(object) = reference
+        && runtime.module_namespace_export_is_uninitialized(object, key)?
+    {
+        return Ok(PropertyReadOutcome::Failed(PropertyFailure::Uninitialized));
+    }
     Ok(lookup_heap_property(runtime, Some(reference), key)?.map_or(
         PropertyReadOutcome::Value(StoredValue::Undefined),
         |property| property_read_outcome(property, receiver),
@@ -1291,6 +1306,15 @@ pub(super) fn delete_static_property(
         } else {
             PropertyDeleteOutcome::Deleted
         });
+    }
+    if let HeapReference::Object(object) = reference
+        && runtime.module_namespace_export_state(object, key)?.is_some()
+    {
+        // Module namespace [[Delete]] (ECMA-262 10.4.6.5): a string export is
+        // never deletable, so strict `delete` throws a TypeError while
+        // `Reflect.deleteProperty` observes `false`. Symbol keys and non-export
+        // strings fall through to ordinary delete.
+        return Ok(PropertyDeleteOutcome::Refused);
     }
     Ok(match runtime.delete_own_property(reference, key)? {
         PropertyDeletion::Missing | PropertyDeletion::Deleted => PropertyDeleteOutcome::Deleted,

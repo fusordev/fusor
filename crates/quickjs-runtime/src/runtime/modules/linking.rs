@@ -809,12 +809,17 @@ pub(crate) fn get_or_create_namespace(
     }
     let _ = record.append_data(
         to_string_tag_key,
-        crate::PropertyLayout::data(false, false, true),
+        crate::PropertyLayout::data(false, false, false),
         StoredValue::String(
             crate::string::JsString::from_utf8("Module")
                 .map_err(|_| ModuleError::link("string creation failed"))?,
         ),
     );
+    // A module namespace exotic object is always non-extensible (ECMA-262
+    // 10.4.6.7/10.4.6.8); the ordinary machinery then reports [[IsExtensible]]
+    // false, [[PreventExtensions]] true, and [[SetPrototypeOf]] rejected, and
+    // new symbol properties are refused by [[DefineOwnProperty]].
+    record.prevent_extensions();
 
     runtime
         .objects

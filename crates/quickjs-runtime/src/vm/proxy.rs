@@ -14,6 +14,23 @@
 )]
 use super::*;
 
+/// The `ReferenceError` a module namespace exotic object throws when reading
+/// an export whose target binding is still in its temporal dead zone
+/// (ECMA-262 10.4.6.2 `[[Get]]` / 10.4.6.3 `[[GetOwnProperty]]`).
+fn namespace_uninitialized_error(
+    realm: RealmId,
+    origin: JsStackFrame,
+) -> Result<NativeFailure, NativeFailure> {
+    Ok(NativeFailure::Abrupt(PendingException {
+        realm,
+        payload: PendingExceptionPayload::EngineError {
+            kind: ExceptionKind::ReferenceError,
+            message: JsString::from_utf8("binding is not initialized")?,
+        },
+        origin,
+    }))
+}
+
 pub(super) fn proxy_aware_is_array(
     runtime: &Runtime,
     value: StoredValue,
@@ -614,6 +631,11 @@ pub(super) fn begin_internal_get_own_property(
             execution_budget,
         );
     }
+    if let HeapReference::Object(object) = reference
+        && runtime.module_namespace_export_is_uninitialized(object, &key)?
+    {
+        return Err(namespace_uninitialized_error(realm, origin)?);
+    }
     let Some(own) = heap_own_property(runtime, reference, &key)? else {
         return Ok(NativeDispatch::Immediate(StoredValue::Undefined));
     };
@@ -909,6 +931,29 @@ pub(super) fn begin_internal_define_own_property(
                     );
                 }
             }
+        }
+        if let HeapReference::Object(object) = proxy
+            && let Some(allowed) = runtime.module_namespace_define_export(
+                object,
+                &key,
+                definition.requested_value().is_some(),
+                definition.requested_writable(),
+                definition.requested_enumerable(),
+                definition.requested_configurable(),
+            )?
+        {
+            return match result {
+                DefinePropertyResult::Boolean => {
+                    Ok(NativeDispatch::Immediate(StoredValue::Boolean(allowed)))
+                }
+                DefinePropertyResult::Target => {
+                    if allowed {
+                        Ok(NativeDispatch::Immediate(base))
+                    } else {
+                        proxy_abrupt(realm, origin, "namespace property definition was rejected")
+                    }
+                }
+            };
         }
         if is_array_length_target(runtime, &base, &key)?
             && let Some(value) = definition.requested_value()
@@ -3004,6 +3049,11 @@ pub(super) fn begin_internal_get(
                 origin,
                 execution_budget,
             );
+        }
+        if let HeapReference::Object(object) = current
+            && runtime.module_namespace_export_is_uninitialized(object, &key)?
+        {
+            return Err(namespace_uninitialized_error(realm, origin)?);
         }
         match heap_own_property(runtime, current, &key)? {
             Some(OwnProperty::Data { value, .. }) => {

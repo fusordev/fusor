@@ -380,13 +380,16 @@ pub(super) fn property_exception_at(
             JsString::from_utf8("cannot convert to object")?
         }
         PropertyFailure::NotDeletable => JsString::from_utf8("could not delete property")?,
+        PropertyFailure::Uninitialized => JsString::from_utf8("binding is not initialized")?,
+    };
+    let kind = if matches!(failure, PropertyFailure::Uninitialized) {
+        ExceptionKind::ReferenceError
+    } else {
+        ExceptionKind::TypeError
     };
     Ok(PendingException {
         realm,
-        payload: PendingExceptionPayload::EngineError {
-            kind: ExceptionKind::TypeError,
-            message,
-        },
+        payload: PendingExceptionPayload::EngineError { kind, message },
         origin,
     })
 }
@@ -394,6 +397,22 @@ pub(super) fn property_exception_at(
 fn required_property_name(name: Option<&JsString>) -> Result<&JsString, EngineFault> {
     name.ok_or(EngineFault::RuntimeInvariant {
         message: "property failure requiring a name did not retain one",
+    })
+}
+
+/// The `ReferenceError` a module namespace exotic object raises when a read
+/// reaches an export whose target binding is still uninitialized.
+pub(super) fn namespace_uninitialized_exception(
+    realm: RealmId,
+    origin: JsStackFrame,
+) -> Result<PendingException, ExecutionError> {
+    Ok(PendingException {
+        realm,
+        payload: PendingExceptionPayload::EngineError {
+            kind: ExceptionKind::ReferenceError,
+            message: JsString::from_utf8("binding is not initialized")?,
+        },
+        origin,
     })
 }
 

@@ -1153,6 +1153,12 @@ pub(super) fn own_property_descriptor(
             own_property_of(runtime, HeapReference::Function(*function), key)?
         }
         StoredValue::Object(object) => {
+            if runtime.module_namespace_export_is_uninitialized(*object, key)? {
+                return Err(NativeFailure::Abrupt(namespace_uninitialized_exception(
+                    realm,
+                    origin.clone(),
+                )?));
+            }
             own_property_of(runtime, HeapReference::Object(*object), key)?
         }
         // A primitive string exposes its own index and `length` properties.
@@ -1196,6 +1202,12 @@ pub(super) fn resolve_own_property(
             own_property_of(runtime, HeapReference::Function(*function), key)
         }
         StoredValue::Object(object) => {
+            if runtime.module_namespace_export_is_uninitialized(*object, key)? {
+                return Err(NativeFailure::Abrupt(namespace_uninitialized_exception(
+                    realm,
+                    origin.clone(),
+                )?));
+            }
             own_property_of(runtime, HeapReference::Object(*object), key)
         }
         StoredValue::String(value) => string_own_property(value, key),
