@@ -555,6 +555,7 @@ impl Runtime {
             kept_alive: Vec::new(),
             generator_states: HashMap::new(),
             async_function_states: HashMap::new(),
+            module_async_evaluation_count: 0,
             async_generator_states: HashMap::new(),
             array_from_async_states: HashMap::new(),
             next_math_random_seed: 1,

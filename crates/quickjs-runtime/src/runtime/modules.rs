@@ -69,6 +69,7 @@ pub(crate) enum ModuleStatus {
     Linking,
     Linked,
     Evaluating,
+    EvaluatingAsync,
     Evaluated,
     /// The module or one in its strongly connected component threw during
     /// evaluation. `evaluation_error` holds the error.
@@ -225,6 +226,16 @@ pub(crate) struct SourceTextModuleRecord {
     pub(crate) dfs_ancestor_index: Option<u32>,
     pub(crate) cycle_root: Option<ModuleRecordId>,
     pub(crate) evaluation_error: Option<ModuleError>,
+    /// Modules whose async evaluation this module waits on
+    /// (ECMA-262 [[PendingAsyncDependencies]]).
+    pub(crate) pending_async_dependencies: u32,
+    /// ECMA-262 [[AsyncEvaluationOrder]]: `None` is ~empty~.
+    pub(crate) async_evaluation_order: Option<u32>,
+    /// Modules waiting on this module's async evaluation
+    /// (ECMA-262 [[AsyncParentModules]]).
+    pub(crate) async_parent_modules: Vec<ModuleRecordId>,
+    /// ECMA-262 [[TopLevelCapability]] promise for `Evaluate()`.
+    pub(crate) top_level_capability: Option<ObjectId>,
     /// Persisted module environment: one cell per declaration-record binding
     /// in declaration order.
     pub(crate) environment: Vec<BindingCellId>,
@@ -255,6 +266,10 @@ impl SourceTextModuleRecord {
             dfs_ancestor_index: None,
             cycle_root: None,
             evaluation_error: None,
+            pending_async_dependencies: 0,
+            async_evaluation_order: None,
+            async_parent_modules: Vec::new(),
+            top_level_capability: None,
             environment: Vec::new(),
             namespace_object: None,
             meta_object: None,

@@ -5527,6 +5527,8 @@ pub struct Runtime {
     pub(crate) kept_alive: Vec<StoredValue>,
     pub(crate) generator_states: HashMap<ObjectId, crate::vm::GeneratorRecord>,
     pub(crate) async_function_states: HashMap<ObjectId, crate::vm::AsyncFunctionRecord>,
+    /// ECMA-262 IncrementModuleAsyncEvaluationCount (global monotonic counter).
+    pub(crate) module_async_evaluation_count: u32,
     pub(crate) async_generator_states: HashMap<ObjectId, crate::vm::AsyncGeneratorRecord>,
     pub(crate) array_from_async_states: HashMap<ObjectId, crate::vm::ArrayFromAsyncRecord>,
     /// Next non-zero seed assigned after a realm transaction commits.

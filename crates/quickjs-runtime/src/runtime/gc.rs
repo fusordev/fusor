@@ -342,6 +342,14 @@ impl Runtime {
                     &mut work,
                 );
             }
+            if let Some(object) = module.top_level_capability {
+                mark_heap_reference(
+                    HeapReference::Object(object),
+                    &mut marked_functions,
+                    &mut marked_objects,
+                    &mut work,
+                );
+            }
         }
         for (_, realm) in self.realms.iter() {
             mark_heap_reference(
