@@ -62,7 +62,13 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 span: Some(class.span),
             });
         }
-        if self.planned.plan.kind() != CompilationUnitKind::Script {
+        // Mirrors selected_function: scripts and modules both link closures
+        // against root cells, and the strict metadata required above holds for
+        // module units as well (modules are always strict).
+        if !matches!(
+            self.planned.plan.kind(),
+            CompilationUnitKind::Script | CompilationUnitKind::Module
+        ) {
             return unsupported(
                 UnsupportedLeafFeature::UnsupportedCompilationUnit,
                 class.span,
@@ -122,7 +128,13 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 span: Some(class.span),
             });
         }
-        if self.planned.plan.kind() != CompilationUnitKind::Script {
+        // Mirrors selected_function: scripts and modules both link closures
+        // against root cells, and the strict metadata required above holds for
+        // module units as well (modules are always strict).
+        if !matches!(
+            self.planned.plan.kind(),
+            CompilationUnitKind::Script | CompilationUnitKind::Module
+        ) {
             return unsupported(
                 UnsupportedLeafFeature::UnsupportedCompilationUnit,
                 class.span,
@@ -181,7 +193,16 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 span: Some(arrow.span),
             });
         }
-        if self.planned.plan.kind() != CompilationUnitKind::Script {
+        // Mirrors selected_function: scripts and modules both link closures
+        // against root cells. Arrow lowering is unit-kind agnostic: `this` and
+        // `new.target` resolve lexically at runtime (module top-level `this` is
+        // undefined, and new.target at module top level is a SyntaxError caught
+        // by the parser). Module units are strict, which only flows through as
+        // executable.is_strict() metadata below.
+        if !matches!(
+            self.planned.plan.kind(),
+            CompilationUnitKind::Script | CompilationUnitKind::Module
+        ) {
             return unsupported(
                 UnsupportedLeafFeature::UnsupportedCompilationUnit,
                 arrow.span,

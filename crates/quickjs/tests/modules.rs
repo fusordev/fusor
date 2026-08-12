@@ -283,6 +283,98 @@ fn debug_exported_const_read_in_same_module() {
 }
 
 #[test]
+fn top_level_arrows_compile_and_evaluate() {
+    evaluate(
+        "const identity = () => 42;\n\
+         const add = (a, b) => a + b;\n\
+         if (identity() !== 42) { throw new Error('identity'); }\n\
+         if (add(identity(), 8) !== 50) { throw new Error('add'); }",
+        &[],
+    )
+    .expect("top-level arrows compile and evaluate");
+}
+
+#[test]
+fn arrows_capture_module_local_and_imported_bindings() {
+    evaluate(
+        "import { value } from './dep.mjs';\n\
+         const local = 3;\n\
+         const read = () => value + local;\n\
+         if (read() !== 10) { throw new Error('read ' + read()); }",
+        &[("./dep.mjs", "export const value = 7;")],
+    )
+    .expect("arrows capture module-local and imported bindings");
+}
+
+#[test]
+fn top_level_arrow_this_is_undefined() {
+    evaluate(
+        "const read = () => this;\n\
+         if (read() !== undefined) { throw new Error('this'); }",
+        &[],
+    )
+    .expect("a module top-level arrow reads undefined as this");
+}
+
+#[test]
+fn arrows_inside_module_functions_bind_the_function_receiver() {
+    evaluate(
+        "function make() { return () => this; }\n\
+         const receiver = { marker: 7 };\n\
+         const read = make.call(receiver);\n\
+         if (read() !== receiver) { throw new Error('receiver'); }\n\
+         function target() { return (() => new.target)(); }\n\
+         if (target() !== undefined) { throw new Error('new.target'); }",
+        &[],
+    )
+    .expect("arrows inside module functions resolve this and new.target lexically");
+}
+
+#[test]
+fn async_arrows_in_modules_fulfill_promises() {
+    evaluate_dynamic(
+        "const read = async () => 5;\n\
+         read().then((value) => { globalThis.asyncValue = value; });",
+        &[],
+        "if (globalThis.asyncValue !== 5) { throw new Error('value ' + globalThis.asyncValue); }",
+    )
+    .expect("async arrows in modules fulfill promises");
+}
+
+#[test]
+fn classes_with_instance_fields_and_constructors_compile_in_modules() {
+    evaluate(
+        "class Point {\n\
+             x = 1;\n\
+             constructor() { this.y = 2; }\n\
+         }\n\
+         const point = new Point();\n\
+         if (point.x !== 1 || point.y !== 2) { throw new Error('point'); }\n\
+         class OnlyFields { value = 3; }\n\
+         if (new OnlyFields().value !== 3) { throw new Error('default constructor'); }",
+        &[],
+    )
+    .expect("classes with fields and constructors compile in modules");
+}
+
+#[test]
+fn named_default_class_exports_compile_in_modules() {
+    evaluate(
+        "import Exported from './dep.mjs';\n\
+         const instance = new Exported();\n\
+         if (instance.marker !== 9) { throw new Error('marker'); }\n\
+         if (Exported.name !== 'Named') { throw new Error('name ' + Exported.name); }",
+        &[(
+            "./dep.mjs",
+            "export default class Named {\n\
+                 marker = 9;\n\
+             }",
+        )],
+    )
+    .expect("named export default class compiles and links");
+}
+
+#[test]
 fn import_meta_is_an_identity_stable_object() {
     evaluate(
         "const a = import.meta;\n\

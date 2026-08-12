@@ -137,12 +137,17 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                     executable: executable.id(),
                 },
             )? {
+                // Module-owned declaration cells are frame bindings inside the
+                // module root, so root-frame references to them (for example
+                // the SetName atom of an inferred arrow/class name) resolve
+                // against the same function-local atom table.
                 if !matches!(
                     binding.placement(),
                     StoragePlacement::Argument { .. }
                         | StoragePlacement::Local
                         | StoragePlacement::GlobalObject
                         | StoragePlacement::GlobalLexical
+                        | StoragePlacement::ModuleLocal
                 ) {
                     continue;
                 }

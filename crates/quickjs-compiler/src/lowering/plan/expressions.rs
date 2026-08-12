@@ -14,11 +14,11 @@ use super::super::{
     PropertyKind, SequenceExpression, SimpleAssignmentTarget, Span, StatementCompletion,
     StatementControlStack, StatementPlanningState, StatementWork, StaticMemberExpression,
     StoragePlacement, UnaryExpression, UnaryOperator, UnsupportedLeafFeature, UpdateExpression,
-    UpdateOperator, compiled_static_property_key, plan_external_put, plan_external_read,
-    plan_put_slot, unsupported,
+    UpdateOperator, WritePolicy, compiled_static_property_key, plan_external_put,
+    plan_external_read, plan_put_slot, unsupported,
 };
 use super::abrupt::{AbruptMarker, AbruptMarkerKind, AbruptMarkerTag};
-use super::bindings::WithObjectSource;
+use super::bindings::{WithObjectSource, plan_external_put_init};
 use super::calls::MemberCallee;
 use oxc_ast::ast::{SpreadElement, StaticBlock};
 use quickjs_bytecode::CompilerBindingKind;
@@ -3286,9 +3286,50 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 self.validate_class_declaration_storage(binding, slot, identifier.span)?;
                 flow.emit(plan_put_slot(slot, identifier.span))
             }
+            StoragePlacement::ModuleLocal => {
+                // Module top-level class declarations store into the module
+                // environment through the captured-cell machinery, exactly like
+                // module-local `let`/`const` declaration initializers.
+                let valid = storage.policy().kind() == DeclarationKind::Class
+                    && storage.policy().initialization() == InitializationPolicy::AtDeclaration
+                    && storage.policy().writes() == WritePolicy::Mutable
+                    && storage.policy().has_temporal_dead_zone();
+                if !valid {
+                    return unsupported(
+                        UnsupportedLeafFeature::UnsupportedBinding,
+                        identifier.span,
+                    );
+                }
+                let module_id = tree_layout.module_bindings.for_binding(binding).ok_or(
+                    LeafCompilationError::SemanticInvariant {
+                        invariant: "module class declaration has a module binding descriptor",
+                        span: Some(identifier.span),
+                    },
+                )?;
+                let descriptor = tree_layout.module_bindings.binding(module_id).ok_or(
+                    LeafCompilationError::SemanticInvariant {
+                        invariant: "module class declaration descriptor exists",
+                        span: Some(identifier.span),
+                    },
+                )?;
+                let realm_global_count = tree_layout
+                    .realm_globals
+                    .imports_for(layout.executable)?
+                    .len();
+                let slot = tree_layout.module_bindings.closure_slot(
+                    &self.planned.plan,
+                    layout.executable,
+                    module_id,
+                    realm_global_count,
+                )?;
+                flow.emit(plan_external_put_init(
+                    CompilerClosureBinding::Captured(descriptor.policy),
+                    slot,
+                    identifier.span,
+                ))
+            }
             StoragePlacement::Argument { .. }
             | StoragePlacement::GlobalObject
-            | StoragePlacement::ModuleLocal
             | StoragePlacement::ModuleImport => {
                 unsupported(UnsupportedLeafFeature::UnsupportedBinding, identifier.span)
             }

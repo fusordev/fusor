@@ -857,6 +857,50 @@ fn module_declaration_record_lists_expected_binding_policies() {
 }
 
 #[test]
+fn module_arrows_and_class_constructors_compile_in_module_units() {
+    with_parsed_program(
+        "const f = () => 1;\n\
+         const g = async () => 2;\n\
+         class OnlyFields { value = 3; }\n\
+         export { f, g, OnlyFields };",
+        FrontendOptions::for_goal(CompilationGoal::Module),
+        |unit| {
+            let context = CompilationContext::new(unit).expect("module storage plan");
+            let tree = context
+                .compile_module(VerificationLimits::default())
+                .expect("module with arrows and classes compiles");
+            let kinds: Vec<_> = tree
+                .storage_plan()
+                .executables()
+                .iter()
+                .map(|executable| executable.kind())
+                .collect();
+            assert!(
+                kinds.contains(&ExecutableKind::Arrow {
+                    asynchronous: false
+                }),
+                "ordinary arrow compiles, got: {kinds:?}"
+            );
+            assert!(
+                kinds.contains(&ExecutableKind::Arrow {
+                    asynchronous: true
+                }),
+                "async arrow compiles, got: {kinds:?}"
+            );
+            assert!(
+                kinds.contains(&ExecutableKind::ClassDefaultConstructor),
+                "default class constructor compiles, got: {kinds:?}"
+            );
+            assert!(
+                kinds.contains(&ExecutableKind::ClassInstanceInitializer),
+                "class instance initializer compiles, got: {kinds:?}"
+            );
+        },
+    )
+    .expect("front-end acceptance");
+}
+
+#[test]
 fn module_top_level_await_is_rejected() {
     with_parsed_program(
         "await Promise.resolve(1);",
