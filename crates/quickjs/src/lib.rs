@@ -6,7 +6,12 @@
 
 #![forbid(unsafe_code)]
 
-use std::{collections::HashSet, error::Error, fmt, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    error::Error,
+    fmt,
+    sync::Arc,
+};
 
 use quickjs_bytecode::{
     BytecodeGraphVerificationLimits, CompilerBindingKind, CompilerBindingPolicy,
@@ -906,6 +911,65 @@ fn compile_module_source(
     })
 }
 
+/// Decodes a static module request's specifier to a UTF-8 `String`.
+fn decode_request_specifier(request: &quickjs_frontend::StaticModuleRequest) -> String {
+    request
+        .specifier()
+        .code_units()
+        .iter()
+        .copied()
+        .map(u32::from)
+        .filter_map(char::from_u32)
+        .collect()
+}
+
+/// Parses `source` as a Module goal and returns its static import/re-export
+/// specifier strings in source order.
+///
+/// This is the request-listing half of module compilation: asynchronous hosts
+/// use it to resolve and preload a static graph before handing it to
+/// [`evaluate_preloaded_module_graph`]. Import attributes are not rejected
+/// here; compilation inside the evaluation entry points rejects them, so both
+/// the loader-driven and preloaded paths surface the same error.
+///
+/// # Errors
+///
+/// Returns the [`ModuleEvaluationError::Frontend`] parse failure.
+pub fn module_import_requests(
+    source: &str,
+    limits: ScriptLimits,
+) -> Result<Vec<String>, ModuleEvaluationError> {
+    with_parsed_program(
+        source,
+        FrontendOptions::for_goal(CompilationGoal::Module).with_limits(limits.frontend),
+        |unit| {
+            unit.module_syntax()
+                .requests()
+                .iter()
+                .map(decode_request_specifier)
+                .collect()
+        },
+    )
+    .map_err(ModuleEvaluationError::Frontend)
+}
+
+/// One preloaded static-graph edge: the `specifier` text as requested from
+/// the module registered under `referrer`, plus the loaded resolution target.
+///
+/// Asynchronous hosts gather these (resolving and reading sources off the
+/// engine thread) and pass them to [`evaluate_preloaded_module_graph`], which
+/// reproduces [`evaluate_module`]'s compile/register/link/evaluate pipeline
+/// without a synchronous loader.
+#[derive(Clone, Debug)]
+pub struct PreloadedModuleEdge {
+    /// Canonical key of the referrer module.
+    pub referrer: String,
+    /// Specifier text as written in the referrer.
+    pub specifier: String,
+    /// Loaded resolution target.
+    pub source: LoadedModuleSource,
+}
+
 /// Parses, compiles, links, and evaluates an ECMAScript Module graph.
 ///
 /// The root source is compiled as a Module goal. The `loader` provides source
@@ -926,6 +990,52 @@ pub fn evaluate_module(
     loader: &mut dyn ModuleSourceLoader,
     limits: ScriptLimits,
 ) -> Result<JsValue, ModuleEvaluationError> {
+    // Gather the static graph through the synchronous loader, then run the
+    // shared preloaded-graph pipeline so both entry points behave identically.
+    let mut edges: Vec<PreloadedModuleEdge> = Vec::new();
+    let mut queue: Vec<(String, String)> = vec![(root_name.to_owned(), root_source.to_owned())];
+    let mut seen: HashSet<String> = HashSet::new();
+    seen.insert(root_name.to_owned());
+    while let Some((referrer, source)) = queue.pop() {
+        for specifier in module_import_requests(&source, limits)? {
+            let loaded = loader.load_module(&specifier, Some(&referrer))?;
+            if seen.insert(loaded.key.as_str().to_owned()) {
+                queue.push((loaded.key.as_str().to_owned(), loaded.source.clone()));
+            }
+            edges.push(PreloadedModuleEdge {
+                referrer: referrer.clone(),
+                specifier,
+                source: loaded,
+            });
+        }
+    }
+    evaluate_preloaded_module_graph(context, root_source, root_name, edges, limits)
+}
+
+/// Compiles, registers, links, and evaluates a preloaded static module graph.
+///
+/// Equivalent to [`evaluate_module`], except dependencies come from `edges`
+/// (one per (referrer, specifier) request occurrence, gathered by the host —
+/// e.g. via [`module_import_requests`]) instead of a synchronous loader. The
+/// compile → register → edge → link → evaluate order is identical.
+///
+/// # Errors
+///
+/// Returns [`ModuleEvaluationError::Loader`] when a request has no matching
+/// preloaded edge, and the same frontend, compiler, linking, and evaluation
+/// errors as [`evaluate_module`].
+pub fn evaluate_preloaded_module_graph(
+    context: &mut Context<'_>,
+    root_source: &str,
+    root_name: &str,
+    edges: Vec<PreloadedModuleEdge>,
+    limits: ScriptLimits,
+) -> Result<JsValue, ModuleEvaluationError> {
+    let edge_map: HashMap<(String, String), LoadedModuleSource> = edges
+        .into_iter()
+        .map(|edge| ((edge.referrer, edge.specifier), edge.source))
+        .collect();
+
     // Compile root
     let root_key = quickjs_runtime::ModuleKey::new(Arc::from(root_name));
     let root_compiled = compile_module_source(root_source, root_name, limits, root_key.clone())?;
@@ -937,7 +1047,7 @@ pub fn evaluate_module(
         root_compiled.authority.clone(),
     )?;
 
-    // BFS: gather all dependencies
+    // BFS: register every preloaded dependency
     let mut queue: Vec<(quickjs_runtime::ModuleKey, quickjs_frontend::ModuleSyntaxRecord)> =
         vec![(root_compiled.key.clone(), root_compiled.syntax_record.clone())];
     let mut seen: HashSet<String> = HashSet::new();
@@ -945,15 +1055,15 @@ pub fn evaluate_module(
 
     while let Some((referrer_key, syntax)) = queue.pop() {
         for request in syntax.requests() {
-            let specifier: String = request
-                .specifier()
-                .code_units()
-                .iter()
-                .copied()
-                .map(u32::from)
-                .filter_map(char::from_u32)
-                .collect();
-            let loaded = loader.load_module(&specifier, Some(referrer_key.as_str()))?;
+            let specifier = decode_request_specifier(request);
+            let loaded = edge_map
+                .get(&(referrer_key.as_str().to_owned(), specifier.clone()))
+                .ok_or_else(|| {
+                    ModuleSourceError::new(format!(
+                        "no preloaded module source for request '{specifier}' from '{}'",
+                        referrer_key.as_str()
+                    ))
+                })?;
             if !seen.insert(loaded.key.as_str().to_owned()) {
                 // Cycle/diamond edge to an already-registered record: record
                 // the (referrer, specifier) edge and skip re-registration.
@@ -1041,14 +1151,7 @@ fn gather_dynamic_import_graph(
 
     while let Some((referrer_key, syntax)) = queue.pop() {
         for request in syntax.requests() {
-            let specifier: String = request
-                .specifier()
-                .code_units()
-                .iter()
-                .copied()
-                .map(u32::from)
-                .filter_map(char::from_u32)
-                .collect();
+            let specifier = decode_request_specifier(request);
             let loaded = loader.load_module(&specifier, Some(referrer_key.as_str()))?;
             if context.has_module(&loaded.key) || !seen.insert(loaded.key.as_str().to_owned()) {
                 // Cycle/diamond edge to an already-registered record: record
