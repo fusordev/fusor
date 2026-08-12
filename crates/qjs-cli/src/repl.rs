@@ -21,13 +21,16 @@
 
 use std::io::{BufRead, Write};
 
-use quickjs::{ScriptLimits, evaluate_module, evaluate_script};
+use quickjs::{ScriptLimits, evaluate_preloaded_module_graph, evaluate_script};
 use quickjs_runtime::{Runtime, RuntimeLimits};
 
 use crate::{format::format_value, report_error, resolver::NodeLikeResolver};
 
 /// Runs the REPL on stdin/stdout. Returns the process exit code.
-pub(crate) fn run() -> u8 {
+///
+/// Module entries load their static graph asynchronously on the caller's
+/// Tokio runtime; script entries stay fully synchronous.
+pub(crate) async fn run() -> u8 {
     let cwd = match std::env::current_dir() {
         Ok(cwd) => crate::resolver::normalize_path(&cwd),
         Err(error) => {
@@ -101,10 +104,15 @@ pub(crate) fn run() -> u8 {
             }
             source.push_str(&entry);
             let name = format!("{entry_prefix}/__repl_entry_{entry_index}.mjs");
-            match evaluate_module(&mut context, &source, &name, &mut resolver, ScriptLimits::default()) {
+            let limits = ScriptLimits::default();
+            let result = match crate::loader::gather_static_graph(&resolver, &source, &name, limits).await {
+                Ok(edges) => evaluate_preloaded_module_graph(&mut context, &source, &name, edges, limits),
+                Err(error) => Err(error),
+            };
+            match result {
                 Ok(value) => {
                     if let Err(error) =
-                        crate::imports::drain_pending_imports(&mut context, &mut resolver, ScriptLimits::default())
+                        crate::imports::drain_pending_imports(&mut context, &mut resolver, limits).await
                     {
                         report_error("module entry", &error);
                     }

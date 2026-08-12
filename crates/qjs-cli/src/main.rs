@@ -5,12 +5,13 @@
 mod builtins;
 mod format;
 mod imports;
+mod loader;
 mod repl;
 mod resolver;
 
 use std::{error::Error, path::Path, process::ExitCode};
 
-use quickjs::{ScriptLimits, evaluate_module, evaluate_script};
+use quickjs::{ScriptLimits, evaluate_preloaded_module_graph, evaluate_script};
 use quickjs_runtime::{Runtime, RuntimeLimits};
 
 use crate::resolver::NodeLikeResolver;
@@ -22,11 +23,16 @@ usage:
   qjs --script <file>         evaluate <file> as a classic script
   qjs repl                    start the ESM REPL (.exit or Ctrl-D to quit)";
 
-fn main() -> ExitCode {
+/// The whole CLI runs on one shared `current_thread` Tokio runtime. The
+/// engine is synchronous and its GC'd types are not `Send`, so all engine
+/// calls stay on this main task; only pure data (paths, file bytes) crosses
+/// await boundaries inside the module loader/drain.
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> ExitCode {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     match parse_arguments(&arguments) {
-        Ok(Command::Repl) => ExitCode::from(repl::run()),
-        Ok(Command::Run { file, as_script, argv }) => ExitCode::from(run_file(&file, as_script, argv)),
+        Ok(Command::Repl) => ExitCode::from(repl::run().await),
+        Ok(Command::Run { file, as_script, argv }) => ExitCode::from(run_file(&file, as_script, argv).await),
         Ok(Command::Help) => {
             println!("{USAGE}");
             ExitCode::SUCCESS
@@ -76,7 +82,7 @@ fn parse_arguments(arguments: &[String]) -> Result<Command, String> {
     Ok(Command::Run { file, as_script, argv })
 }
 
-fn run_file(file: &str, as_script: bool, argv: Vec<String>) -> u8 {
+async fn run_file(file: &str, as_script: bool, argv: Vec<String>) -> u8 {
     let path = match std::fs::canonicalize(Path::new(file)) {
         Ok(path) => path,
         Err(error) => {
@@ -84,7 +90,7 @@ fn run_file(file: &str, as_script: bool, argv: Vec<String>) -> u8 {
             return 2;
         }
     };
-    let source = match std::fs::read_to_string(&path) {
+    let source = match tokio::fs::read_to_string(&path).await {
         Ok(source) => source,
         Err(error) => {
             eprintln!("qjs: cannot read '{}': {error}", path.display());
@@ -131,10 +137,22 @@ fn run_file(file: &str, as_script: bool, argv: Vec<String>) -> u8 {
         process_argv.extend(argv);
         let mut resolver = NodeLikeResolver::new(cwd, process_argv);
         let limits = ScriptLimits::default();
-        match evaluate_module(&mut context, &source, &root_name, &mut resolver, limits)
-            .and_then(|_| imports::drain_pending_imports(&mut context, &mut resolver, limits))
-        {
-            Ok(()) => 0,
+        // Load the static graph asynchronously (concurrent per-level reads on
+        // this runtime), evaluate it synchronously, then drain parked
+        // dynamic `import()` loads.
+        let result = match loader::gather_static_graph(&resolver, &source, &root_name, limits).await {
+            Ok(edges) => evaluate_preloaded_module_graph(&mut context, &source, &root_name, edges, limits)
+                .map(|_| ()),
+            Err(error) => Err(error),
+        };
+        match result {
+            Ok(()) => match imports::drain_pending_imports(&mut context, &mut resolver, limits).await {
+                Ok(()) => 0,
+                Err(error) => {
+                    report_error(&root_name, &error);
+                    1
+                }
+            },
             Err(error) => {
                 report_error(&root_name, &error);
                 1
