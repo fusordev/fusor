@@ -240,6 +240,27 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 continue;
             }
             let Some(identifier) = &function.id else {
+                let synthetic = self
+                    .planned
+                    .plan
+                    .bindings()
+                    .iter()
+                    .find(|binding| {
+                        binding.policy().kind() == DeclarationKind::SyntheticDefault
+                            && binding.policy().initialization()
+                                == InitializationPolicy::FunctionAtInstantiation
+                    })
+                    .map(|binding| binding.id());
+                if let Some(synthetic) = synthetic {
+                    let target = function_declarations.get_mut(synthetic.index()).ok_or(
+                        LeafCompilationError::SemanticInvariant {
+                            invariant:
+                                "synthetic default function binding indexes instantiation layout",
+                            span: None,
+                        },
+                    )?;
+                    *target = Some(executable.id());
+                }
                 continue;
             };
             let binding =

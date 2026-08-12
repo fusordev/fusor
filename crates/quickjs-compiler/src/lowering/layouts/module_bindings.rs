@@ -3,7 +3,9 @@ use std::sync::Arc;
 use quickjs_bytecode::{CompilerBindingPolicy, ModuleBindingOrigin, ModuleImportName};
 use quickjs_frontend::Span;
 
-use crate::storage::{BindingId, DeclarationKind, ExecutableId, StoragePlacement, StoragePlan};
+use crate::storage::{
+    BindingId, DeclarationKind, ExecutableId, InitializationPolicy, StoragePlacement, StoragePlan,
+};
 
 use super::super::{
     LeafCompilationError, ModuleBindingId, UnsupportedLeafFeature, checked_function_entry_count,
@@ -357,12 +359,21 @@ pub(in crate::lowering) fn module_binding_verified_policy(
             false,
         )),
         DeclarationKind::Let | DeclarationKind::Class | DeclarationKind::SyntheticDefault => {
-            Ok(CompilerBindingPolicy::new(
-                VerifiedBindingKind::Let,
-                VerifiedInitializationPolicy::AtDeclaration,
-                VerifiedWritePolicy::Mutable,
-                true,
-            ))
+            if binding.policy().initialization() == InitializationPolicy::FunctionAtInstantiation {
+                Ok(CompilerBindingPolicy::new(
+                    VerifiedBindingKind::Function,
+                    VerifiedInitializationPolicy::FunctionAtInstantiation,
+                    VerifiedWritePolicy::Mutable,
+                    false,
+                ))
+            } else {
+                Ok(CompilerBindingPolicy::new(
+                    VerifiedBindingKind::Let,
+                    VerifiedInitializationPolicy::AtDeclaration,
+                    VerifiedWritePolicy::Mutable,
+                    true,
+                ))
+            }
         }
         DeclarationKind::Const => Ok(CompilerBindingPolicy::new(
             VerifiedBindingKind::Const,

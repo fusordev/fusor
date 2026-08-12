@@ -153,8 +153,13 @@ fn verify_closure_metadata(
             let names_match = child
                 .zip(child_metadata)
                 .is_some_and(|(child, child_metadata)| {
-                    atom_contents(definition.name, parent.atoms())
-                        == atom_contents(child_metadata.function_name, child.atoms())
+                    let closure_name = atom_contents(definition.name, parent.atoms());
+                    let function_name = atom_contents(child_metadata.function_name, child.atoms());
+                    closure_name == function_name
+                        || (closure_name
+                            .is_some_and(|name| name.code_units().eq("*default*".encode_utf16()))
+                            && function_name
+                                .is_some_and(|name| name.code_units().eq("default".encode_utf16())))
                 });
             if !names_match {
                 return Err(BytecodeVerificationError::function(
@@ -187,8 +192,13 @@ fn verify_closure_metadata(
             let names_match = child
                 .zip(child_metadata)
                 .is_some_and(|(child, child_metadata)| {
-                    atom_contents(definition.name, parent.atoms())
-                        == atom_contents(child_metadata.function_name, child.atoms())
+                    let closure_name = atom_contents(definition.name, parent.atoms());
+                    let function_name = atom_contents(child_metadata.function_name, child.atoms());
+                    closure_name == function_name
+                        || (closure_name
+                            .is_some_and(|name| name.code_units().eq("*default*".encode_utf16()))
+                            && function_name
+                                .is_some_and(|name| name.code_units().eq("default".encode_utf16())))
                 });
             if !names_match {
                 return Err(BytecodeVerificationError::function(

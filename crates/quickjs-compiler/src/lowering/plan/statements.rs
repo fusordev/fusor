@@ -810,22 +810,9 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                         flow,
                     );
                 }
-                // Anonymous default function: store a closure into the
-                // synthetic `*default*` cell at statement position.
-                let slot = self.module_synthetic_default_slot(layout, tree_layout)?;
-                let child = ExpressionPlanner::new(self).executable_for_function(function)?;
-                flow.emit(ExpressionPlanner::new(self).plan_child_function_closure(
-                    child,
-                    layout.executable,
-                    span,
-                    tree_layout,
-                    constants,
-                )?)?;
-                flow.emit(PlannedInstruction::new(
-                    FinalOpcode::PutVarRefCheckInit,
-                    Operands::VarRef(slot),
-                    span,
-                ))
+                // Anonymous default function: hoisted through the synthetic
+                // `*default*` cell's function-initializer prefix.
+                return Ok(());
             }
             ExportDefaultDeclarationKind::ClassDeclaration(class) => {
                 if class.id.is_some() {
