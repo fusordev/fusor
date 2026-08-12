@@ -10,7 +10,7 @@ use quickjs::{
 use quickjs_frontend::DiagnosticStage;
 use quickjs_runtime::{
     Context, ExceptionKind, ExecutionError, ExecutionLimits, Function, GlobalScriptError,
-    JsException, ModuleErrorPhase, ModuleKey, Runtime, RuntimeLimits,
+    JsException, JsValue, ModuleErrorPhase, ModuleKey, Runtime, RuntimeLimits,
 };
 use rayon::ThreadPoolBuilder;
 use serde_json::{Value as JsonValue, json};
@@ -1575,14 +1575,26 @@ fn classify_module_error(
             },
             ModuleErrorPhase::Evaluate => ActualError {
                 phase: "runtime".to_owned(),
-                error_type: module_error.exception().and_then(|exception| {
-                    exception_type(
-                        context,
-                        exception,
-                        test262_error_classifier,
-                        classifier_limits,
-                    )
-                }),
+                error_type: module_error
+                    .exception()
+                    .and_then(|exception| {
+                        exception_type(
+                            context,
+                            exception,
+                            test262_error_classifier,
+                            classifier_limits,
+                        )
+                    })
+                    .or_else(|| {
+                        module_error.rejection_value().and_then(|value| {
+                            value_type(
+                                context,
+                                value,
+                                test262_error_classifier,
+                                classifier_limits,
+                            )
+                        })
+                    }),
             },
         },
         ModuleEvaluationError::Execution(_) => ActualError {
@@ -1602,6 +1614,15 @@ fn exception_type(
         return Some(exception_kind_name(kind).to_owned());
     }
     let value = exception.thrown_value()?;
+    value_type(context, value, test262_error_classifier, classifier_limits)
+}
+
+fn value_type(
+    context: &mut Context<'_>,
+    value: &JsValue,
+    test262_error_classifier: Option<&Function>,
+    classifier_limits: DynamicFunctionLimits,
+) -> Option<String> {
     if let Some(kind) = context.error_object_kind(value).ok().flatten() {
         return Some(kind.constructor_name().to_owned());
     }

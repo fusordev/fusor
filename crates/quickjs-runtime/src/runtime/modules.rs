@@ -148,7 +148,8 @@ impl ModuleError {
     }
 
     /// Returns the original rejection value of an async evaluation failure.
-    pub(crate) fn rejection_value(&self) -> Option<&crate::JsValue> {
+    #[must_use]
+    pub fn rejection_value(&self) -> Option<&crate::JsValue> {
         self.rejection_value.as_ref()
     }
 
