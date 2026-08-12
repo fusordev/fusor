@@ -506,10 +506,13 @@ fn modes(metadata: &Metadata) -> Result<Vec<TestMode>, String> {
     if usize::from(raw) + usize::from(strict) + usize::from(non_strict) > 1 {
         return Err("raw, onlyStrict, and noStrict flags are mutually exclusive".to_owned());
     }
-    if raw {
-        Ok(vec![TestMode::Raw])
-    } else if metadata.flags.contains("module") {
+    // `module` takes precedence over `raw`: a module test carries the `raw`
+    // flag to suppress the script harness preamble, but it still compiles
+    // under the Module goal (module evaluation never uses that preamble).
+    if metadata.flags.contains("module") {
         Ok(vec![TestMode::Module])
+    } else if raw {
+        Ok(vec![TestMode::Raw])
     } else if strict {
         Ok(vec![TestMode::Strict])
     } else if non_strict {

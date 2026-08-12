@@ -916,9 +916,13 @@ fn compile_module_source(
     let (syntax_record, tree) = compiled;
     let authority = Arc::new(tree.verified_bytecode().clone());
 
-    // Reject import attributes for now (JSON/text modules are a later step)
+    // Reject non-empty import attributes for now (JSON/text modules are a
+    // later step). An empty `with {}` clause carries no type and is a no-op,
+    // so it is admitted exactly like an attribute-less request.
     for request in syntax_record.requests() {
-        if request.attributes().is_some() {
+        if let Some(attributes) = request.attributes()
+            && !attributes.entries().is_empty()
+        {
             return Err(ModuleEvaluationError::Loader(ModuleSourceError::new(format!(
                 "import attributes are not yet supported (request '{}')",
                 String::from_utf8_lossy(
