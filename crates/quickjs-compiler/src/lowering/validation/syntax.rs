@@ -148,12 +148,13 @@ impl CompilationContext<'_, '_, '_> {
         Ok(())
     }
 
-    /// Rejects Module features deferred from this compiler step: top-level
-    /// `await`.
-    pub(in crate::lowering) fn reject_module_unsupported_features(
+    /// Returns the span of the first `await` expression in the Module's own
+    /// top level, if any. Awaits nested inside functions, arrows, or classes
+    /// belong to those executables, not to the Module root.
+    pub(in crate::lowering) fn module_top_level_await(
         &self,
         root: ExecutableId,
-    ) -> Result<(), LeafCompilationError> {
+    ) -> Result<Option<Span>, LeafCompilationError> {
         let nodes = self.unit.semantic().nodes();
         let root_program = self
             .planned
@@ -193,9 +194,9 @@ impl CompilationContext<'_, '_, '_> {
                 current = parent;
             }
             if at_top_level {
-                return unsupported(UnsupportedLeafFeature::TopLevelAwait, span);
+                return Ok(Some(span));
             }
         }
-        Ok(())
+        Ok(None)
     }
 }

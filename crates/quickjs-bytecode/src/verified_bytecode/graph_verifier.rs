@@ -927,10 +927,10 @@ fn verify_header(
             }
         }
         CompilerExecutableKind::Module => {
-            if header.kind() != FunctionKind::Normal
-                || header.flags().bits() != 0x0400
-                || !header.mode().is_strict()
-            {
+            let supported_header = (header.kind() == FunctionKind::Normal
+                && header.flags().bits() == 0x0400)
+                || (header.kind() == FunctionKind::Async && header.flags().bits() == 0x0420);
+            if !supported_header || !header.mode().is_strict() {
                 return Err(BytecodeVerificationError::function(
                     id,
                     BytecodeVerificationErrorKind::UnsupportedFunctionHeader,

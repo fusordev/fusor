@@ -55,8 +55,6 @@ pub enum UnsupportedLeafFeature {
     UnsupportedReference,
     /// An identifier remained unresolved after Oxc semantics.
     UnresolvedReference,
-    /// A Module contains a top-level `await` expression.
-    TopLevelAwait,
 }
 
 /// Failure to lower or verify one executable body or complete subtree.

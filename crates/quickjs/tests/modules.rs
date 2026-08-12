@@ -769,16 +769,19 @@ fn dynamic_import_cycle_back_into_the_referrer_settles() {
 }
 
 #[test]
-fn dynamic_import_of_a_top_level_await_module_rejects_during_load() {
-    // Top-level await is still compiler-rejected, so the graph never reaches
-    // the runtime: the load fails and rejects the import promise.
+fn dynamic_import_of_a_top_level_await_module_fulfills_with_the_namespace() {
+    // The compiler admits top-level await and compiles the module root as an
+    // async function, so loading succeeds and the pump drives the async root:
+    // the import promise fulfills with the evaluated namespace. Static-graph
+    // TLA evaluation order is refined in a later runtime step.
     evaluate_dynamic(
         "import('./tla.mjs').then(\n\
-             function () { globalThis.settled = 'fulfilled'; },\n\
+             function (ns) { globalThis.settled = 'fulfilled'; globalThis.imported = ns.value; },\n\
              function (error) { globalThis.settled = 'rejected'; globalThis.reason = String(error); });",
         &[("./tla.mjs", "export const value = await Promise.resolve(1);")],
-        "if (globalThis.settled !== 'rejected') { throw new Error('settled ' + globalThis.settled); }",
+        "if (globalThis.settled !== 'fulfilled') { throw new Error('settled ' + globalThis.settled); }\n\
+         if (globalThis.imported !== 1) { throw new Error('imported ' + globalThis.imported); }",
     )
-    .expect("a TLA module rejects the import promise while loading");
+    .expect("a TLA module fulfills the import promise with its namespace");
 }
 

@@ -25,7 +25,8 @@ fn verify_supported_opcodes(
             | CompilerExecutableKind::AsyncMethod
             | CompilerExecutableKind::AsyncGeneratorFunction
             | CompilerExecutableKind::AsyncGeneratorMethod
-    );
+    ) || (executable_kind == CompilerExecutableKind::Module
+        && flow.function_header().kind() == FunctionKind::Async);
     let async_generator = matches!(
         executable_kind,
         CompilerExecutableKind::AsyncGeneratorFunction

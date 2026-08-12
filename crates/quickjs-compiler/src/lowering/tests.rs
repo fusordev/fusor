@@ -1,5 +1,5 @@
 use super::*;
-use quickjs_bytecode::{BytecodePc, CompilerConstantValue, VerifiedControlFlow};
+use quickjs_bytecode::{BytecodePc, CompilerConstantValue, FunctionKind, VerifiedControlFlow};
 use quickjs_frontend::{CompilationGoal, FrontendOptions, GlobalScriptGoal, with_parsed_program};
 
 fn test_frame_layout(
@@ -922,20 +922,59 @@ fn module_anonymous_default_class_exports_compile_in_module_units() {
 }
 
 #[test]
-fn module_top_level_await_is_rejected() {
+fn module_top_level_await_compiles_an_async_root() {
     with_parsed_program(
         "await Promise.resolve(1);",
         FrontendOptions::for_goal(CompilationGoal::Module),
         |unit| {
             let context = CompilationContext::new(unit).expect("module storage plan");
-            let result = context.compile_module(VerificationLimits::default());
-            assert!(matches!(
-                result,
-                Err(LeafCompilationError::Unsupported {
-                    feature: UnsupportedLeafFeature::TopLevelAwait,
-                    ..
-                })
-            ));
+            let tree = context
+                .compile_module(VerificationLimits::default())
+                .expect("top-level await module compiles and verifies");
+            let bytecode = tree.verified_bytecode();
+            let flow = bytecode.root().function().control_flow();
+            assert_eq!(
+                flow.function_header().kind(),
+                FunctionKind::Async,
+                "top-level await module root compiles as an async function"
+            );
+            let opcodes: Vec<_> = flow
+                .instructions()
+                .iter()
+                .map(|instruction| instruction.decoded().instruction().opcode())
+                .collect();
+            assert!(
+                opcodes.contains(&FinalOpcode::Await),
+                "module root emits await, got: {opcodes:?}"
+            );
+            assert_eq!(
+                opcodes[opcodes.len() - 2..],
+                [FinalOpcode::Undefined, FinalOpcode::ReturnAsync],
+                "async module root falls through to undefined; return_async, got: {opcodes:?}"
+            );
+        },
+    )
+    .expect("front-end acceptance");
+
+    with_parsed_program(
+        "const value = 1;\nexport { value };",
+        FrontendOptions::for_goal(CompilationGoal::Module),
+        |unit| {
+            let context = CompilationContext::new(unit).expect("module storage plan");
+            let tree = context
+                .compile_module(VerificationLimits::default())
+                .expect("module compiles and verifies");
+            let bytecode = tree.verified_bytecode();
+            assert_eq!(
+                bytecode
+                    .root()
+                    .function()
+                    .control_flow()
+                    .function_header()
+                    .kind(),
+                FunctionKind::Normal,
+                "module without top-level await keeps a normal root"
+            );
         },
     )
     .expect("front-end acceptance");

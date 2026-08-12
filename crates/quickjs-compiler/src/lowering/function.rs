@@ -505,6 +505,7 @@ impl<'compiler, 'statement, 'unit, 'arena, 'scope, 'layout>
         script_internal_local_count: usize,
         planning: FunctionPlanningContext<'layout>,
         limits: VerificationLimits,
+        async_module_root: bool,
     ) -> Result<Self, LeafCompilationError> {
         planning.validate_owner()?;
         let program_scope =
@@ -544,7 +545,11 @@ impl<'compiler, 'statement, 'unit, 'arena, 'scope, 'layout>
                 script_finally_completion_limit: script_internal_local_count,
             },
             flow: PlannedControlFlow::new(limits),
-            terminal: FunctionTerminal::Script(completion),
+            terminal: if async_module_root {
+                FunctionTerminal::Async
+            } else {
+                FunctionTerminal::Script(completion)
+            },
         })
     }
 
@@ -705,6 +710,7 @@ impl CompilationContext<'_, '_, '_> {
             derived_class_constructor,
             argument_count: 0,
             defined_argument_count: 0,
+            has_top_level_await: false,
             local_count: layout.local_count,
             capture_count,
             capture_layout,
@@ -793,6 +799,7 @@ impl CompilationContext<'_, '_, '_> {
             derived_class_constructor: false,
             argument_count: 0,
             defined_argument_count: 0,
+            has_top_level_await: false,
             local_count: layout.local_count,
             capture_count,
             capture_layout,
@@ -861,6 +868,7 @@ impl CompilationContext<'_, '_, '_> {
             derived_class_constructor: false,
             argument_count: executable.parameter_count(),
             defined_argument_count: executable.defined_parameter_count(),
+            has_top_level_await: false,
             local_count: layout.local_count,
             capture_count,
             capture_layout,
@@ -1005,6 +1013,7 @@ impl CompilationContext<'_, '_, '_> {
             derived_class_constructor,
             argument_count: executable.parameter_count(),
             defined_argument_count: executable.defined_parameter_count(),
+            has_top_level_await: false,
             local_count: layout.local_count,
             capture_count,
             capture_layout,
@@ -1075,6 +1084,7 @@ impl CompilationContext<'_, '_, '_> {
             internal_local_count,
             planning,
             limits,
+            false,
         )?
         .lower()?;
         let program_scope =
@@ -1112,6 +1122,7 @@ impl CompilationContext<'_, '_, '_> {
             derived_class_constructor: false,
             argument_count: 0,
             defined_argument_count: 0,
+            has_top_level_await: false,
             local_count: layout.local_count,
             capture_count,
             capture_layout,
@@ -1136,7 +1147,7 @@ impl CompilationContext<'_, '_, '_> {
         limits: VerificationLimits,
     ) -> Result<ValidatedFunction, LeafCompilationError> {
         let (executable, program) = self.selected_module(executable_id)?;
-        self.reject_module_unsupported_features(executable_id)?;
+        let has_top_level_await = self.module_top_level_await(executable_id)?.is_some();
         let finally_completion_count = self.script_finally_completion_count(executable_id)?;
         let internal_local_count = script_internal_local_count(finally_completion_count)?;
         let layout = FrameLayout::new(
@@ -1158,6 +1169,7 @@ impl CompilationContext<'_, '_, '_> {
             internal_local_count,
             planning,
             limits,
+            has_top_level_await,
         )?
         .lower()?;
         let program_scope =
@@ -1207,6 +1219,7 @@ impl CompilationContext<'_, '_, '_> {
             derived_class_constructor: false,
             argument_count: 0,
             defined_argument_count: 0,
+            has_top_level_await,
             local_count: layout.local_count,
             capture_count,
             capture_layout,
@@ -1283,6 +1296,7 @@ struct ValidatedFunction {
     derived_class_constructor: bool,
     argument_count: u32,
     defined_argument_count: u32,
+    has_top_level_await: bool,
     local_count: u32,
     capture_count: u32,
     capture_layout: CompilerCaptureLayout,
@@ -1329,13 +1343,18 @@ const fn executable_header(
     defined_argument_count: u32,
     variable_reference_count: u32,
     direct_eval_capabilities: Option<quickjs_frontend::DirectEvalCapabilities>,
+    has_top_level_await: bool,
 ) -> UnverifiedFunctionHeader {
     let header = match kind {
         CompilerExecutableKind::GlobalScript | CompilerExecutableKind::IndirectEvalScript => {
             UnverifiedFunctionHeader::global_script(strict, variable_reference_count)
         }
         CompilerExecutableKind::Module => {
-            UnverifiedFunctionHeader::module(variable_reference_count)
+            if has_top_level_await {
+                UnverifiedFunctionHeader::async_module(variable_reference_count)
+            } else {
+                UnverifiedFunctionHeader::module(variable_reference_count)
+            }
         }
         CompilerExecutableKind::DirectEvalScript => {
             direct_eval_header(strict, variable_reference_count, direct_eval_capabilities)
@@ -1451,6 +1470,7 @@ impl CompilationContext<'_, '_, '_> {
             derived_class_constructor,
             argument_count,
             defined_argument_count,
+            has_top_level_await,
             local_count,
             capture_count: _,
             capture_layout,
@@ -1519,6 +1539,7 @@ impl CompilationContext<'_, '_, '_> {
                 CompilationGoal::DirectEval(context) => Some(context.capabilities()),
                 _ => None,
             },
+            has_top_level_await,
         );
         let constant_layout = CompilerConstantLayout::new(
             constants
