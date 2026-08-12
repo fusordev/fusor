@@ -263,14 +263,19 @@ fn finish_dynamic_import_attributes(
     }
     attributes.sort_unstable_by(|left, right| left.0.cmp(&right.0));
 
-    if attributes.is_empty() {
-        // HostLoadImportedModule: the runtime parks the continuation and the
-        // host completes the load through the pending-import queue.
+    // The host module loader supports `type: "json"` and `type: "text"` (and
+    // the empty set); every other attribute key is rejected before
+    // HostLoadImportedModule (AllImportAttributesSupported).
+    let supported = attributes.iter().all(|(key, value)| {
+        matches!(key.to_utf8_lossy().ok().as_deref(), Some("type"))
+            && matches!(
+                value.to_utf8_lossy().ok().as_deref(),
+                Some("json") | Some("text")
+            )
+    });
+    if supported {
         park_dynamic_import_load(runtime, state, attributes)
     } else {
-        // The host module loader's supported import attribute key set is
-        // empty for now. AllImportAttributesSupported therefore rejects
-        // before HostLoadImportedModule.
         reject_dynamic_import_message(runtime, state, "unsupported dynamic import attribute")
     }
 }

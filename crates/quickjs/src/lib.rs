@@ -996,6 +996,22 @@ fn request_module_kind(
     ModuleSourceKind::JavaScript
 }
 
+/// Selects the module kind a dynamic `import()`'s `options.with` clause
+/// requests.
+fn import_attributes_kind(attributes: &[(String, String)]) -> ModuleSourceKind {
+    for (key, value) in attributes {
+        if key == "type" {
+            if value == "json" {
+                return ModuleSourceKind::Json;
+            }
+            if value == "text" {
+                return ModuleSourceKind::Text;
+            }
+        }
+    }
+    ModuleSourceKind::JavaScript
+}
+
 /// Escapes `value` as the body of a single-quoted JavaScript string literal.
 fn js_single_quoted(value: &str) -> String {
     let mut out = String::with_capacity(value.len().saturating_add(2));
@@ -1325,7 +1341,8 @@ fn gather_dynamic_import_graph(
     limits: ScriptLimits,
 ) -> Result<quickjs_runtime::ModuleKey, ModuleEvaluationError> {
     let specifier = import.specifier();
-    let root_key = root_source.key.clone();
+    let kind = import_attributes_kind(&import.attributes());
+    let root_key = kind_key(root_source.key.clone(), kind);
     if context.has_module(&root_key) {
         // The graph root is already registered; record the referring module's
         // (referrer, specifier) edge and reuse the existing record.
@@ -1335,8 +1352,9 @@ fn gather_dynamic_import_graph(
         return Ok(root_key);
     }
 
+    let source = synthetic_module_source(kind, &root_source.source)?;
     let root_compiled =
-        compile_module_source(&root_source.source, &root_source.display_name, limits, root_key.clone())?;
+        compile_module_source(&source, &root_source.display_name, limits, root_key.clone())?;
     context.register_module(
         root_compiled.key.clone(),
         root_compiled.syntax_record.clone(),
