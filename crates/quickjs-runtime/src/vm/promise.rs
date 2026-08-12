@@ -1411,6 +1411,24 @@ pub(super) fn reject_promise(
     settle_promise(runtime, promise, reason, PromiseReactionKind::Reject)
 }
 
+/// Rejects an intrinsic promise from a runtime-owned host job; see
+/// [`fulfill_promise_host`].
+pub(crate) fn reject_promise_host(
+    runtime: &mut Runtime,
+    promise: ObjectId,
+    reason: StoredValue,
+) -> Result<(), ExecutionError> {
+    reject_promise(runtime, promise, reason).map_err(|failure| match failure {
+        NativeFailure::Execution(error) => error,
+        NativeFailure::Abrupt(_) | NativeFailure::AbruptAfterTransient(_) => {
+            EngineFault::RuntimeInvariant {
+                message: "intrinsic promise rejection completed abruptly",
+            }
+            .into()
+        }
+    })
+}
+
 fn settle_promise(
     runtime: &mut Runtime,
     promise: ObjectId,

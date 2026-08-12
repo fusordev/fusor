@@ -439,7 +439,7 @@ fn reject_parked_import(
 /// an engine-created error is re-materialized with its kind and message; a
 /// phase-only error falls back to `SyntaxError` (link) or `TypeError`
 /// (evaluation).
-fn module_error_rejection_value(
+pub(crate) fn module_error_rejection_value(
     runtime: &mut Runtime,
     realm: RealmId,
     error: &crate::ModuleError,
