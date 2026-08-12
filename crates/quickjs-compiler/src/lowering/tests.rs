@@ -981,6 +981,135 @@ fn module_top_level_await_compiles_an_async_root() {
 }
 
 #[test]
+fn module_top_level_await_in_class_heritage_compiles_an_async_root() {
+    for source in [
+        "function fn() { return class {}; }\n\
+         export class C extends fn(await Promise.resolve(1)) {}",
+        "function fn() { return class {}; }\n\
+         export default class extends fn(await Promise.resolve(1)) {}",
+    ] {
+        with_parsed_program(
+            source,
+            FrontendOptions::for_goal(CompilationGoal::Module),
+            |unit| {
+                let context = CompilationContext::new(unit).expect("module storage plan");
+                let tree = context
+                    .compile_module(VerificationLimits::default())
+                    .expect("class heritage top-level await module compiles and verifies");
+                assert_eq!(
+                    tree.verified_bytecode()
+                        .root()
+                        .function()
+                        .control_flow()
+                        .function_header()
+                        .kind(),
+                    FunctionKind::Async,
+                    "heritage await compiles the module root as an async function"
+                );
+            },
+        )
+        .expect("front-end acceptance");
+    }
+}
+
+#[test]
+fn module_for_await_compiles_an_async_root() {
+    with_parsed_program(
+        "for await (const value of []) {}",
+        FrontendOptions::for_goal(CompilationGoal::Module),
+        |unit| {
+            let context = CompilationContext::new(unit).expect("module storage plan");
+            let tree = context
+                .compile_module(VerificationLimits::default())
+                .expect("for await module compiles and verifies");
+            let flow = tree.verified_bytecode().root().function().control_flow();
+            assert_eq!(
+                flow.function_header().kind(),
+                FunctionKind::Async,
+                "for await compiles the module root as an async function"
+            );
+            let opcodes: Vec<_> = flow
+                .instructions()
+                .iter()
+                .map(|instruction| instruction.decoded().instruction().opcode())
+                .collect();
+            assert!(
+                opcodes.contains(&FinalOpcode::ForAwaitOfStart),
+                "module root emits for-await iteration, got: {opcodes:?}"
+            );
+        },
+    )
+    .expect("front-end acceptance");
+}
+
+#[test]
+fn module_iteration_heads_with_module_local_var_compile() {
+    for source in [
+        "var binding;\nfor (var binding of [1]) { break; }",
+        "var binding;\nfor (var binding in { a: 1 }) { break; }",
+        "for await (var binding of [1]) { break; }",
+        "var binding;\nfor (binding of [1]) { break; }",
+    ] {
+        with_parsed_program(
+            source,
+            FrontendOptions::for_goal(CompilationGoal::Module),
+            |unit| {
+                let context = CompilationContext::new(unit).expect("module storage plan");
+                context
+                    .compile_module(VerificationLimits::default())
+                    .expect("module-local iteration head compiles and verifies");
+            },
+        )
+        .expect("front-end acceptance");
+    }
+}
+
+#[test]
+fn module_destructuring_declarations_compile() {
+    for source in [
+        "var { y = 2 } = {};",
+        "let { z = 3 } = {};",
+        "const [w = 4] = [];",
+        "export var name1 = await Promise.resolve(1);\n\
+         export var { x = await Promise.resolve(2) } = {};",
+    ] {
+        with_parsed_program(
+            source,
+            FrontendOptions::for_goal(CompilationGoal::Module),
+            |unit| {
+                let context = CompilationContext::new(unit).expect("module storage plan");
+                context
+                    .compile_module(VerificationLimits::default())
+                    .expect("module destructuring declaration compiles and verifies");
+            },
+        )
+        .expect("front-end acceptance");
+    }
+}
+
+#[test]
+fn unreachable_closure_templates_keep_their_definition_sites() {
+    for source in [
+        "if (false) { class C {} }",
+        "if (false) { ({ m() {} }); }",
+        "for (false; false; await { function() {} }) { break; }",
+        "for (false; false;) { await { m() {} }; break; }",
+    ] {
+        with_parsed_program(
+            source,
+            FrontendOptions::for_goal(CompilationGoal::Module),
+            |unit| {
+                let context = CompilationContext::new(unit).expect("module storage plan");
+                context
+                    .compile_module(VerificationLimits::default())
+                    .expect("unreachable closure templates compile and verify");
+            },
+        )
+        .expect("front-end acceptance");
+    }
+}
+
+#[test]
 fn module_import_meta_compiles() {
     with_parsed_program(
         "const m = import.meta;",

@@ -799,6 +799,31 @@ fn top_level_await_completes_after_job_drain() {
 }
 
 #[test]
+fn top_level_await_in_heritage_iteration_heads_and_destructuring_evaluates() {
+    // Grammar positions that also host module top-level await: class heritage
+    // (evaluated in the enclosing scope), iteration heads declaring
+    // module-local `var` bindings, and destructuring declarations.
+    evaluate_dynamic(
+        "function fn(v) { return class { static tag = v; }; }\n\
+         class C extends fn(await Promise.resolve(7)) {}\n\
+         globalThis.tag = C.tag;\n\
+         var iter;\n\
+         for (iter of [await Promise.resolve(1)]) {}\n\
+         for (var iter2 in { a: await Promise.resolve(2) }) {}\n\
+         var seen = 0;\n\
+         for await (var iter3 of [1, 2]) { seen += iter3; }\n\
+         globalThis.seen = seen;\n\
+         var { d = await Promise.resolve(5) } = {};\n\
+         globalThis.d = d;",
+        &[],
+        "if (globalThis.tag !== 7) { throw new Error('tag ' + globalThis.tag); }\n\
+         if (globalThis.seen !== 3) { throw new Error('seen ' + globalThis.seen); }\n\
+         if (globalThis.d !== 5) { throw new Error('d ' + globalThis.d); }",
+    )
+    .expect("heritage, iteration-head, and destructuring top-level awaits evaluate");
+}
+
+#[test]
 fn sync_importer_waits_for_async_dependency() {
     // The root has no top-level await of its own, but it depends on an async
     // module: its execution is deferred ([[PendingAsyncDependencies]]) until

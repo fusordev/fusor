@@ -819,6 +819,52 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
 }
 
 impl CompilationContext<'_, '_, '_> {
+    /// Plans a store into a module-environment (captured-cell) declaration.
+    /// `initialization` selects the declaration-initialization store, which a
+    /// temporal-dead-zone cell accepts exactly once; ordinary writes use the
+    /// policy-checked store.
+    pub(in crate::lowering) fn plan_module_local_store(
+        &self,
+        binding: BindingId,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
+        initialization: bool,
+        span: Span,
+    ) -> Result<PlannedInstruction, LeafCompilationError> {
+        let module_id = tree_layout.module_bindings.for_binding(binding).ok_or(
+            LeafCompilationError::SemanticInvariant {
+                invariant: "module declaration has a module binding descriptor",
+                span: Some(span),
+            },
+        )?;
+        let descriptor = tree_layout.module_bindings.binding(module_id).ok_or(
+            LeafCompilationError::SemanticInvariant {
+                invariant: "module declaration descriptor exists",
+                span: Some(span),
+            },
+        )?;
+        let realm_global_count = tree_layout
+            .realm_globals
+            .imports_for(layout.executable)
+            .map_err(|_| LeafCompilationError::SemanticInvariant {
+                invariant: "module declaration executable has realm-global count",
+                span: Some(span),
+            })?
+            .len();
+        let slot = tree_layout.module_bindings.closure_slot(
+            &self.planned.plan,
+            layout.executable,
+            module_id,
+            realm_global_count,
+        )?;
+        let binding_kind = CompilerClosureBinding::Captured(descriptor.policy);
+        Ok(if initialization {
+            plan_external_put_init(binding_kind, slot, span)
+        } else {
+            plan_external_put(binding_kind, slot, span)
+        })
+    }
+
     pub(in crate::lowering) fn with_object_sources_for_reference(
         &self,
         reference_id: Option<ReferenceId>,
@@ -1077,6 +1123,10 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 })?;
         if storage.placement() == StoragePlacement::GlobalObject {
             self.validate_realm_global_declaration(declaration.kind, storage, identifier.span)?;
+        } else if storage.placement() == StoragePlacement::ModuleLocal {
+            // Module top-level iteration heads declare through the module
+            // environment; the per-iteration write stores through the captured
+            // cell, exactly like the module-local declaration path.
         } else {
             let slot = layout
                 .slot(binding)
@@ -1602,6 +1652,18 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 },
             )?;
             return flow.emit(plan_external_put(descriptor.binding, slot, identifier.span));
+        }
+
+        if storage.placement() == StoragePlacement::ModuleLocal {
+            // Module top-level iteration heads write through the module
+            // environment's captured cell, like ordinary module assignments.
+            return flow.emit(self.plan_module_local_store(
+                binding,
+                layout,
+                tree_layout,
+                false,
+                identifier.span,
+            )?);
         }
 
         let slot = layout

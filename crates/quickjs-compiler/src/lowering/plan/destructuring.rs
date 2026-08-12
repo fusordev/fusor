@@ -748,6 +748,29 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             };
             return flow.emit(instruction);
         }
+        if storage.placement() == StoragePlacement::ModuleLocal {
+            // Module top-level destructured declarations store through the
+            // module environment's captured cell; the declaration performs the
+            // (TDZ-aware) initialization store, per-iteration heads write.
+            let initialization = match binding_initialization {
+                DestructuringBindingInitialization::Declaration(_) => true,
+                DestructuringBindingInitialization::IterationDeclaration(_) => false,
+                DestructuringBindingInitialization::Parameter
+                | DestructuringBindingInitialization::Catch => {
+                    return unsupported(
+                        UnsupportedLeafFeature::UnsupportedBinding,
+                        identifier.span,
+                    );
+                }
+            };
+            return flow.emit(self.plan_module_local_store(
+                binding,
+                layout,
+                tree_layout,
+                initialization,
+                identifier.span,
+            )?);
+        }
         let frame_slot = layout
             .slot(binding)
             .ok_or(LeafCompilationError::Unsupported {
