@@ -1406,6 +1406,7 @@ fn read_async_completion(
 /// `resolution` phase.
 struct Test262ModuleLoader<'a> {
     test_root: &'a Path,
+    root_key: String,
     resolved: BTreeMap<String, String>,
 }
 
@@ -1413,6 +1414,7 @@ impl<'a> Test262ModuleLoader<'a> {
     fn new(test_root: &'a Path, root_key: &str) -> Self {
         Test262ModuleLoader {
             test_root,
+            root_key: root_key.to_owned(),
             resolved: BTreeMap::from([(root_key.to_owned(), root_key.to_owned())]),
         }
     }
@@ -1424,11 +1426,9 @@ impl ModuleSourceLoader for Test262ModuleLoader<'_> {
         specifier: &str,
         referrer: Option<&str>,
     ) -> Result<LoadedModuleSource, ModuleSourceError> {
-        let Some(referrer) = referrer else {
-            return Err(ModuleSourceError::new(format!(
-                "could not resolve module specifier `{specifier}` without a referrer"
-            )));
-        };
+        // A dynamic import from a Script has no referrer record; resolve it
+        // against the root test's own path.
+        let referrer = referrer.unwrap_or(&self.root_key);
         let base = self.resolved.get(referrer).cloned().ok_or_else(|| {
             ModuleSourceError::new(format!("unknown module referrer `{referrer}`"))
         })?;
