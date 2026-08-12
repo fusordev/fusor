@@ -795,9 +795,6 @@ pub enum UnsupportedFeature {
     WithReferenceMutation,
     /// Annex B's paired block-lexical and var-like function binding.
     AnnexBBlockFunction,
-    /// An anonymous `export default class` needs the module execution layer's
-    /// synthetic default binding and class environment.
-    AnonymousDefaultClassExport,
     /// A synthesized `this`, `new.target`, or `super` binding.
     FunctionSyntheticBinding,
 }
@@ -1639,6 +1636,32 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                         span: binding.declaration_spans.first().copied(),
                     });
                 }
+            }
+        }
+        for binding in bindings
+            .iter()
+            .filter(|binding| binding.policy.kind == DeclarationKind::SyntheticDefault)
+        {
+            let scope = self
+                .executable_drafts
+                .get(binding.executable.index())
+                .map(|draft| draft.scope_id)
+                .ok_or(CompilerError::SemanticInvariant {
+                    invariant: "synthetic default binding executable has a scope",
+                    span: binding.declaration_spans.first().copied(),
+                })?;
+            let target =
+                scopes
+                    .get_mut(binding.id.index())
+                    .ok_or(CompilerError::SemanticInvariant {
+                        invariant: "synthetic default binding scope index is in range",
+                        span: binding.declaration_spans.first().copied(),
+                    })?;
+            if target.replace(scope).is_some() {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "synthetic default binding has one module scope",
+                    span: binding.declaration_spans.first().copied(),
+                });
             }
         }
         for (&node_id, &binding) in class_name_bindings {
@@ -4827,7 +4850,17 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 })
             }
             ExportDefaultDeclarationKind::ClassDeclaration(class) => {
-                unsupported(UnsupportedFeature::AnonymousDefaultClassExport, class.span)
+                if class.id.is_some() {
+                    return Err(CompilerError::SemanticInvariant {
+                        invariant: "synthetic default class is anonymous",
+                        span: Some(class.span),
+                    });
+                }
+                Ok(self.declaration_policy(
+                    ExecutableId(0),
+                    DeclarationKind::SyntheticDefault,
+                    false,
+                ))
             }
             ExportDefaultDeclarationKind::TSInterfaceDeclaration(interface) => {
                 Err(CompilerError::SemanticInvariant {

@@ -837,8 +837,23 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                         flow,
                     )
                 } else {
-                    // Anonymous default class lowering is deferred.
-                    unsupported(UnsupportedLeafFeature::UnsupportedBody, span)
+                    // Anonymous default class: evaluate the definition (with
+                    // the inferred "default" name) and store the class value
+                    // into the synthetic `*default*` cell at statement
+                    // position, like an anonymous default function.
+                    let slot = self.module_synthetic_default_slot(layout, tree_layout)?;
+                    ExpressionPlanner::new(self).plan_base_class_expression(
+                        class,
+                        layout,
+                        tree_layout,
+                        constants,
+                        flow,
+                    )?;
+                    flow.emit(PlannedInstruction::new(
+                        FinalOpcode::PutVarRefCheckInit,
+                        Operands::VarRef(slot),
+                        span,
+                    ))
                 }
             }
             ExportDefaultDeclarationKind::TSInterfaceDeclaration(_) => {

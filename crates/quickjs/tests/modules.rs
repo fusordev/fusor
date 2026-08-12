@@ -375,6 +375,72 @@ fn named_default_class_exports_compile_in_modules() {
 }
 
 #[test]
+fn anonymous_default_class_exports_compile_in_modules() {
+    evaluate(
+        "import Exported from './dep.mjs';\n\
+         const instance = new Exported();\n\
+         if (instance.marker !== 9) { throw new Error('marker'); }\n\
+         if (Exported.name !== 'default') { throw new Error('name ' + Exported.name); }",
+        &[(
+            "./dep.mjs",
+            "export default class {\n\
+                 marker = 9;\n\
+             }",
+        )],
+    )
+    .expect("anonymous export default class compiles and links");
+}
+
+#[test]
+fn anonymous_default_class_exports_with_heritage_compile_in_modules() {
+    evaluate(
+        "import Exported from './dep.mjs';\n\
+         const instance = new Exported();\n\
+         if (instance.tag !== 4) { throw new Error('tag'); }\n\
+         if (Exported.name !== 'default') { throw new Error('name ' + Exported.name); }",
+        &[(
+            "./dep.mjs",
+            "const Base = class {\n\
+                 constructor() { this.tag = 4; }\n\
+             };\n\
+             export default class extends Base {}",
+        )],
+    )
+    .expect("anonymous export default class with heritage compiles and links");
+}
+
+#[test]
+fn parenthesized_default_class_expressions_compile_in_modules() {
+    evaluate(
+        "import Exported from './dep.mjs';\n\
+         const instance = new Exported();\n\
+         if (instance.valueOf() !== 45) { throw new Error('valueOf'); }\n\
+         if (Exported.name !== 'default') { throw new Error('name ' + Exported.name); }",
+        &[(
+            "./dep.mjs",
+            "export default (class { valueOf() { return 45; } });",
+        )],
+    )
+    .expect("parenthesized default class expression compiles and links");
+}
+
+#[test]
+fn anonymous_default_class_export_rejects_duplicate_constructors() {
+    evaluate(
+        "import Exported from './dep.mjs';\n\
+         new Exported();",
+        &[(
+            "./dep.mjs",
+            "export default class {\n\
+                 constructor() {}\n\
+                 constructor() {}\n\
+             }",
+        )],
+    )
+    .expect_err("duplicate constructors are an early error");
+}
+
+#[test]
 fn import_meta_is_an_identity_stable_object() {
     evaluate(
         "const a = import.meta;\n\

@@ -880,6 +880,16 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         let declarator = loop {
             match nodes.kind(parent) {
                 AstKind::ParenthesizedExpression(_) => parent = nodes.parent_id(parent),
+                AstKind::ExportDefaultDeclaration(_) => {
+                    // `export default class ...` evaluates with className
+                    // "default"; an anonymous class expression as the
+                    // default-export AssignmentExpression receives the same
+                    // inferred name through SetFunctionName.
+                    return Ok((
+                        compiler_identifier_string("default", class.span)?,
+                        class.span,
+                    ));
+                }
                 AstKind::VariableDeclarator(declarator) => break declarator,
                 AstKind::PropertyDefinition(field) => {
                     return Self::class_property_definition_name(class, field);

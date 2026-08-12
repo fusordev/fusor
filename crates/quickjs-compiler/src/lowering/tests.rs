@@ -901,6 +901,27 @@ fn module_arrows_and_class_constructors_compile_in_module_units() {
 }
 
 #[test]
+fn module_anonymous_default_class_exports_compile_in_module_units() {
+    for source in [
+        "export default class { marker = 9; }",
+        "const Base = class { constructor() { this.tag = 4; } };\n\
+         export default class extends Base {}",
+    ] {
+        with_parsed_program(
+            source,
+            FrontendOptions::for_goal(CompilationGoal::Module),
+            |unit| {
+                let context = CompilationContext::new(unit).expect("module storage plan");
+                context
+                    .compile_module(VerificationLimits::default())
+                    .expect("anonymous default class export compiles");
+            },
+        )
+        .expect("front-end acceptance");
+    }
+}
+
+#[test]
 fn module_top_level_await_is_rejected() {
     with_parsed_program(
         "await Promise.resolve(1);",
