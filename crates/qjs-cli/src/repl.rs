@@ -116,6 +116,12 @@ pub(crate) async fn run() -> u8 {
                     {
                         report_error("module entry", &error);
                     }
+                    // A top-level-await entry settles asynchronously while the
+                    // drain runs its continuations; a rejection recorded on
+                    // the entry's module record is its evaluation failure.
+                    if let Some(error) = quickjs::module_evaluation_error(&context, &name) {
+                        report_error("module entry", &error);
+                    }
                     println!("{}", format_value(&value));
                     imports.extend(extract_imports(&entry));
                 }

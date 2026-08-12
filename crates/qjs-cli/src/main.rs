@@ -147,7 +147,16 @@ async fn run_file(file: &str, as_script: bool, argv: Vec<String>) -> u8 {
         };
         match result {
             Ok(()) => match imports::drain_pending_imports(&mut context, &mut resolver, limits).await {
-                Ok(()) => 0,
+                // A top-level-await graph settles asynchronously while the
+                // drain runs its continuations; a rejection recorded on the
+                // root is the evaluation failure.
+                Ok(()) => match quickjs::module_evaluation_error(&context, &root_name) {
+                    Some(error) => {
+                        report_error(&root_name, &error);
+                        1
+                    }
+                    None => 0,
+                },
                 Err(error) => {
                     report_error(&root_name, &error);
                     1

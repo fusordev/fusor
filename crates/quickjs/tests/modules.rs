@@ -986,3 +986,46 @@ fn tla_diamond_executes_in_spec_async_evaluation_order() {
     .expect("the async diamond starts modules in spec order");
 }
 
+#[test]
+fn facade_module_evaluation_error_reports_the_async_outcome() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let mut loader = MapLoader::new(&[]);
+
+    // A fulfilling top-level-await root records no evaluation error.
+    evaluate_module(
+        &mut context,
+        "globalThis.fulfilled = await Promise.resolve(42);",
+        "fulfill.mjs",
+        &mut loader,
+        ScriptLimits::default(),
+    )
+    .expect("a fulfilling TLA module starts its asynchronous evaluation");
+    pump_dynamic_imports(&mut context, &mut loader, ScriptLimits::default())
+        .expect("pump drains the fulfillment continuation");
+    assert!(
+        quickjs::module_evaluation_error(&context, "fulfill.mjs").is_none(),
+        "a fulfilled async evaluation records no error"
+    );
+
+    // A rejecting top-level-await root records the rejection as its
+    // [[EvaluationError]] once the rejection continuation has run.
+    evaluate_module(
+        &mut context,
+        "await Promise.reject(new Error('boom'));",
+        "reject.mjs",
+        &mut loader,
+        ScriptLimits::default(),
+    )
+    .expect("a rejecting TLA module still starts its asynchronous evaluation");
+    pump_dynamic_imports(&mut context, &mut loader, ScriptLimits::default())
+        .expect("pump drains the rejection continuation");
+    let error = quickjs::module_evaluation_error(&context, "reject.mjs")
+        .expect("the facade surfaces the recorded evaluation error");
+    assert!(
+        error.to_string().contains("boom"),
+        "expected the rejection message, got: {error}"
+    );
+}
+

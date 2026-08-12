@@ -1183,6 +1183,20 @@ impl Context<'_> {
         self.runtime.registered_module(self.realm, key).is_some()
     }
 
+    /// Returns the recorded evaluation error of the module registered under
+    /// `key` in this context's realm, if its evaluation failed (ECMA-262
+    /// [[EvaluationError]]).
+    ///
+    /// For a graph with top-level await the failure settles asynchronously:
+    /// [`Self::evaluate_module`] returns once evaluation *starts*, and the
+    /// rejection continuation records the error while host jobs drain (see
+    /// [`Self::drain_host_jobs`]).
+    #[must_use]
+    pub fn module_evaluation_error(&self, key: &super::ModuleKey) -> Option<super::ModuleError> {
+        let module = self.runtime.registered_module(self.realm, key)?;
+        self.runtime.modules.get(module)?.evaluation_error.clone()
+    }
+
     /// Completes a parked dynamic `import()` (`FinishDynamicImport`).
     ///
     /// The host must have registered the loaded graph under `root`. The graph

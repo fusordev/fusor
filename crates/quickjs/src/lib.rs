@@ -979,6 +979,13 @@ pub struct PreloadedModuleEdge {
 /// Returns `undefined` (module completion is discarded per spec). To observe
 /// module state, use `context.module_namespace` or evaluate a follow-up Script.
 ///
+/// For a graph with top-level await this function returns once evaluation
+/// *starts*: the module's asynchronous execution completes (or rejects) while
+/// [`pump_dynamic_imports`]/[`drain_dynamic_import_jobs`] run its Promise
+/// continuations. Hosts must query [`module_evaluation_error`] after draining
+/// to learn the outcome of the asynchronous evaluation; a rejection recorded
+/// there is the graph's evaluation failure.
+///
 /// # Errors
 ///
 /// Returns the exact failing frontend, compiler, loader, linking, or
@@ -1103,6 +1110,27 @@ pub fn evaluate_preloaded_module_graph(
     )?;
 
     Ok(context.undefined_value())
+}
+
+/// Returns the recorded evaluation error (ECMA-262 [[EvaluationError]]) of
+/// the module registered under `root_name` in `context`'s realm, if its
+/// evaluation failed.
+///
+/// Synchronous evaluation failures are returned by [`evaluate_module`]
+/// directly; this accessor exists for graphs with top-level await, whose
+/// asynchronous execution settles while [`pump_dynamic_imports`] or
+/// [`drain_dynamic_import_jobs`] run the module's Promise continuations. A
+/// `Some` result after draining is the graph's evaluation failure, classified
+/// exactly like a synchronous one ([`ModuleEvaluationError::Runtime`]).
+#[must_use]
+pub fn module_evaluation_error(
+    context: &Context<'_>,
+    root_name: &str,
+) -> Option<ModuleEvaluationError> {
+    let key = quickjs_runtime::ModuleKey::new(Arc::from(root_name));
+    context
+        .module_evaluation_error(&key)
+        .map(ModuleEvaluationError::Runtime)
 }
 
 /// Registers and compiles the graph below an already-loaded dynamic `import()`

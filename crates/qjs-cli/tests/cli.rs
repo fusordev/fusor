@@ -119,3 +119,51 @@ fn repl_evaluates_a_module_entry_with_a_static_import() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("43"), "expected 43 in repl output: {stdout}");
 }
+
+#[test]
+fn run_path_top_level_await_observes_the_awaited_value() {
+    let directory = temp_dir("tla");
+    let _cleanup = Cleanup(directory.clone());
+    // The awaited value is only observable after the module's asynchronous
+    // evaluation completes; the assertion inside the module body is the
+    // oracle that the CLI drained it before exiting.
+    fs::write(
+        directory.join("entry.mjs"),
+        "import assert from 'node:assert';\n\
+         const x = await Promise.resolve(41);\n\
+         assert.strictEqual(x + 1, 42, 'the awaited value must be observed after evaluation');",
+    )
+    .expect("write entry");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_qjs"))
+        .arg(directory.join("entry.mjs"))
+        .output()
+        .expect("spawn qjs");
+    assert!(
+        output.status.success(),
+        "qjs run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn run_path_rejecting_top_level_await_exits_non_zero() {
+    let directory = temp_dir("tla-reject");
+    let _cleanup = Cleanup(directory.clone());
+    fs::write(
+        directory.join("entry.mjs"),
+        "await Promise.reject(new Error('boom'));\n",
+    )
+    .expect("write entry");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_qjs"))
+        .arg(directory.join("entry.mjs"))
+        .output()
+        .expect("spawn qjs");
+    assert!(
+        !output.status.success(),
+        "a rejecting top-level await must exit non-zero"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("boom"), "expected the rejection on stderr: {stderr}");
+}

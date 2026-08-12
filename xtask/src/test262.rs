@@ -4,7 +4,8 @@ use crate::DEFAULT_TIMEOUT_MS;
 use quickjs::{
     DynamicFunctionLimits, LoadedModuleSource, ModuleEvaluationError, ModuleSourceError,
     ModuleSourceLoader, ScriptEvaluationError, ScriptLimits,
-    call_with_dynamic_function_support, evaluate_module, evaluate_script, pump_dynamic_imports,
+    call_with_dynamic_function_support, evaluate_module, evaluate_script, module_evaluation_error,
+    pump_dynamic_imports,
 };
 use quickjs_frontend::DiagnosticStage;
 use quickjs_runtime::{
@@ -1242,7 +1243,22 @@ fn execute_case(
         let mut loader = Test262ModuleLoader::new(&harness.test_root, &plan.relative);
         match evaluate_module(&mut context, source, &plan.relative, &mut loader, limits) {
             Ok(_) => match pump_dynamic_imports(&mut context, &mut loader, limits) {
-                Ok(()) => Ok(()),
+                // A graph with top-level await settles asynchronously while
+                // the pump drains its continuations; a rejection recorded on
+                // the root ([[EvaluationError]]) is the evaluation failure
+                // and classifies exactly like a synchronous one.
+                Ok(()) => match module_evaluation_error(&context, &plan.relative) {
+                    Some(error) => Err((
+                        classify_module_error(
+                            &mut context,
+                            &error,
+                            test262_error_classifier.as_ref(),
+                            classifier_limits,
+                        ),
+                        error.to_string(),
+                    )),
+                    None => Ok(()),
+                },
                 Err(error) => Err((
                     classify_module_error(
                         &mut context,
