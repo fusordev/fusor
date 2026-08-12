@@ -789,15 +789,45 @@ struct CompiledModule {
 pub enum ModuleEvaluationError {
     /// Host loader failed to resolve or load a module.
     Loader(ModuleSourceError),
-    /// Parsing, compatibility, or early errors.
+    /// Parsing, compatibility, or early errors in the root module.
     Frontend(FrontendError),
-    /// Compilation or verification failure.
+    /// Compilation or verification failure in the root module.
     Compiler(ScriptCompilerError),
+    /// A requested (non-root) module failed to parse or compile during graph
+    /// resolution (ECMA-262 resolution phase).
+    Resolution(ModuleResolutionError),
     /// Linking or evaluation failure.
     Runtime(quickjs_runtime::ModuleError),
     /// Host-job execution failure while settling parked dynamic `import()`
     /// loads.
     Execution(ExecutionError),
+}
+
+/// A requested module that was not a valid Source Text Module.
+#[derive(Debug)]
+pub enum ModuleResolutionError {
+    /// Parsing, compatibility, or early errors in the requested module.
+    Frontend(FrontendError),
+    /// Compilation or verification failure in the requested module.
+    Compiler(ScriptCompilerError),
+}
+
+impl fmt::Display for ModuleResolutionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Frontend(error) => error.fmt(formatter),
+            Self::Compiler(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl Error for ModuleResolutionError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Frontend(error) => Some(error),
+            Self::Compiler(error) => Some(error),
+        }
+    }
 }
 
 impl fmt::Display for ModuleEvaluationError {
@@ -806,6 +836,7 @@ impl fmt::Display for ModuleEvaluationError {
             Self::Loader(error) => error.fmt(formatter),
             Self::Frontend(error) => error.fmt(formatter),
             Self::Compiler(error) => error.fmt(formatter),
+            Self::Resolution(error) => write!(formatter, "module resolution error: {error}"),
             Self::Runtime(error) => error.fmt(formatter),
             Self::Execution(error) => error.fmt(formatter),
         }
@@ -818,6 +849,7 @@ impl Error for ModuleEvaluationError {
             Self::Loader(error) => Some(error),
             Self::Frontend(error) => Some(error),
             Self::Compiler(error) => Some(error),
+            Self::Resolution(error) => Some(error),
             Self::Runtime(error) => Some(error),
             Self::Execution(error) => Some(error),
         }
@@ -1003,8 +1035,19 @@ pub fn evaluate_module(
     let mut queue: Vec<(String, String)> = vec![(root_name.to_owned(), root_source.to_owned())];
     let mut seen: HashSet<String> = HashSet::new();
     seen.insert(root_name.to_owned());
+    let mut first = true;
     while let Some((referrer, source)) = queue.pop() {
-        for specifier in module_import_requests(&source, limits)? {
+        // A parse failure in the root is a parse-phase error; the same failure
+        // in a requested module is a resolution-phase error.
+        let requests = module_import_requests(&source, limits).map_err(|error| {
+            if first {
+                error
+            } else {
+                resolution_failure(error)
+            }
+        })?;
+        first = false;
+        for specifier in requests {
             let loaded = loader.load_module(&specifier, Some(&referrer))?;
             if seen.insert(loaded.key.as_str().to_owned()) {
                 queue.push((loaded.key.as_str().to_owned(), loaded.source.clone()));
@@ -1017,6 +1060,20 @@ pub fn evaluate_module(
         }
     }
     evaluate_preloaded_module_graph(context, root_source, root_name, edges, limits)
+}
+
+/// Converts a requested module's parse/compile failure into the resolution-phase
+/// error classification, preserving loader/link/evaluation failures unchanged.
+fn resolution_failure(error: ModuleEvaluationError) -> ModuleEvaluationError {
+    match error {
+        ModuleEvaluationError::Frontend(error) => {
+            ModuleEvaluationError::Resolution(ModuleResolutionError::Frontend(error))
+        }
+        ModuleEvaluationError::Compiler(error) => {
+            ModuleEvaluationError::Resolution(ModuleResolutionError::Compiler(error))
+        }
+        other => other,
+    }
 }
 
 /// Compiles, registers, links, and evaluates a preloaded static module graph.
@@ -1082,7 +1139,8 @@ pub fn evaluate_preloaded_module_graph(
                 &loaded.display_name,
                 limits,
                 loaded.key.clone(),
-            )?;
+            )
+            .map_err(resolution_failure)?;
             context.register_module(
                 compiled.key.clone(),
                 compiled.syntax_record.clone(),
@@ -1192,7 +1250,8 @@ fn gather_dynamic_import_graph(
                 &loaded.display_name,
                 limits,
                 loaded.key.clone(),
-            )?;
+            )
+            .map_err(resolution_failure)?;
             context.register_module(
                 compiled.key.clone(),
                 compiled.syntax_record.clone(),

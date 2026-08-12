@@ -1549,6 +1549,10 @@ fn classify_module_error(
             phase: "resolution".to_owned(),
             error_type: Some("SyntaxError".to_owned()),
         },
+        ModuleEvaluationError::Resolution(_) => ActualError {
+            phase: "resolution".to_owned(),
+            error_type: Some("SyntaxError".to_owned()),
+        },
         ModuleEvaluationError::Frontend(frontend)
             if matches!(
                 frontend.stage(),
