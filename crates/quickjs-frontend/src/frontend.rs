@@ -14,7 +14,7 @@ pub use oxc_ast::ast::Program;
 use oxc_ast::{
     AstKind,
     ast::{
-        Argument, Directive, Expression, ImportPhase, ModuleExportName, Statement,
+        Argument, Directive, Expression, ImportPhase, Statement,
         VariableDeclarationKind, WithClauseKeyword,
     },
     builder::AstBuilder,
@@ -2571,25 +2571,11 @@ fn quickjs_profile_diagnostics(nodes: &AstNodes<'_>) -> Vec<FrontendDiagnostic> 
             AstKind::ImportDeclaration(declaration) => {
                 push_import_phase_violation(&mut violations, declaration.phase, declaration.span);
             }
-            AstKind::ExportNamedDeclaration(declaration) if declaration.source.is_some() => {
-                for specifier in &declaration.specifiers {
-                    if let ModuleExportName::StringLiteral(literal) = &specifier.local {
-                        violations.push(ProfileViolation {
-                            span: literal.span,
-                            code: FrontendDiagnosticCode::UnsupportedStringNamedReExport,
-                            message: "QuickJS 2026-06-04 requires an identifier before `as` in a named re-export",
-                        });
-                    }
-                }
-            }
-            AstKind::ExportAllDeclaration(declaration) => {
-                if let Some(ModuleExportName::StringLiteral(literal)) = &declaration.exported {
-                    violations.push(ProfileViolation {
-                        span: literal.span,
-                        code: FrontendDiagnosticCode::UnsupportedStringNamespaceExport,
-                        message: "QuickJS 2026-06-04 requires an identifier namespace export name",
-                    });
-                }
+            AstKind::ExportNamedDeclaration(_) | AstKind::ExportAllDeclaration(_) => {
+                // Arbitrary string export names are supported end-to-end: the
+                // linker resolves `ModuleExportName::Name` by code units, so a
+                // string literal before or after `as` in a re-export needs no
+                // profile restriction.
             }
             AstKind::ImportExpression(expression) => {
                 push_import_phase_violation(&mut violations, expression.phase, expression.span);

@@ -454,7 +454,8 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 if (!matches!(nodes.parent_kind(node_id), AstKind::Directive(_))
                     || (owner.index() == 0
                         && crate::is_supported_script_compilation_goal(self.unit.goal())))
-                    && !is_noncomputed_static_property_key_node(self.unit, node_id) =>
+                    && !is_noncomputed_static_property_key_node(self.unit, node_id)
+                    && !is_module_static_string_node(self.unit, node_id) =>
             {
                 let value = decode_compiler_string(
                     literal.value.as_str(),
@@ -1407,6 +1408,22 @@ fn is_noncomputed_static_property_key_node(unit: &ParsedUnit<'_, '_>, node_id: N
         OxcPropertyKey::BigIntLiteral(literal) => literal.node_id.get() == node_id,
         _ => false,
     }
+}
+
+/// Returns whether `node_id` (a string literal) is a static module name or
+/// specifier — an import/export name or a module request — which must not be
+/// lowered to a runtime string. These strings live in the module declaration
+/// record and its metadata atoms, so recording them as runtime strings would
+/// duplicate their span.
+fn is_module_static_string_node(unit: &ParsedUnit<'_, '_>, node_id: NodeId) -> bool {
+    matches!(
+        unit.semantic().nodes().parent_kind(node_id),
+        AstKind::ImportDeclaration(_)
+            | AstKind::ImportSpecifier(_)
+            | AstKind::ExportNamedDeclaration(_)
+            | AstKind::ExportAllDeclaration(_)
+            | AstKind::ExportSpecifier(_)
+    )
 }
 
 pub(in crate::lowering) struct CompiledConstantPool {
