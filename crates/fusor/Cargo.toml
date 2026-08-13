@@ -1,0 +1,19 @@
+[package]
+name = "fusor"
+version = "0.0.1"
+description = "Ergonomic host facade for the Experimental JavaScript Engine"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+fusor-bytecode = { path = "../fusor-bytecode" }
+fusor-compiler = { path = "../fusor-compiler" }
+fusor-diagnostics = { path = "../fusor-diagnostics" }
+fusor-frontend = { path = "../fusor-frontend" }
+fusor-runtime = { path = "../fusor-runtime" }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

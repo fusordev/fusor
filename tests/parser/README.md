@@ -91,12 +91,12 @@ Nine call sites are recorded as unreachable, each with the reason:
 
 ## Intentional frontend differences
 
-`QJS-OXC-001` records the RegExp ownership boundary: Oxc identifies literal
-boundaries and flags, while `quickjs-regexp` performs the specification's
+`FUS-OXC-001` records the RegExp ownership boundary: Oxc identifies literal
+boundaries and flags, while `fusor-regexp` performs the specification's
 pattern early error and executable matching. Malformed patterns are therefore
 rejected by both the frontend and pinned QuickJS.
 
-`QJS-OXC-002` records published Oxc accepting an ES-valid `continue` to an
+`FUS-OXC-002` records published Oxc accepting an ES-valid `continue` to an
 outer label in a chain that directly labels one iteration statement. Pinned
 QuickJS only treats the innermost label as continuable. The Rust compiler
 preserves Oxc's resolved semantics for complete chained-label support; the
@@ -105,18 +105,18 @@ difference and covers the common QuickJS-compatible label surface. A narrow
 post-Oxc semantic check still rejects chains that terminate in a regular
 statement or `switch`; those are invalid `continue` targets in both engines.
 
-`QJS-OXC-003` records the pinned parser's recursion limit. QuickJS reports
+`FUS-OXC-003` records the pinned parser's recursion limit. QuickJS reports
 `stack overflow` beyond roughly 695 nested parentheses (`quickjs.c:22720`),
 while the Oxc front end parses the same source on its isolated 64 MiB frontend
 stack. The bound is a QuickJS resource limit rather than ECMAScript grammar.
 
-`QJS-OXC-004` records the pinned parser rejecting an instance field named
+`FUS-OXC-004` records the pinned parser rejecting an instance field named
 `prototype` (`quickjs.c:25396`), a check its own source marks `XXX: spec: not
 consistent with method name checks`. ECMAScript reserves `constructor` for
 instance fields and `prototype` for static ones only, and V8 accepts the
 fixture, so the frontend follows the specification.
 
-`QJS-OXC-005` and `QJS-OXC-006` record the intentional exclusion of Annex B
+`FUS-OXC-005` and `FUS-OXC-006` record the intentional exclusion of Annex B
 HTML comments (B.1.3) from ordinary and host-forced strict Script profiles.
 Pinned QuickJS accepts those comments, but they are outside this port's
 explicitly restored Annex B subset.

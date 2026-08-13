@@ -27,4 +27,4 @@ microtask loop, so the differential corpus uses a successful close while the
 engine suite pins original-error precedence separately.
 
 The same boundaries, plus forced collection of a suspended operation, are
-covered by `quickjs-runtime/tests/vm_array_statics.rs`.
+covered by `fusor-runtime/tests/vm_array_statics.rs`.

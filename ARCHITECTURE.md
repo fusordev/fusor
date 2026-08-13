@@ -1,7 +1,8 @@
 # Architecture
 
 This document records the implementation boundaries and invariants for the
-pure-Rust port of QuickJS 2026-06-04. Observable behavior follows the pinned
+Experimental JavaScript Engine, a pure-Rust port of QuickJS 2026-06-04.
+Observable behavior follows the pinned
 QuickJS release except for explicitly documented Oxc parser differences.
 Rust-native representations and measured optimizations are allowed when
 differential tests preserve the selected compatibility behavior.
@@ -11,19 +12,19 @@ differential tests preserve the selected compatibility behavior.
 Production dependencies point inward:
 
 ```text
-quickjs-diagnostics
+fusor-diagnostics
         ↑
-quickjs-frontend (Oxc)
+fusor-frontend (Oxc)
         ↑
-quickjs-compiler ─────────→ quickjs-bytecode
+fusor-compiler ─────────→ fusor-bytecode
                                  ↑
 qjs-dtoa ─┐                     │
-qjs-unicode ─→ quickjs-runtime ─┘
-quickjs-regexp ┘      ↑    ↑
+qjs-unicode ─→ fusor-runtime ─┘
+fusor-regexp ┘      ↑    ↑
                       │    └── Tokio rt/sync/time (waitAsync signals only)
-               quickjs-tokio (planned general host adapter)
+               fusor-tokio (planned general host adapter)
                       ↑
-                    quickjs
+                    fusor
                   ↙         ↘
                 qjs         qjsc
 ```
@@ -71,7 +72,7 @@ compilation. Static Oxc resolution is only an input: `with`, direct eval,
 Annex B bindings, and global declaration instantiation require
 QuickJS-compatible dynamic handling.
 
-Production callback entries create a scoped `quickjs-frontend` worker with a
+Production callback entries create a scoped `fusor-frontend` worker with a
 dedicated 64 MiB stack. Parsing, semantic construction, the Oxc arena, and the
 arena-borrowing callback all remain on that worker; only a `Send` callback
 result crosses back to the caller. This isolates published Oxc's internal
@@ -100,7 +101,7 @@ or label. Dynamic `import()` remains Script syntax. These are project-owned
 goal diagnostics, not mislabeled Oxc diagnostics.
 
 The first compiler-owned lowering result is `StoragePlan`. While the
-`ParsedUnit` arena is alive, `quickjs-compiler` queries Oxc `Semantic` directly
+`ParsedUnit` arena is alive, `fusor-compiler` queries Oxc `Semantic` directly
 for scopes, symbols, declarations, and references. It then freezes only native
 dense executable/binding/reference IDs, exact copied spans, and immutable
 `Arc`-backed names and slices. Oxc node, scope, and symbol IDs never cross this
@@ -166,7 +167,7 @@ through `Arc`-shared immutable labels, rather than materializing a second
 case-proportional work buffer. The shared switch lexical scope is entered after
 discriminant evaluation and before the first case test, and consequents then
 fall through in source order. Chained iteration labels preserve Oxc's ES
-semantics, an intentional `QJS-OXC-002` difference from pinned QuickJS's
+semantics, an intentional `FUS-OXC-002` difference from pinned QuickJS's
 innermost-label-only `continue` limitation; a linear post-Oxc check repairs
 invalid chained targets that Oxc otherwise accepts.
 
@@ -374,7 +375,7 @@ QuickJS acceptance and rejection coverage wherever both are meaningful. Any
 Oxc/QuickJS mismatch must carry a unique direction, rationale, and regression
 fixture, and that record becomes invalid if the expectations converge. The
 current RegExp pattern difference is deliberate: Oxc recognizes the literal
-boundary and flags, while `quickjs-regexp` owns pattern grammar, early errors,
+boundary and flags, while `fusor-regexp` owns pattern grammar, early errors,
 and execution. The claim set remains an expanding review contract and does not by
 itself certify that every pinned QuickJS parser production has a fixture.
 

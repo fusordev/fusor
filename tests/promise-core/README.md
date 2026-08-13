@@ -8,7 +8,7 @@ surface (`all`, `allSettled`, `any`, `try`, `race`, and `withResolvers`),
 combinator input ordering and empty behavior, settlement records,
 `AggregateError.errors`, and abrupt iterator closing. Runtime-owned FIFO job
 draining, nested-job fixed points, and the ES-first hostile-thenable regression
-are covered separately by `quickjs-runtime` tests.
+are covered separately by `fusor-runtime` tests.
 
 Run it with:
 

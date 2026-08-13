@@ -4,13 +4,13 @@ use crate::{
     ProgramOutput, Status, run_program_with_arguments_bounded,
     run_program_with_arguments_bounded_input, validate_executable,
 };
-use quickjs::{
+use fusor::{
     DynamicFunctionLimits, call_with_dynamic_function_support, construct_dynamic_function,
 };
-use quickjs_frontend::{
+use fusor_frontend::{
     DynamicFunctionKind, DynamicFunctionSource, FrontendLimits, SourceFragment,
 };
-use quickjs_runtime::{
+use fusor_runtime::{
     ExceptionKind, ExecutionError, ExecutionLimits, JsString, JsValue, Runtime, RuntimeLimits,
     ValueKind,
 };
@@ -1691,7 +1691,7 @@ impl TempOracleScript {
         for _ in 0..MAX_TEMP_DIRECTORY_ATTEMPTS {
             let counter = TEMP_DIRECTORY_COUNTER.fetch_add(1, Ordering::Relaxed);
             let directory = root.join(format!(
-                "quickjs-runtime-differential-qjs-{}-{counter}",
+                "fusor-runtime-differential-qjs-{}-{counter}",
                 std::process::id()
             ));
             match fs::create_dir(&directory) {
@@ -2130,7 +2130,7 @@ fn observe_candidate_body(body: &str, read_async_result: bool) -> Result<Observa
 }
 
 fn read_async_candidate_result(
-    context: &mut quickjs_runtime::Context<'_>,
+    context: &mut fusor_runtime::Context<'_>,
     state: JsValue,
     limits: DynamicFunctionLimits,
 ) -> Result<Result<JsValue, ExecutionError>, String> {
@@ -2161,7 +2161,7 @@ fn read_async_candidate_result(
 /// must not infer an Error family from prototype identity or bypass an
 /// observable `name`/`message` getter.
 fn normalize_candidate_thrown_value(
-    context: &mut quickjs_runtime::Context<'_>,
+    context: &mut fusor_runtime::Context<'_>,
     thrown: &JsValue,
     limits: DynamicFunctionLimits,
 ) -> Result<Observation, String> {
@@ -2388,7 +2388,7 @@ mod tests {
         parse_corpus_for_suite, parse_oracle_stdout, read_candidate_worker_body,
     };
     use crate::{ProgramOutput, Status};
-    use quickjs_runtime::JsString;
+    use fusor_runtime::JsString;
     use serde_json::{Value, json};
     use std::ffi::OsStr;
     use std::fs;

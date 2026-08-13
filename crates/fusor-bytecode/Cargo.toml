@@ -1,0 +1,11 @@
+[package]
+name = "fusor-bytecode"
+version = "0.0.1"
+description = "Safe opcode schema, checked codec, and bounded disassembler for the Experimental JavaScript Engine"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true

@@ -1,0 +1,22 @@
+[package]
+name = "fusor-frontend"
+version = "0.0.1"
+description = "Oxc-backed JavaScript front end for the Experimental JavaScript Engine"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+oxc_allocator.workspace = true
+oxc_ast.workspace = true
+oxc_diagnostics.workspace = true
+oxc_parser.workspace = true
+oxc_semantic.workspace = true
+oxc_span.workspace = true
+oxc_syntax.workspace = true
+fusor-diagnostics = { path = "../fusor-diagnostics" }
+fusor-regexp = { path = "../fusor-regexp" }
+
+[lints]
+workspace = true

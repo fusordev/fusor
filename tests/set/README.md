@@ -22,4 +22,4 @@ node tests/set/node-oracle.mjs
 QuickJS 2026-06-04 additionally exposes `Set.groupBy`, returning a `Map`; Node
 v24.19.0 does not. That pinned QuickJS extension and the complete QuickJS
 property order are covered directly by
-`crates/quickjs-runtime/tests/vm_set.rs`.
+`crates/fusor-runtime/tests/vm_set.rs`.

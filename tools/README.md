@@ -7,27 +7,27 @@ runtime, and fixtures run in deterministic path order.
 Build the pinned upstream release outside this repository, then run:
 
 ```console
-cargo build -p qjs-cli
+cargo build -p fusor-cli
 cargo xtask differential \
   --oracle /path/to/quickjs-2026-06-04/qjs \
-  --candidate target/debug/qjs
+  --candidate target/debug/fusor
 ```
 
 The oracle is optional development input and is never linked or copied
 into the Rust artifacts.
 
-## `qjs` (crates/qjs-cli)
+## `fusor` (crates/fusor-cli)
 
-`cargo build -p qjs-cli` produces `target/debug/qjs`:
+`cargo build -p fusor-cli` produces `target/debug/fusor`:
 
 ```console
-target/debug/qjs run file.mjs    # evaluate file.mjs as an ES module
-target/debug/qjs file.mjs        # same, with the default subcommand
-target/debug/qjs --script f.js   # evaluate f.js as a classic script
-target/debug/qjs repl            # start the ESM REPL
+target/debug/fusor run file.mjs    # evaluate file.mjs as an ES module
+target/debug/fusor file.mjs        # same, with the default subcommand
+target/debug/fusor --script f.js   # evaluate f.js as a classic script
+target/debug/fusor repl            # start the ESM REPL
 ```
 
-`qjs <file>` exits 0 on success, 1 on a JavaScript or pipeline error
+`fusor <file>` exits 0 on success, 1 on a JavaScript or pipeline error
 (message printed to stderr), and 2 on usage or file IO errors. Arguments
 after `<file>` are exposed through `node:process` `argv`. `print` is not
 available yet: the facade exposes no host-function installation point, so

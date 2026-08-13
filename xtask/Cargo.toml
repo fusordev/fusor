@@ -7,9 +7,9 @@ license.workspace = true
 publish = false
 
 [dependencies]
-quickjs = { path = "../crates/quickjs" }
-quickjs-frontend = { path = "../crates/quickjs-frontend" }
-quickjs-runtime = { path = "../crates/quickjs-runtime" }
+fusor = { path = "../crates/fusor" }
+fusor-frontend = { path = "../crates/fusor-frontend" }
+fusor-runtime = { path = "../crates/fusor-runtime" }
 rayon.workspace = true
 serde_json.workspace = true
 serde_yaml_ng.workspace = true

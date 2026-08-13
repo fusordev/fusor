@@ -62,7 +62,7 @@ analysis, scopes, symbols, and resolved/unresolved references directly. These
 are syntax-analysis inputs, not QuickJS runtime storage locations or
 declaration-instantiation semantics.
 
-`quickjs-compiler` consumes that retained semantic model directly only while
+`fusor-compiler` consumes that retained semantic model directly only while
 the front-end arena is live. Its first storage-planning boundary immediately
 lowers the needed facts into compiler-owned dense IDs, copied spans, immutable
 `Arc`-backed slices, and resolved-reference-to-binding edges grouped by their

@@ -1,6 +1,6 @@
 # Dynamic Function parser compatibility corpus
 
-This corpus compares `quickjs-frontend`'s Oxc-backed dynamic Function adapter
+This corpus compares `fusor-frontend`'s Oxc-backed dynamic Function adapter
 with the pinned QuickJS 2026-06-04 `qjsc` compiler.
 
 Run it explicitly with:

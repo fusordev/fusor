@@ -38,12 +38,12 @@ boundaries.
 
 | Crate | Responsibility |
 | --- | --- |
-| `quickjs-diagnostics` | Sources, spans, diagnostics, and source maps |
-| `quickjs-frontend` | Oxc parsing and owned frontend records |
-| `quickjs-bytecode` | Instructions, verifier, codec, and debug data |
-| `quickjs-compiler` | Oxc lowering to verified bytecode |
-| `quickjs-runtime` | Values, heap, realms, VM, and built-ins |
-| `quickjs` | Ergonomic host facade |
+| `fusor-diagnostics` | Sources, spans, diagnostics, and source maps |
+| `fusor-frontend` | Oxc parsing and owned frontend records |
+| `fusor-bytecode` | Instructions, verifier, codec, and debug data |
+| `fusor-compiler` | Oxc lowering to verified bytecode |
+| `fusor-runtime` | Values, heap, realms, VM, and built-ins |
+| `fusor` | Ergonomic host facade |
 
 Architecture and trust-boundary details are in
 [ARCHITECTURE.md](ARCHITECTURE.md) and
@@ -53,13 +53,13 @@ policy.
 
 ## DevTools
 
-`qjs` exposes one loopback-only Chrome DevTools Protocol target when started
+`fusor` exposes one loopback-only Chrome DevTools Protocol target when started
 with `--inspect` (default port `9229`):
 
 ```console
-qjs repl --inspect
-qjs run --inspect=9230 entry.mjs
-qjs run --script --inspect-brk app.js
+fusor repl --inspect
+fusor run --inspect=9230 entry.mjs
+fusor run --script --inspect-brk app.js
 ```
 
 Chromium-compatible discovery endpoints are available at `/json/version` and

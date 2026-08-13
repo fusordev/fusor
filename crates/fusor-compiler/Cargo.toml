@@ -1,0 +1,20 @@
+[package]
+name = "fusor-compiler"
+version = "0.0.1"
+description = "Arena-independent compiler plans for the Experimental JavaScript Engine"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+oxc_ast.workspace = true
+oxc_semantic.workspace = true
+oxc_span.workspace = true
+oxc_syntax.workspace = true
+fusor-bytecode = { path = "../fusor-bytecode" }
+fusor-frontend = { path = "../fusor-frontend" }
+fusor-regexp = { path = "../fusor-regexp" }
+
+[lints]
+workspace = true

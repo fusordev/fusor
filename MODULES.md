@@ -1,23 +1,24 @@
 # Module system design
 
-This document records the ES Module architecture for the pure-Rust port.
+This document records the ES Module architecture for the Experimental
+JavaScript Engine.
 ECMA-262 (ES2025, plus admitted proposals listed in [PORTING.md](PORTING.md))
 is normative; QuickJS is a compatibility oracle only, not a design template.
 
 ## Boundaries
 
-- `quickjs-frontend` owns parsing (Module goal) and the owned
+- `fusor-frontend` owns parsing (Module goal) and the owned
   `ModuleSyntaxRecord`: static requests, import entries, export entries,
   import attributes. Module early errors are rejected at the frontend.
-- `quickjs-compiler` lowers a Module goal to whole-graph verified bytecode
+- `fusor-compiler` lowers a Module goal to whole-graph verified bytecode
   with a `CompilerExecutableKind::Module` root and a verified *module
   instantiation record* (per-binding layout: name, cell, mutability,
   initialization policy, import source). Unsupported semantics reject at
   compile time; nothing is approximated.
-- `quickjs-runtime` owns module records, linking, evaluation, namespaces,
+- `fusor-runtime` owns module records, linking, evaluation, namespaces,
   the promise/job ordering for dynamic `import()` and top-level await, and
   the typed host-module-loader boundary. It performs no IO and no parsing.
-- Host crates (`quickjs`, tools) own resolution policy (FS layout, `node:`
+- Host crates (`fusor`, tools) own resolution policy (FS layout, `node:`
   builtins) and all IO. Tokio may drive host-side asynchronous loading; the
   runtime retains promise and job ordering exactly as for
   `Atomics.waitAsync` deadline signals: host completions enter as explicit

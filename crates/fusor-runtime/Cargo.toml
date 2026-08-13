@@ -1,0 +1,28 @@
+[package]
+name = "fusor-runtime"
+version = "0.0.1"
+description = "Reusable safe-Rust runtime core for the Experimental JavaScript Engine"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+icu_casemap.workspace = true
+icu_locale_core.workspace = true
+icu_normalizer.workspace = true
+fusor-bytecode = { path = "../fusor-bytecode" }
+fusor-diagnostics = { path = "../fusor-diagnostics" }
+fusor-frontend = { path = "../fusor-frontend" }
+fusor-intl = { path = "../fusor-intl" }
+fusor-regexp = { path = "../fusor-regexp" }
+temporal_rs.workspace = true
+tokio.workspace = true
+writeable.workspace = true
+
+[dev-dependencies]
+fusor-compiler = { path = "../fusor-compiler" }
+fusor-frontend = { path = "../fusor-frontend" }
+
+[lints]
+workspace = true

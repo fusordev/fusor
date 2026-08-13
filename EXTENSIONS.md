@@ -42,7 +42,7 @@ defaults.
 
 ## Human bytecode viewer
 
-`quickjs-bytecode` owns a reusable checked disassembler. A thin viewer tool
+`fusor-bytecode` owns a reusable checked disassembler. A thin viewer tool
 will add source-aware presentation after verified functions and debug tables
 exist.
 

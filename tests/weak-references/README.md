@@ -22,4 +22,4 @@ GC timing is intentionally excluded because ECMA-262 and hosts leave collection
 and cleanup scheduling nondeterministic. Explicit collector regressions for
 target clearing, kept-alive behavior, cell order, unregister-before-cleanup,
 and resource failure atomicity live in
-`crates/quickjs-runtime/tests/vm_weak_refs.rs`.
+`crates/fusor-runtime/tests/vm_weak_refs.rs`.

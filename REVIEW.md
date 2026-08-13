@@ -17,7 +17,7 @@ ordering regressions so the question cannot be reopened by inspection alone.
 
 ### P1 — Bound native calls discard the bound receiver — FIXED
 
-**Location:** `crates/quickjs-runtime/src/vm.rs:1558`
+**Location:** `crates/fusor-runtime/src/vm.rs:1558`
 
 `Context::call` unwraps a bound function and records `bound_this` in
 `receiver`, but the native-function branch passed only the materialized
@@ -27,16 +27,16 @@ such as `Function.prototype.call.bind(f)`, lost `f` and behaved as an
 unbound call.
 
 `execute_native_entry` now takes the accumulated `receiver` and builds its
-`CallInputs` with it (`crates/quickjs-runtime/src/vm/native.rs:610-630`).
+`CallInputs` with it (`crates/fusor-runtime/src/vm/native.rs:610-630`).
 
 Regressions: `host_calls_pass_the_bound_receiver_to_native_targets`,
 `host_calls_pass_the_bound_receiver_to_bytecode_targets`, and
 `host_calls_use_the_innermost_bound_receiver` in
-`crates/quickjs-runtime/tests/vm_bind.rs`.
+`crates/fusor-runtime/tests/vm_bind.rs`.
 
 ### P1 — Nested bound native calls drop earlier bound arguments — FIXED
 
-**Location:** `crates/quickjs-runtime/src/vm.rs:1571-1584`
+**Location:** `crates/fusor-runtime/src/vm.rs:1571-1584`
 
 Each bound layer appended its arguments to the original public `arguments`
 slice. It did not append them to `owned_arguments` accumulated by an outer
@@ -54,7 +54,7 @@ production code and passes after the fix.
 
 ### P2 — Array assignment member target ordering — REJECTED, NOT A DEFECT
 
-**Location:** `crates/quickjs-compiler/src/lowering.rs:5313-5391`
+**Location:** `crates/fusor-compiler/src/lowering.rs:5313-5391`
 
 The finding claimed ECMAScript requires obtaining the next iterator value
 before evaluating the assignment target, and that the existing
@@ -83,11 +83,11 @@ and computed-key effects, matching the oracle byte for byte:
 `array_assignment_computed_keys_evaluate_before_the_iterator_step`,
 `array_assignment_rest_targets_evaluate_before_collecting_values`, and
 `array_assignment_member_bases_interleave_with_each_iterator_step` in
-`crates/quickjs-runtime/tests/vm_destructuring.rs`.
+`crates/fusor-runtime/tests/vm_destructuring.rs`.
 
 ### P2 — `Function.prototype[Symbol.hasInstance]` is mutable — FIXED
 
-**Location:** `crates/quickjs-runtime/src/runtime/realm.rs:1405-1409`
+**Location:** `crates/fusor-runtime/src/runtime/realm.rs:1405-1409`
 
 The intrinsic was published with `METHOD_PROPERTY`, whose descriptor is
 writable and configurable. QuickJS pins this property as non-writable and
@@ -153,7 +153,7 @@ gap is already tracked in `PORTING.md` as dependent on the pending
 
 ### P1 — Realm intrinsic bootstrap is excessively hand-expanded — RESOLVED
 
-**Location:** `crates/quickjs-runtime/src/runtime/realm.rs`
+**Location:** `crates/fusor-runtime/src/runtime/realm.rs`
 
 **Resolution:** Realm construction now uses validated typed specifications, a
 derived atom and reservation plan, typed identity allocation, ordered generic
@@ -551,7 +551,7 @@ cargo audit
 
 ### P1 — Compiler lowering is a 14,000-line multi-stage god module — RESOLVED
 
-**Location:** `crates/quickjs-compiler/src/lowering.rs`
+**Location:** `crates/fusor-compiler/src/lowering.rs`
 
 **Resolution:** The lowering facade is now 291 lines and delegates to owned
 artifact, error, context, layout, pool, control-flow, validation, per-function,
@@ -609,7 +609,7 @@ of arbitrary helper files.
 - [x] Do not introduce traits whose only purpose is allowing one giant
   `CompilationContext` implementation to be scattered across files.
 - [x] Do not create a generic `utils.rs` containing cross-stage mutable state.
-- [x] Keep the public `quickjs-compiler` API stable through module re-exports.
+- [x] Keep the public `fusor-compiler` API stable through module re-exports.
 
 #### Lowering phase 0 — Characterize compiler output
 
@@ -833,7 +833,7 @@ lowering/
 
 ### P1 — Control-flow verifier conflates model, diagnostics, structural validation, capability policy, and dataflow — RESOLVED
 
-**Location:** `crates/quickjs-bytecode/src/verifier.rs`
+**Location:** `crates/fusor-bytecode/src/verifier.rs`
 
 **Resolution:** The verifier is split into private typed proof stages for the
 model, limits, diagnostics, predecode, headers, layouts, operands, targets,
@@ -1047,7 +1047,7 @@ verifier/
   authority outside the verifier pipeline.
 - [x] `VerifiedControlFlow` remains non-executable without whole-bytecode
   verification.
-- [x] All `quickjs-bytecode` tests and full workspace gates pass.
+- [x] All `fusor-bytecode` tests and full workspace gates pass.
 
 ### Refactor sequencing
 

@@ -353,6 +353,124 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6d5a32815ae3f33302d95fdcb2ce17862f8c65363dcfd29360480ba1001fc9c"
 
 [[package]]
+name = "fusor"
+version = "0.0.1"
+dependencies = [
+ "fusor-bytecode",
+ "fusor-compiler",
+ "fusor-diagnostics",
+ "fusor-frontend",
+ "fusor-runtime",
+ "serde_json",
+]
+
+[[package]]
+name = "fusor-bytecode"
+version = "0.0.1"
+
+[[package]]
+name = "fusor-cdp"
+version = "0.0.1"
+dependencies = [
+ "base64",
+ "fusor",
+ "fusor-runtime",
+ "serde_json",
+ "sha1",
+ "tokio",
+]
+
+[[package]]
+name = "fusor-cli"
+version = "0.0.1"
+dependencies = [
+ "fusor",
+ "fusor-cdp",
+ "fusor-runtime",
+ "miette",
+ "rustyline",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "fusor-compiler"
+version = "0.0.1"
+dependencies = [
+ "fusor-bytecode",
+ "fusor-frontend",
+ "fusor-regexp",
+ "oxc_ast",
+ "oxc_semantic",
+ "oxc_span",
+ "oxc_syntax",
+]
+
+[[package]]
+name = "fusor-diagnostics"
+version = "0.0.1"
+dependencies = [
+ "miette",
+ "serde_json",
+ "sourcemap",
+]
+
+[[package]]
+name = "fusor-frontend"
+version = "0.0.1"
+dependencies = [
+ "fusor-diagnostics",
+ "fusor-regexp",
+ "oxc_allocator",
+ "oxc_ast",
+ "oxc_diagnostics",
+ "oxc_parser",
+ "oxc_semantic",
+ "oxc_span",
+ "oxc_syntax",
+]
+
+[[package]]
+name = "fusor-intl"
+version = "0.0.1"
+dependencies = [
+ "fixed_decimal",
+ "icu",
+ "writeable",
+]
+
+[[package]]
+name = "fusor-regexp"
+version = "0.1.0"
+dependencies = [
+ "emojis",
+ "icu",
+ "icu_casemap",
+ "icu_properties",
+ "oxc_allocator",
+ "oxc_regular_expression",
+ "oxc_span",
+]
+
+[[package]]
+name = "fusor-runtime"
+version = "0.0.1"
+dependencies = [
+ "fusor-bytecode",
+ "fusor-compiler",
+ "fusor-diagnostics",
+ "fusor-frontend",
+ "fusor-intl",
+ "fusor-regexp",
+ "icu_casemap",
+ "icu_locale_core",
+ "icu_normalizer",
+ "temporal_rs",
+ "tokio",
+ "writeable",
+]
+
+[[package]]
 name = "futures-core"
 version = "0.3.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1385,124 +1503,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "qjs-cli"
-version = "0.0.1"
-dependencies = [
- "miette",
- "quickjs",
- "quickjs-cdp",
- "quickjs-runtime",
- "rustyline",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "quickjs"
-version = "0.0.1"
-dependencies = [
- "quickjs-bytecode",
- "quickjs-compiler",
- "quickjs-diagnostics",
- "quickjs-frontend",
- "quickjs-runtime",
- "serde_json",
-]
-
-[[package]]
-name = "quickjs-bytecode"
-version = "0.0.1"
-
-[[package]]
-name = "quickjs-cdp"
-version = "0.0.1"
-dependencies = [
- "base64",
- "quickjs",
- "quickjs-runtime",
- "serde_json",
- "sha1",
- "tokio",
-]
-
-[[package]]
-name = "quickjs-compiler"
-version = "0.0.1"
-dependencies = [
- "oxc_ast",
- "oxc_semantic",
- "oxc_span",
- "oxc_syntax",
- "quickjs-bytecode",
- "quickjs-frontend",
- "quickjs-regexp",
-]
-
-[[package]]
-name = "quickjs-diagnostics"
-version = "0.0.1"
-dependencies = [
- "miette",
- "serde_json",
- "sourcemap",
-]
-
-[[package]]
-name = "quickjs-frontend"
-version = "0.0.1"
-dependencies = [
- "oxc_allocator",
- "oxc_ast",
- "oxc_diagnostics",
- "oxc_parser",
- "oxc_semantic",
- "oxc_span",
- "oxc_syntax",
- "quickjs-diagnostics",
- "quickjs-regexp",
-]
-
-[[package]]
-name = "quickjs-intl"
-version = "0.0.1"
-dependencies = [
- "fixed_decimal",
- "icu",
- "writeable",
-]
-
-[[package]]
-name = "quickjs-regexp"
-version = "0.1.0"
-dependencies = [
- "emojis",
- "icu",
- "icu_casemap",
- "icu_properties",
- "oxc_allocator",
- "oxc_regular_expression",
- "oxc_span",
-]
-
-[[package]]
-name = "quickjs-runtime"
-version = "0.0.1"
-dependencies = [
- "icu_casemap",
- "icu_locale_core",
- "icu_normalizer",
- "quickjs-bytecode",
- "quickjs-compiler",
- "quickjs-diagnostics",
- "quickjs-frontend",
- "quickjs-intl",
- "quickjs-regexp",
- "temporal_rs",
- "tokio",
- "writeable",
-]
-
-[[package]]
 name = "quote"
 version = "1.0.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2237,9 +2237,9 @@ dependencies = [
 name = "xtask"
 version = "0.0.0"
 dependencies = [
- "quickjs",
- "quickjs-frontend",
- "quickjs-runtime",
+ "fusor",
+ "fusor-frontend",
+ "fusor-runtime",
  "rayon",
  "serde_json",
  "serde_yaml_ng",

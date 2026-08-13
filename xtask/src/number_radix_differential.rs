@@ -1,9 +1,9 @@
 //! Bounded differential gate for `Number.prototype.toString(radix)`.
 
 use crate::{ProgramOutput, Status, run_program_with_arguments_bounded, validate_executable};
-use quickjs::{DynamicFunctionLimits, construct_dynamic_function};
-use quickjs_frontend::{DynamicFunctionKind, DynamicFunctionSource, SourceFragment};
-use quickjs_runtime::{ExecutionLimits, JsNumber, Runtime, RuntimeLimits};
+use fusor::{DynamicFunctionLimits, construct_dynamic_function};
+use fusor_frontend::{DynamicFunctionKind, DynamicFunctionSource, SourceFragment};
+use fusor_runtime::{ExecutionLimits, JsNumber, Runtime, RuntimeLimits};
 use serde_json::{Map, Value};
 use std::collections::BTreeSet;
 use std::ffi::OsStr;

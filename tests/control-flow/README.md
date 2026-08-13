@@ -22,7 +22,7 @@ cargo xtask control-flow-differential \
 Each case supplies the body of an ordinary dynamic `Function`, one or more
 strict coverage tags, and the normalized result expected from the pinned
 release. The Rust candidate compiles the same body through the public
-`quickjs::construct_dynamic_function` facade, executes only its fully verified
+`fusor::construct_dynamic_function` facade, executes only its fully verified
 function graph in a fresh bounded runtime, and compares the primitive result or
 engine-created exception with the oracle.
 

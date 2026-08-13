@@ -2015,7 +2015,7 @@ mod tests {
 
     fn unique_temp_dir(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
-            "quickjs-xtask-{label}-{}-{:?}",
+            "fusor-xtask-{label}-{}-{:?}",
             std::process::id(),
             std::thread::current().id()
         ))

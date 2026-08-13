@@ -1,7 +1,7 @@
 # Bytecode verifier
 
-This document specifies the verifier for the pure-Rust port of QuickJS
-2026-06-04. It is normative for `quickjs-bytecode` and the VM boundary.
+This document specifies the verifier for the Experimental JavaScript Engine
+(pinned to QuickJS 2026-06-04). It is normative for `fusor-bytecode` and the VM boundary.
 
 Source references name files and line ranges in the pinned
 `quickjs-2026-06-04` archive. A rule labelled **Upstream** describes behavior

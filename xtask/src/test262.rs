@@ -1,13 +1,13 @@
 //! Pinned Test262 inventory and Global Script / Module execution.
 
 use crate::DEFAULT_TIMEOUT_MS;
-use quickjs::{
+use fusor::{
     DynamicFunctionLimits, LoadedModuleSource, ModuleEvaluationError, ModuleSourceError,
     ModuleSourceLoader, ScriptEvaluationError, ScriptLimits, call_with_dynamic_function_support,
     evaluate_module, evaluate_script, module_evaluation_error, pump_dynamic_imports,
 };
-use quickjs_frontend::DiagnosticStage;
-use quickjs_runtime::{
+use fusor_frontend::DiagnosticStage;
+use fusor_runtime::{
     Context, ExceptionKind, ExecutionError, ExecutionLimits, Function, GlobalScriptError,
     JsException, JsValue, ModuleErrorPhase, ModuleKey, Runtime, RuntimeLimits,
 };
@@ -662,14 +662,14 @@ fn classify_skip(
         return Ok(Some("low-priority-intl402".to_owned()));
     }
     if policy.excludes(relative) && !(is_intl402 && admit_intl402) {
-        return Ok(Some("quickjs-baseline-exclude".to_owned()));
+        return Ok(Some("fusor-baseline-exclude".to_owned()));
     }
     if let Some(feature) = metadata.features.iter().find(|feature| {
         policy.skipped_features.contains(*feature)
             && !(is_intl402 && admit_intl402)
             && admitted_feature.is_none_or(|admitted| admitted != feature.as_str())
     }) {
-        return Ok(Some(format!("quickjs-skipped-feature:{feature}")));
+        return Ok(Some(format!("fusor-skipped-feature:{feature}")));
     }
     let parse_negative = metadata
         .negative
@@ -1951,6 +1951,7 @@ mod tests {
         let harness = HarnessSources {
             assert: String::new(),
             sta: String::new(),
+            doneprint: String::new(),
             root: PathBuf::from("unused-harness"),
             test_root: PathBuf::from("unused-test-root"),
         };
@@ -2070,7 +2071,7 @@ throw new TypeError();",
                 false,
                 harness,
             ),
-            Ok(Some("quickjs-skipped-feature:ShadowRealm".to_owned()))
+            Ok(Some("fusor-skipped-feature:ShadowRealm".to_owned()))
         );
     }
 
@@ -2098,6 +2099,7 @@ throw new TypeError();",
         let harness = HarnessSources {
             assert: String::new(),
             sta: String::new(),
+            doneprint: String::new(),
             root: PathBuf::from("unused-harness"),
             test_root: PathBuf::from("unused-test-root"),
         };
@@ -2177,7 +2179,7 @@ throw new TypeError();",
                 true,
                 harness,
             ),
-            Ok(Some("quickjs-skipped-feature:ShadowRealm".to_owned()))
+            Ok(Some("fusor-skipped-feature:ShadowRealm".to_owned()))
         );
     }
 
@@ -2257,6 +2259,7 @@ throw new TypeError();",
         let harness = HarnessSources {
             assert: String::new(),
             sta: String::new(),
+            doneprint: String::new(),
             root: harness_root,
             test_root: PathBuf::from("unused-test-root"),
         };
@@ -2298,6 +2301,7 @@ Test262Error.prototype.toString = function () {
 };
 "#
             .to_owned(),
+            doneprint: String::new(),
             root: PathBuf::from("unused-harness"),
             test_root: PathBuf::from("unused-test-root"),
         };
@@ -2331,6 +2335,7 @@ Test262Error.prototype.toString = function () {
         let harness = HarnessSources {
             assert: String::new(),
             sta: String::new(),
+            doneprint: String::new(),
             root: PathBuf::from("unused-harness"),
             test_root: PathBuf::from("unused-test-root"),
         };
@@ -2360,6 +2365,7 @@ Test262Error.prototype.toString = function () {
         let harness = HarnessSources {
             assert: String::new(),
             sta: String::new(),
+            doneprint: String::new(),
             root: PathBuf::from("unused-harness"),
             test_root: PathBuf::from("unused-test-root"),
         };
@@ -2428,6 +2434,7 @@ Test262Error.prototype.toString = function () {
         let harness = HarnessSources {
             assert: String::new(),
             sta: TEST262_ERROR_STUB.to_owned(),
+            doneprint: String::new(),
             root: PathBuf::from("unused-harness"),
             test_root,
         };
@@ -2467,6 +2474,7 @@ Test262Error.prototype.toString = function () {
         let harness = HarnessSources {
             assert: String::new(),
             sta: TEST262_ERROR_STUB.to_owned(),
+            doneprint: String::new(),
             root: PathBuf::from("unused-harness"),
             test_root: test_root.clone(),
         };
@@ -2518,7 +2526,7 @@ function Test262Error(message) {
 
     fn unique_temp_dir(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
-            "quickjs-test262-{label}-{}-{:?}",
+            "fusor-test262-{label}-{}-{:?}",
             std::process::id(),
             thread::current().id()
         ))

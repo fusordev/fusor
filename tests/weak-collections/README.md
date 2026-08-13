@@ -21,4 +21,4 @@ node tests/weak-collections/node-oracle.mjs
 QuickJS 2026-06-04 additionally exposes `WeakMap.prototype.getOrInsert` and
 `getOrInsertComputed`; Node v24.19.0 does not. Their complete metadata,
 validation ordering, and reentrant update semantics are covered directly by
-`crates/quickjs-runtime/tests/vm_weak_collections.rs`.
+`crates/fusor-runtime/tests/vm_weak_collections.rs`.

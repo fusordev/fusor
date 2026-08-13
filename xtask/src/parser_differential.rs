@@ -4,7 +4,7 @@ use crate::parser_diagnostics::{DiagnosticReach, PINNED_DIAGNOSTICS, PinnedDiagn
 use crate::parser_productions::{PINNED_PRODUCTIONS, PinnedProduction, ProductionGoals};
 use crate::{ProgramOutput, Status};
 use crate::{collect_javascript_files, run_program_with_arguments_bounded, validate_executable};
-use quickjs_frontend::{
+use fusor_frontend::{
     CompilationGoal, FrontendOptions, GlobalScriptGoal, ParseMode, with_parsed_program,
 };
 use serde_json::{Map, Value};
@@ -965,7 +965,7 @@ impl<'fixture> ManifestValidation<'fixture> {
             &[
                 "path",
                 "goal",
-                "quickjs",
+                "fusor",
                 "frontend",
                 "families",
                 "claims",
@@ -1002,17 +1002,17 @@ impl<'fixture> ManifestValidation<'fixture> {
                 fixture.goal.manifest_name()
             ));
         }
-        let quickjs = Expectation::from_manifest(
-            required_string(case, "quickjs", &location)?,
-            &format!("{location} field `quickjs`"),
+        let fusor = Expectation::from_manifest(
+            required_string(case, "fusor", &location)?,
+            &format!("{location} field `fusor`"),
         )?;
         let frontend = Expectation::from_manifest(
             required_string(case, "frontend", &location)?,
             &format!("{location} field `frontend`"),
         )?;
-        if quickjs != fixture.oracle_expectation || frontend != fixture.candidate_expectation {
+        if fusor != fixture.oracle_expectation || frontend != fixture.candidate_expectation {
             return Err(format!(
-                "parser manifest case {} expectations ({quickjs}/{frontend}) do not match its directory ({}/{})",
+                "parser manifest case {} expectations ({fusor}/{frontend}) do not match its directory ({}/{})",
                 relative.display(),
                 fixture.oracle_expectation,
                 fixture.candidate_expectation
@@ -1021,12 +1021,12 @@ impl<'fixture> ManifestValidation<'fixture> {
 
         let families = parse_families(case, &location)?;
         let claims = parse_claims(case, &location)?;
-        validate_case_claims(&relative, &families, &claims, quickjs, goal)?;
-        let productions = parse_productions(case, &location, goal, quickjs, &relative)?;
+        validate_case_claims(&relative, &families, &claims, fusor, goal)?;
+        let productions = parse_productions(case, &location, goal, fusor, &relative)?;
         let diagnostic = Self::validate_case_diagnostic(
             case.get("diagnostic")
                 .expect("exact_object checked the diagnostic field"),
-            quickjs,
+            fusor,
             &claims,
             &relative,
             &location,
@@ -1035,20 +1035,20 @@ impl<'fixture> ManifestValidation<'fixture> {
         validate_difference(
             case.get("difference")
                 .expect("exact_object checked the difference field"),
-            quickjs,
+            fusor,
             frontend,
             &relative,
             &location,
             &mut self.difference_ids,
         )?;
-        if quickjs != frontend {
+        if fusor != frontend {
             self.differences += 1;
         }
 
         self.covered_goals.insert(goal);
         self.covered_families.extend(families);
         for claim in &claims {
-            self.covered_claim_polarities.insert((*claim, quickjs));
+            self.covered_claim_polarities.insert((*claim, fusor));
         }
         self.covered_claims.extend(claims);
         for production in productions {
@@ -1069,13 +1069,13 @@ impl<'fixture> ManifestValidation<'fixture> {
     /// claim one early-error surface while provoking another.
     fn validate_case_diagnostic(
         value: &Value,
-        quickjs: Expectation,
+        fusor: Expectation,
         claims: &BTreeSet<ParserClaim>,
         relative: &Path,
         location: &str,
     ) -> Result<Option<DeclaredDiagnostic>, String> {
         if value.is_null() {
-            return if matches!(quickjs, Expectation::Reject) {
+            return if matches!(fusor, Expectation::Reject) {
                 Err(format!(
                     "parser manifest case {} must declare the pinned QuickJS diagnostic it provokes",
                     relative.display()
@@ -1084,7 +1084,7 @@ impl<'fixture> ManifestValidation<'fixture> {
                 Ok(None)
             };
         }
-        if matches!(quickjs, Expectation::Accept) {
+        if matches!(fusor, Expectation::Accept) {
             return Err(format!(
                 "parser manifest case {} must not declare a diagnostic because QuickJS accepts it",
                 relative.display()
@@ -1223,7 +1223,7 @@ fn validate_case_claims(
     relative: &Path,
     families: &BTreeSet<ParserFamily>,
     claims: &BTreeSet<ParserClaim>,
-    quickjs: Expectation,
+    fusor: Expectation,
     goal: ParserGoal,
 ) -> Result<(), String> {
     let expected_families = claims
@@ -1239,9 +1239,9 @@ fn validate_case_claims(
         ));
     }
     for claim in claims {
-        if !claim.allows_quickjs_expectation(quickjs) {
+        if !claim.allows_quickjs_expectation(fusor) {
             return Err(format!(
-                "parser manifest case {} claim `{}` does not allow QuickJS {quickjs} coverage",
+                "parser manifest case {} claim `{}` does not allow QuickJS {fusor} coverage",
                 relative.display(),
                 claim.manifest_name()
             ));
@@ -1383,14 +1383,14 @@ fn parse_productions(
     object: &Map<String, Value>,
     location: &str,
     goal: ParserGoal,
-    quickjs: Expectation,
+    fusor: Expectation,
     relative: &Path,
 ) -> Result<BTreeSet<DeclaredProduction>, String> {
     let values = object
         .get("productions")
         .and_then(Value::as_array)
         .ok_or_else(|| format!("{location} field `productions` must be an array"))?;
-    if matches!(quickjs, Expectation::Reject) {
+    if matches!(fusor, Expectation::Reject) {
         return if values.is_empty() {
             Ok(BTreeSet::new())
         } else {
@@ -1462,7 +1462,7 @@ fn validate_evidence(object: &Map<String, Value>, location: &str) -> Result<(), 
 }
 
 fn parse_pinned_quickjs_evidence(value: &str) -> Option<(&str, Option<(u64, u64)>)> {
-    let value = value.strip_prefix("quickjs/").unwrap_or(value);
+    let value = value.strip_prefix("fusor/").unwrap_or(value);
     let (path, anchor) = match value.split_once(':') {
         Some((path, anchor)) => (path, Some(anchor)),
         None => (value, None),
@@ -1516,13 +1516,13 @@ fn parse_positive_line(value: &str) -> Option<u64> {
 
 fn validate_difference(
     value: &Value,
-    quickjs: Expectation,
+    fusor: Expectation,
     frontend: Expectation,
     path: &Path,
     location: &str,
     ids: &mut BTreeSet<String>,
 ) -> Result<(), String> {
-    let expected_direction = match (quickjs, frontend) {
+    let expected_direction = match (fusor, frontend) {
         (Expectation::Reject, Expectation::Accept) => Some(DifferenceDirection::FrontendAccept),
         (Expectation::Accept, Expectation::Reject) => Some(DifferenceDirection::FrontendReject),
         _ => None,
@@ -1974,7 +1974,7 @@ mod tests {
             "tests//test_language.js:1",
             "tests\\test_language.js:1",
             "not-allowlisted.js:1",
-            "quickjs/tests/../quickjs.c:1",
+            "fusor/tests/../quickjs.c:1",
         ] {
             let corpus = TestCorpus::new(&valid_manifest());
             let mut manifest = corpus.manifest();
@@ -1991,7 +1991,7 @@ mod tests {
 
         let aliases = TestCorpus::new(&valid_manifest());
         let mut manifest = aliases.manifest();
-        manifest["cases"][0]["evidence"] = json!(["quickjs.c:1", "quickjs/quickjs.c:1-1"]);
+        manifest["cases"][0]["evidence"] = json!(["quickjs.c:1", "fusor/quickjs.c:1-1"]);
         aliases.write_manifest(&manifest);
         let error =
             load_parser_corpus(aliases.path()).expect_err("canonical evidence aliases duplicate");
@@ -2038,7 +2038,7 @@ mod tests {
             "path".to_owned(),
             json!("candidate-accept/script/source.js"),
         );
-        case.insert("quickjs".to_owned(), json!("reject"));
+        case.insert("fusor".to_owned(), json!("reject"));
         case.insert(
             "diagnostic".to_owned(),
             json!("unexpected-token-in-expression"),
@@ -2069,7 +2069,7 @@ mod tests {
             let recipient = cases
                 .iter_mut()
                 .find(|case| {
-                    case["quickjs"] == "accept"
+                    case["fusor"] == "accept"
                         && case["path"] != "candidate-accept/script/source.js"
                         && super::ParserGoal::from_manifest(
                             case["goal"].as_str().expect("case goal"),
@@ -2096,7 +2096,7 @@ mod tests {
 
         let stale = TestCorpus::new(&valid_manifest());
         let mut manifest = stale.manifest();
-        manifest["cases"][0]["difference"] = difference("QJS-OXC-STALE", "frontend-accept");
+        manifest["cases"][0]["difference"] = difference("FUS-OXC-STALE", "frontend-accept");
         stale.write_manifest(&manifest);
         let error = load_parser_corpus(stale.path()).expect_err("stale difference");
         assert!(
@@ -2110,7 +2110,7 @@ mod tests {
         let path = Path::new("candidate-accept/script/source.js");
         let mut ids = BTreeSet::new();
         validate_difference(
-            &difference("QJS-OXC-ONE", "frontend-accept"),
+            &difference("FUS-OXC-ONE", "frontend-accept"),
             Expectation::Reject,
             Expectation::Accept,
             path,
@@ -2120,7 +2120,7 @@ mod tests {
         .expect("valid difference");
 
         let duplicate = validate_difference(
-            &difference("QJS-OXC-ONE", "frontend-accept"),
+            &difference("FUS-OXC-ONE", "frontend-accept"),
             Expectation::Reject,
             Expectation::Accept,
             path,
@@ -2131,7 +2131,7 @@ mod tests {
         assert!(duplicate.contains("declared more than once"), "{duplicate}");
 
         let wrong_direction = validate_difference(
-            &difference("QJS-OXC-TWO", "frontend-reject"),
+            &difference("FUS-OXC-TWO", "frontend-reject"),
             Expectation::Reject,
             Expectation::Accept,
             path,
@@ -2146,7 +2146,7 @@ mod tests {
 
         let wrong_regression = validate_difference(
             &json!({
-                "id": "QJS-OXC-THREE",
+                "id": "FUS-OXC-THREE",
                 "direction": "frontend-accept",
                 "rationale": "intentional",
                 "regression": "candidate-accept/script/other.js"
@@ -2282,7 +2282,7 @@ mod tests {
         let missing_reject = TestCorpus::new(&valid_manifest());
         let mut manifest = missing_reject.manifest();
         for case in manifest["cases"].as_array_mut().expect("cases array") {
-            if case["quickjs"] == "reject" {
+            if case["fusor"] == "reject" {
                 case["claims"]
                     .as_array_mut()
                     .expect("claims array")
@@ -2339,7 +2339,7 @@ mod tests {
             .as_array_mut()
             .expect("cases array")
             .iter_mut()
-            .find(|case| case["quickjs"] == "reject")
+            .find(|case| case["fusor"] == "reject")
             .expect("reject case");
         reject_case["claims"]
             .as_array_mut()
@@ -2359,7 +2359,7 @@ mod tests {
             .as_array_mut()
             .expect("cases array")
             .iter_mut()
-            .find(|case| case["goal"] == "module" && case["quickjs"] == "accept")
+            .find(|case| case["goal"] == "module" && case["fusor"] == "accept")
             .expect("accepted Module case");
         module_case["claims"]
             .as_array_mut()
@@ -2398,7 +2398,7 @@ mod tests {
             .as_array_mut()
             .expect("cases array")
             .iter_mut()
-            .find(|case| case["goal"] == "script" && case["quickjs"] == "reject")
+            .find(|case| case["goal"] == "script" && case["fusor"] == "reject")
             .expect("rejected Script case");
         reject_script["claims"]
             .as_array_mut()
@@ -2418,7 +2418,7 @@ mod tests {
             .as_array_mut()
             .expect("cases array")
             .iter_mut()
-            .find(|case| case["goal"] == "module" && case["quickjs"] == "reject")
+            .find(|case| case["goal"] == "module" && case["fusor"] == "reject")
             .expect("rejected Module case");
         reject_module["families"]
             .as_array_mut()
@@ -2596,7 +2596,7 @@ mod tests {
             .as_array_mut()
             .expect("cases array")
             .iter_mut()
-            .find(|case| case["quickjs"] == "reject")
+            .find(|case| case["fusor"] == "reject")
             .expect("reject case");
         reject["diagnostic"] = Value::Null;
         missing.write_manifest(&manifest);
@@ -2612,7 +2612,7 @@ mod tests {
             .as_array_mut()
             .expect("cases array")
             .iter_mut()
-            .find(|case| case["quickjs"] == "accept")
+            .find(|case| case["fusor"] == "accept")
             .expect("accept case");
         accept["diagnostic"] = json!("unexpected-character");
         on_accept.write_manifest(&manifest);
@@ -2629,7 +2629,7 @@ mod tests {
             .as_array_mut()
             .expect("cases array")
             .iter_mut()
-            .find(|case| case["quickjs"] == "reject")
+            .find(|case| case["fusor"] == "reject")
             .expect("reject case")["diagnostic"] = json!("not-a-pinned-diagnostic");
         unknown.write_manifest(&manifest);
         let error =
@@ -2652,7 +2652,7 @@ mod tests {
             .as_array_mut()
             .expect("cases array")
             .iter_mut()
-            .find(|case| case["quickjs"] == "reject")
+            .find(|case| case["fusor"] == "reject")
             .expect("reject case")["diagnostic"] = json!(unreachable.id);
         declared.write_manifest(&manifest);
         let error = load_parser_corpus(declared.path())
@@ -2765,7 +2765,7 @@ mod tests {
             .as_array_mut()
             .expect("cases array")
             .iter_mut()
-            .find(|case| case["quickjs"] == "accept")
+            .find(|case| case["fusor"] == "accept")
             .expect("accept case")["productions"]
             .as_array_mut()
             .expect("productions array")
@@ -2784,7 +2784,7 @@ mod tests {
             .as_array_mut()
             .expect("cases array")
             .iter_mut()
-            .find(|case| case["quickjs"] == "accept")
+            .find(|case| case["fusor"] == "accept")
             .expect("accept case")["productions"] = json!([]);
         empty.write_manifest(&manifest);
         let error = load_parser_corpus(empty.path())
@@ -2803,7 +2803,7 @@ mod tests {
             .as_array_mut()
             .expect("cases array")
             .iter_mut()
-            .find(|case| case["quickjs"] == "accept" && case["goal"] == "script")
+            .find(|case| case["fusor"] == "accept" && case["goal"] == "script")
             .expect("accepting Script case")["productions"]
             .as_array_mut()
             .expect("productions array")
@@ -2822,7 +2822,7 @@ mod tests {
             .as_array_mut()
             .expect("cases array")
             .iter_mut()
-            .find(|case| case["quickjs"] == "accept" && case["goal"] == "strict-script")
+            .find(|case| case["fusor"] == "accept" && case["goal"] == "strict-script")
             .expect("accepting strict Script case")["productions"]
             .as_array_mut()
             .expect("productions array")
@@ -2841,7 +2841,7 @@ mod tests {
             .as_array_mut()
             .expect("cases array")
             .iter_mut()
-            .find(|case| case["quickjs"] == "reject")
+            .find(|case| case["fusor"] == "reject")
             .expect("reject case")["productions"] = json!(["statement.block"]);
         on_rejection.write_manifest(&manifest);
         let error = load_parser_corpus(on_rejection.path())
@@ -2903,7 +2903,7 @@ mod tests {
                         "annex-b.html-comments",
                         "annex-b.block-functions"
                     ],
-                    "evidence": ["quickjs/tests/test_language.js:39-675"],
+                    "evidence": ["fusor/tests/test_language.js:39-675"],
                     "difference": null
                 },
                 {
@@ -2918,7 +2918,7 @@ mod tests {
                         "module.top-level-await-context",
                         "profile.accepted-es2025"
                     ],
-                    "evidence": ["quickjs/quickjs.c:31477-31916"],
+                    "evidence": ["fusor/quickjs.c:31477-31916"],
                     "difference": null
                 },
                 {
@@ -2928,7 +2928,7 @@ mod tests {
                     "frontend": "accept",
                     "families": ["source-lexical"],
                     "claims": ["lexical.comments-hashbang-html"],
-                    "evidence": ["quickjs/quickjs.c:36210-36299"],
+                    "evidence": ["fusor/quickjs.c:36210-36299"],
                     "difference": null
                 },
                 {
@@ -2938,7 +2938,7 @@ mod tests {
                     "frontend": "accept",
                     "families": ["functions"],
                     "claims": ["function.contextual-early-errors"],
-                    "evidence": ["quickjs/quickjs.c:36543-36546"],
+                    "evidence": ["fusor/quickjs.c:36543-36546"],
                     "difference": null
                 },
                 {
@@ -2948,7 +2948,7 @@ mod tests {
                     "frontend": "accept",
                     "families": ["functions"],
                     "claims": ["function.contextual-early-errors"],
-                    "evidence": ["quickjs/quickjs.c:36543-36546"],
+                    "evidence": ["fusor/quickjs.c:36543-36546"],
                     "difference": null
                 },
                 {
@@ -2991,7 +2991,7 @@ mod tests {
                         "profile.rejected-outside-target",
                         "profile.regexp-pattern-delegation"
                     ],
-                    "evidence": ["quickjs/test262_errors.txt:1-58"],
+                    "evidence": ["fusor/test262_errors.txt:1-58"],
                     "diagnostic": "unexpected-token-in-expression",
                     "difference": null
                 },
@@ -3007,7 +3007,7 @@ mod tests {
                         "module.top-level-await-context",
                         "module.early-errors"
                     ],
-                    "evidence": ["quickjs/test262.conf:53"],
+                    "evidence": ["fusor/test262.conf:53"],
                     "diagnostic": "invalid-export-syntax",
                     "difference": null
                 },
@@ -3018,7 +3018,7 @@ mod tests {
                     "frontend": "reject",
                     "families": ["bindings"],
                     "claims": ["binding.strict-mode-early-errors"],
-                    "evidence": ["quickjs/quickjs.c:36210"],
+                    "evidence": ["fusor/quickjs.c:36210"],
                     "diagnostic": "strict-invalid-variable-name",
                     "difference": null
                 }
@@ -3040,7 +3040,7 @@ mod tests {
                 .iter()
                 .enumerate()
                 .filter(|(_, case)| {
-                    case["quickjs"] == "accept"
+                    case["fusor"] == "accept"
                         && super::ParserGoal::from_manifest(
                             case["goal"].as_str().expect("case goal"),
                             "synthetic case goal",
@@ -3061,7 +3061,7 @@ mod tests {
                 .push(json!(production.id));
         }
         for case in manifest["cases"].as_array_mut().expect("cases array") {
-            if case["quickjs"] != "accept"
+            if case["fusor"] != "accept"
                 || !case["productions"]
                     .as_array()
                     .expect("productions array")
@@ -3161,7 +3161,7 @@ mod tests {
         fn new(manifest: &Value) -> Self {
             static NEXT_ID: AtomicU64 = AtomicU64::new(0);
             let root = std::env::temp_dir().join(format!(
-                "quickjs-parser-manifest-{}-{}",
+                "fusor-parser-manifest-{}-{}",
                 std::process::id(),
                 NEXT_ID.fetch_add(1, Ordering::Relaxed)
             ));

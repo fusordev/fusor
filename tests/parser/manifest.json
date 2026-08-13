@@ -609,7 +609,7 @@
         "test262.conf"
       ],
       "difference": {
-        "id": "QJS-OXC-005",
+        "id": "FUS-OXC-005",
         "direction": "frontend-reject",
         "rationale": "Pinned QuickJS admits Annex B HTML comments in Script source, but this port intentionally excludes B.1.3 from its restored web-compatibility subset.",
         "regression": "candidate-reject/script/html-comment.js"
@@ -896,7 +896,7 @@
         "quickjs.c:22261"
       ],
       "difference": {
-        "id": "QJS-OXC-006",
+        "id": "FUS-OXC-006",
         "direction": "frontend-reject",
         "rationale": "Pinned QuickJS keeps Annex B HTML comments under host-forced strict Script parsing, but this port intentionally excludes B.1.3 in every Script profile.",
         "regression": "candidate-reject/strict-script/html-comment.js"
@@ -922,7 +922,7 @@
         "quickjs.c:28225"
       ],
       "difference": {
-        "id": "QJS-OXC-002",
+        "id": "FUS-OXC-002",
         "direction": "frontend-accept",
         "rationale": "Published Oxc follows ES chained-label continue semantics, while pinned QuickJS only makes the label immediately attached to a loop continuable; the Rust compiler deliberately preserves the Oxc semantic result.",
         "regression": "candidate-accept/script/chained-label-continue.js"
@@ -946,7 +946,7 @@
         "quickjs.c:25396"
       ],
       "difference": {
-        "id": "QJS-OXC-004",
+        "id": "FUS-OXC-004",
         "direction": "frontend-accept",
         "rationale": "Pinned QuickJS rejects an instance field named `prototype`, a check its own source marks `XXX: spec: not consistent with method name checks` (quickjs.c:25394). ECMAScript only reserves `constructor` for instance fields and `prototype` for static ones, and V8 accepts the fixture, so the frontend follows the specification.",
         "regression": "candidate-accept/script/invalid-field-name.js"
@@ -969,7 +969,7 @@
         "quickjs.c:22720"
       ],
       "difference": {
-        "id": "QJS-OXC-003",
+        "id": "FUS-OXC-003",
         "direction": "frontend-accept",
         "rationale": "Pinned QuickJS caps parser recursion around 695 nested parentheses and reports `stack overflow`; the Oxc front end parses the same source on its isolated 64 MiB frontend stack. The bounded depth is a QuickJS resource limit rather than ECMAScript grammar, so the frontend keeps accepting well-formed deeply nested sources.",
         "regression": "candidate-accept/script/parser-stack-overflow.js"

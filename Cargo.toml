@@ -1,15 +1,15 @@
 [workspace]
 members = [
-    "crates/qjs-cli",
-    "crates/quickjs-cdp",
-    "crates/quickjs",
-    "crates/quickjs-bytecode",
-    "crates/quickjs-compiler",
-    "crates/quickjs-diagnostics",
-    "crates/quickjs-frontend",
-    "crates/quickjs-intl",
-    "crates/quickjs-regexp",
-    "crates/quickjs-runtime",
+    "crates/fusor-cli",
+    "crates/fusor-cdp",
+    "crates/fusor",
+    "crates/fusor-bytecode",
+    "crates/fusor-compiler",
+    "crates/fusor-diagnostics",
+    "crates/fusor-frontend",
+    "crates/fusor-intl",
+    "crates/fusor-regexp",
+    "crates/fusor-runtime",
     "xtask",
 ]
 resolver = "3"

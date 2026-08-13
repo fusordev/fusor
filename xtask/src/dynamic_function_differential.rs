@@ -1,7 +1,7 @@
 //! Differential checks for dynamic Function-constructor source preparation.
 
 use crate::{ProgramOutput, Status, run_program_with_arguments_bounded, validate_executable};
-use quickjs_frontend::{
+use fusor_frontend::{
     DiagnosticStage, DynamicFunctionKind, DynamicFunctionSource, FrontendLimits, SourceFragment,
     with_dynamic_function_source,
 };
@@ -559,7 +559,7 @@ impl TempOracleCase {
         for _ in 0..MAX_TEMP_DIRECTORY_ATTEMPTS {
             let counter = TEMP_DIRECTORY_COUNTER.fetch_add(1, Ordering::Relaxed);
             let directory = root.join(format!(
-                "quickjs-dynamic-function-qjsc-{}-{counter}",
+                "fusor-dynamic-function-qjsc-{}-{counter}",
                 std::process::id()
             ));
             match fs::create_dir(&directory) {
@@ -743,7 +743,7 @@ mod tests {
         contains_json_unicode_escape, observe_candidate, parse_fixture_value,
     };
     use crate::{ProgramOutput, Status};
-    use quickjs_frontend::DynamicFunctionKind;
+    use fusor_frontend::DynamicFunctionKind;
     use serde_json::json;
     use std::fs;
     use std::path::{Path, PathBuf};
