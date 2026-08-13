@@ -54,7 +54,10 @@ impl NodeLikeResolver {
         Self { cwd, argv }
     }
 
-    fn load_builtin(&self, specifier: &str) -> Option<Result<LoadedModuleSource, ModuleSourceError>> {
+    fn load_builtin(
+        &self,
+        specifier: &str,
+    ) -> Option<Result<LoadedModuleSource, ModuleSourceError>> {
         if let Some(name) = specifier.strip_prefix(NODE_SCHEME) {
             return Some(builtin_source(name, &self.cwd, &self.argv));
         }
@@ -66,11 +69,19 @@ impl NodeLikeResolver {
 
     /// Resolves a non-builtin specifier to a candidate filesystem path without
     /// performing any extension fallback.
-    fn resolve_path(&self, specifier: &str, referrer: Option<&str>) -> Result<PathBuf, ModuleSourceError> {
+    fn resolve_path(
+        &self,
+        specifier: &str,
+        referrer: Option<&str>,
+    ) -> Result<PathBuf, ModuleSourceError> {
         if specifier.starts_with('/') {
             return Ok(normalize_path(Path::new(specifier)));
         }
-        if specifier == "." || specifier == ".." || specifier.starts_with("./") || specifier.starts_with("../") {
+        if specifier == "."
+            || specifier == ".."
+            || specifier.starts_with("./")
+            || specifier.starts_with("../")
+        {
             // A script-level `import()` has no module referrer; resolve its
             // relative specifier against the process cwd, like Node's REPL.
             let directory = match referrer {
@@ -146,8 +157,9 @@ fn builtin_source(
     cwd: &Path,
     argv: &[String],
 ) -> Result<LoadedModuleSource, ModuleSourceError> {
-    let source = builtins::source(name, cwd, argv)
-        .ok_or_else(|| ModuleSourceError::new(format!("no such builtin module '{NODE_SCHEME}{name}'")))?;
+    let source = builtins::source(name, cwd, argv).ok_or_else(|| {
+        ModuleSourceError::new(format!("no such builtin module '{NODE_SCHEME}{name}'"))
+    })?;
     let canonical = format!("{NODE_SCHEME}{name}");
     Ok(LoadedModuleSource {
         key: ModuleKey::new(Arc::from(canonical.as_str())),
@@ -266,10 +278,16 @@ mod tests {
 
     #[test]
     fn normalizes_dot_segments_lexically() {
-        assert_eq!(normalize_path(Path::new("/a/b/../c")), PathBuf::from("/a/c"));
+        assert_eq!(
+            normalize_path(Path::new("/a/b/../c")),
+            PathBuf::from("/a/c")
+        );
         assert_eq!(normalize_path(Path::new("/a/./b/")), PathBuf::from("/a/b"));
         assert_eq!(normalize_path(Path::new("/../../a")), PathBuf::from("/a"));
-        assert_eq!(normalize_path(Path::new("/a/b/c.mjs")), PathBuf::from("/a/b/c.mjs"));
+        assert_eq!(
+            normalize_path(Path::new("/a/b/c.mjs")),
+            PathBuf::from("/a/b/c.mjs")
+        );
     }
 
     #[test]
@@ -332,11 +350,15 @@ mod tests {
         assert!(loaded.source.contains("strictEqual"));
 
         // A bare builtin name canonicalizes to its `node:` key.
-        let bare = resolver.load_module("assert", None).expect("bare builtin loads");
+        let bare = resolver
+            .load_module("assert", None)
+            .expect("bare builtin loads");
         assert_eq!(bare.key.as_str(), "node:assert");
         assert_eq!(bare.display_name, "node:assert");
 
-        let path = resolver.load_module("node:path", None).expect("node:path loads");
+        let path = resolver
+            .load_module("node:path", None)
+            .expect("node:path loads");
         assert!(path.source.contains("join"));
 
         resolver

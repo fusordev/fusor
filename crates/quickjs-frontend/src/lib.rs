@@ -24,8 +24,9 @@ pub use frontend::{
     FrontendOptions, FrontendSourceError, GlobalScriptGoal, IndirectEvalGoal,
     IsolatedFrontendContext, ModuleRecord, ParseMode, ParsedUnit, PreparedDynamicFunctionSource,
     Program, RegisteredFrontendDiagnostics, RegisteredFrontendError, Scoping, Semantic,
-    SourceFragment, Span, UnsupportedCompilationGoal, parse, with_dynamic_function_source,
-    with_dynamic_function_source_and_prepared, with_parsed_program, with_registered_program,
+    SourceFragment, Span, UnsupportedCompilationGoal, has_top_level_declarations, parse,
+    with_dynamic_function_source, with_dynamic_function_source_and_prepared, with_parsed_program,
+    with_registered_program,
 };
 pub use module_syntax::{
     ImportAttribute, ImportAttributeKeyword, ImportAttributes, ModuleExportEntry,

@@ -2569,7 +2569,10 @@ fn dispatch_host_function(
         })?;
 
     let mut context = crate::Context { runtime, realm };
-    let result = callback(&mut context, crate::HostCall::new(this, arguments, new_target));
+    let result = callback(
+        &mut context,
+        crate::HostCall::new(this, arguments, new_target),
+    );
     context.runtime.host_functions[id.index()] = Some(callback);
 
     match result {

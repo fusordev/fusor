@@ -4473,7 +4473,8 @@ impl HeapObject {
             HeapObjectKind::Proxy(state) => Some(state),
             _ => None,
         }
-    }    pub(crate) const fn proxy_state_mut(&mut self) -> Option<&mut ProxyState> {
+    }
+    pub(crate) const fn proxy_state_mut(&mut self) -> Option<&mut ProxyState> {
         match &mut self.kind {
             HeapObjectKind::Proxy(state) => Some(state),
             _ => None,

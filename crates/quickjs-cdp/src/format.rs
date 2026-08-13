@@ -1,4 +1,4 @@
-//! Completion-value formatting for the REPL and smoke output.
+//! Completion-value formatting shared by the inspector and the REPL.
 
 use quickjs_runtime::{JsValue, ValueKind};
 
@@ -8,7 +8,7 @@ const MAX_STRING_UNITS: usize = 4096;
 /// Formats a completion value with a simple, deterministic rendering:
 /// numbers, quoted strings, `undefined`/`null`/booleans, and shallow
 /// placeholders for objects, functions, symbols, and bigints.
-pub(crate) fn format_value(value: &JsValue) -> String {
+pub fn format_value(value: &JsValue) -> String {
     let Ok(kind) = value.kind() else {
         return "<released value>".to_owned();
     };
@@ -26,7 +26,8 @@ pub(crate) fn format_value(value: &JsValue) -> String {
         ValueKind::String => match value.as_string() {
             Ok(Some(string)) => {
                 let units: Vec<u16> = string.code_units().take(MAX_STRING_UNITS + 1).collect();
-                let mut text = String::from_utf16_lossy(&units[..units.len().min(MAX_STRING_UNITS)]);
+                let mut text =
+                    String::from_utf16_lossy(&units[..units.len().min(MAX_STRING_UNITS)]);
                 if units.len() > MAX_STRING_UNITS {
                     text.push('…');
                 }
@@ -54,7 +55,7 @@ fn format_number(value: f64) -> String {
 
 /// Formats one `print` argument: strings render raw (Node `console.log`
 /// style), everything else uses the completion-value rendering.
-pub(crate) fn format_argument(value: &JsValue) -> String {
+pub fn format_argument(value: &JsValue) -> String {
     let Ok(kind) = value.kind() else {
         return "<released value>".to_owned();
     };
@@ -82,8 +83,13 @@ mod tests {
         let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
         let realm = runtime.create_realm().expect("realm");
         let mut context = runtime.context(&realm).expect("context");
-        let value = evaluate_script(&mut context, source, "format-test.js", ScriptLimits::default())
-            .expect("script evaluates");
+        let value = evaluate_script(
+            &mut context,
+            source,
+            "format-test.js",
+            ScriptLimits::default(),
+        )
+        .expect("script evaluates");
         format_value(&value)
     }
 

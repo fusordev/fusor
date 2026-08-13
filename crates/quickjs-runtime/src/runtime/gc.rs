@@ -1577,9 +1577,7 @@ impl Runtime {
                                                         &mut work,
                                                     );
                                                 }
-                                                PromiseReactionTarget::AsyncModule {
-                                                    ..
-                                                } => {}
+                                                PromiseReactionTarget::AsyncModule { .. } => {}
                                                 PromiseReactionTarget::FinishDynamicImport {
                                                     promise,
                                                     ..

@@ -481,11 +481,12 @@ pub(crate) fn complete_dynamic_import_load(
         )
         .map_err(native_failure_to_execution);
     }
-    let namespace = crate::runtime::modules::get_or_create_namespace(runtime, module).map_err(
-        |_| EngineFault::RuntimeInvariant {
-            message: "namespace creation failed after successful module evaluation",
-        },
-    )?;
+    let namespace =
+        crate::runtime::modules::get_or_create_namespace(runtime, module).map_err(|_| {
+            EngineFault::RuntimeInvariant {
+                message: "namespace creation failed after successful module evaluation",
+            }
+        })?;
     settle_parked_import(runtime, promise, StoredValue::Object(namespace), false)
 }
 
@@ -520,12 +521,8 @@ fn reject_parked_import(
     kind: ExceptionKind,
     message: &str,
 ) -> Result<(), ExecutionError> {
-    let object = runtime.materialize_error_object(
-        realm,
-        kind,
-        JsString::from_utf8(message)?,
-        None,
-    )?;
+    let object =
+        runtime.materialize_error_object(realm, kind, JsString::from_utf8(message)?, None)?;
     settle_parked_import(runtime, promise, StoredValue::Object(object), true)
 }
 

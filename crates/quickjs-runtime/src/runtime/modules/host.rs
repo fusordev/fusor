@@ -85,7 +85,10 @@ pub fn default_import_meta_resolve(specifier: &str, referrer_url: &str) -> Strin
         Some(index) => &referrer_url[..index],
         None => "",
     };
-    let mut segments: Vec<&str> = base.split('/').filter(|segment| !segment.is_empty()).collect();
+    let mut segments: Vec<&str> = base
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect();
     for segment in specifier.split('/') {
         match segment {
             "" | "." => {}

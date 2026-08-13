@@ -50,19 +50,27 @@ pub(crate) async fn drain_pending_imports(
         let reads = batch
             .iter()
             .map(|import| {
-                resolver.resolve_request(&import.specifier(), import.referrer().map(ModuleKey::as_str))
+                resolver.resolve_request(
+                    &import.specifier(),
+                    import.referrer().map(ModuleKey::as_str),
+                )
             })
-            .map(|resolved| tokio::spawn(async move {
-                match resolved {
-                    Ok(request) => request.read().await,
-                    Err(error) => Err(error),
-                }
-            }))
+            .map(|resolved| {
+                tokio::spawn(async move {
+                    match resolved {
+                        Ok(request) => request.read().await,
+                        Err(error) => Err(error),
+                    }
+                })
+            })
             .collect::<Vec<_>>();
-        let mut roots: Vec<Result<LoadedModuleSource, ModuleSourceError>> = Vec::with_capacity(reads.len());
+        let mut roots: Vec<Result<LoadedModuleSource, ModuleSourceError>> =
+            Vec::with_capacity(reads.len());
         for read in reads {
             roots.push(read.await.unwrap_or_else(|error| {
-                Err(ModuleSourceError::new(format!("module read task failed: {error}")))
+                Err(ModuleSourceError::new(format!(
+                    "module read task failed: {error}"
+                )))
             }));
         }
         for (import, root) in batch.into_iter().zip(roots) {
@@ -107,7 +115,11 @@ mod tests {
     /// Gathers and evaluates `source` as a module, drains parked dynamic
     /// imports through the async driver, then runs `probe` as a script
     /// (throwing on mismatch).
-    async fn run_entry(directory: &std::path::Path, source: &str, probe: &str) -> Result<(), String> {
+    async fn run_entry(
+        directory: &std::path::Path,
+        source: &str,
+        probe: &str,
+    ) -> Result<(), String> {
         let mut runtime = Runtime::try_new(RuntimeLimits::default()).map_err(|e| e.to_string())?;
         let realm = runtime.create_realm().map_err(|e| e.to_string())?;
         let mut context = runtime.context(&realm).map_err(|e| e.to_string())?;

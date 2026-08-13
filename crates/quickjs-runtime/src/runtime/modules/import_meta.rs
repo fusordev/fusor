@@ -10,12 +10,12 @@
 
 use super::ModuleRecordId;
 use crate::object::{HeapObject, ObjectRecord};
+use crate::runtime::HeapReference;
 use crate::runtime::{
     FunctionImplementation, HeapFunction, NativeFunction, NativeFunctionKind, ObjectId, Runtime,
     StoredValue,
 };
 use crate::string::JsString;
-use crate::runtime::HeapReference;
 use crate::{ExecutionError, PredefinedAtom, PropertyLayout};
 
 /// Returns the module's lazily materialized `import.meta` object.
@@ -55,12 +55,12 @@ pub(crate) fn get_or_create_import_meta(
     // references it; both records are fully built before insertion, so a
     // failure cannot leave a partially initialized property layout behind.
     let mut resolve_record = ObjectRecord::empty(Some(function_prototype));
-    resolve_record.try_reserve_data(2).map_err(|_| {
-        ExecutionError::AllocationFailed {
+    resolve_record
+        .try_reserve_data(2)
+        .map_err(|_| ExecutionError::AllocationFailed {
             resource: crate::RuntimeResource::ObjectProperties,
             additional: 2,
-        }
-    })?;
+        })?;
     resolve_record
         .append_data(
             length_key,

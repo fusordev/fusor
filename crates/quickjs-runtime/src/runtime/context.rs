@@ -339,6 +339,31 @@ impl Context<'_> {
         self.runtime.error_object_kind(*object).map_err(Into::into)
     }
 
+    /// Reports whether a live object is a Proxy exotic object.
+    ///
+    /// # Errors
+    ///
+    /// Returns a handle error for an orphaned, foreign, or stale value, or an
+    /// engine fault if the runtime heap does not contain the object.
+    pub fn object_is_proxy(&self, value: &JsValue) -> Result<bool, crate::ExecutionError> {
+        let owner = value.owner()?;
+        self.runtime.validate_owner(&owner, HandleKind::Value)?;
+        let StoredValue::Object(object) = value.stored()? else {
+            return Ok(false);
+        };
+        Ok(self
+            .runtime
+            .objects
+            .get(*object)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "object",
+                index: object.index(),
+                generation: object.generation(),
+            })?
+            .proxy_state()
+            .is_some())
+    }
+
     /// Transactionally installs complete verified bytecode and materializes
     /// its root function in this context's realm.
     ///
@@ -1103,18 +1128,12 @@ impl Context<'_> {
         F: crate::HostCallback + 'static,
     {
         let index = self.runtime.host_functions.len();
-        self.runtime
-            .host_functions
-            .push(Some(Box::new(callback)));
+        self.runtime.host_functions.push(Some(Box::new(callback)));
         let id = super::HostFunctionId::new(index);
 
         let prototype = self.runtime.realm_function_prototype(self.realm)?;
-        let name_key = self
-            .runtime
-            .predefined_property_key(PredefinedAtom::Name);
-        let length_key = self
-            .runtime
-            .predefined_property_key(PredefinedAtom::Length);
+        let name_key = self.runtime.predefined_property_key(PredefinedAtom::Name);
+        let length_key = self.runtime.predefined_property_key(PredefinedAtom::Length);
         let function_name = JsString::from_utf8(name).map_err(crate::ExecutionError::from)?;
         let mut record = ObjectRecord::empty(Some(HeapReference::Function(prototype)));
         record
@@ -1149,13 +1168,12 @@ impl Context<'_> {
             self.runtime.limits.max_heap_functions,
             usize_to_u64(self.runtime.functions.len()).saturating_add(1),
         )?;
-        self.runtime
-            .functions
-            .try_reserve(1)
-            .map_err(|_| crate::ExecutionError::AllocationFailed {
+        self.runtime.functions.try_reserve(1).map_err(|_| {
+            crate::ExecutionError::AllocationFailed {
                 resource: RuntimeResource::HeapFunctions,
                 additional: 1,
-            })?;
+            }
+        })?;
         let function = self
             .runtime
             .insert_heap_function(HeapFunction {
@@ -1171,9 +1189,7 @@ impl Context<'_> {
                 additional: 1,
             })?;
         self.runtime.collection_pending = true;
-        let value = self
-            .runtime
-            .public_value(StoredValue::Function(function))?;
+        let value = self.runtime.public_value(StoredValue::Function(function))?;
         Ok(Function::from_root(value))
     }
 
@@ -1281,10 +1297,7 @@ impl Context<'_> {
     }
 
     /// Links a module graph starting from the given root key.
-    pub fn link_module(
-        &mut self,
-        root: &super::ModuleKey,
-    ) -> Result<(), super::ModuleError> {
+    pub fn link_module(&mut self, root: &super::ModuleKey) -> Result<(), super::ModuleError> {
         let id = self
             .runtime
             .realms

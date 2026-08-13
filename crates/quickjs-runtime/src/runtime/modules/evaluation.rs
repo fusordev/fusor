@@ -154,32 +154,33 @@ pub fn evaluate_module(
                 // dependency becomes a pending async dependency of this
                 // module.
                 for dep in evaluation_list {
-                    let async_dependency = if module_status(runtime, dep)
-                        == ModuleStatus::Evaluating
-                    {
-                        let dep_ancestor = runtime
-                            .modules
-                            .get(dep)
-                            .and_then(|r| r.dfs_ancestor_index)
-                            .unwrap_or(u32::MAX);
-                        if let Some(record) = runtime.modules.get_mut(module) {
-                            let ancestor =
-                                record.dfs_ancestor_index.unwrap_or(u32::MAX).min(dep_ancestor);
-                            record.dfs_ancestor_index = Some(ancestor);
-                        }
-                        dep
-                    } else {
-                        let cycle_root = runtime
-                            .modules
-                            .get(dep)
-                            .and_then(|r| r.cycle_root)
-                            .unwrap_or(dep);
-                        if module_status(runtime, cycle_root) == ModuleStatus::Errored {
-                            let error = module_evaluation_error(runtime, cycle_root);
-                            return fail_evaluation(runtime, root, realm, &stack, error);
-                        }
-                        cycle_root
-                    };
+                    let async_dependency =
+                        if module_status(runtime, dep) == ModuleStatus::Evaluating {
+                            let dep_ancestor = runtime
+                                .modules
+                                .get(dep)
+                                .and_then(|r| r.dfs_ancestor_index)
+                                .unwrap_or(u32::MAX);
+                            if let Some(record) = runtime.modules.get_mut(module) {
+                                let ancestor = record
+                                    .dfs_ancestor_index
+                                    .unwrap_or(u32::MAX)
+                                    .min(dep_ancestor);
+                                record.dfs_ancestor_index = Some(ancestor);
+                            }
+                            dep
+                        } else {
+                            let cycle_root = runtime
+                                .modules
+                                .get(dep)
+                                .and_then(|r| r.cycle_root)
+                                .unwrap_or(dep);
+                            if module_status(runtime, cycle_root) == ModuleStatus::Errored {
+                                let error = module_evaluation_error(runtime, cycle_root);
+                                return fail_evaluation(runtime, root, realm, &stack, error);
+                            }
+                            cycle_root
+                        };
                     let dep_is_async = runtime
                         .modules
                         .get(async_dependency)
@@ -436,13 +437,11 @@ pub(crate) fn async_module_execution_fulfilled(
                 }
             }
             Err(error) => {
-                let realm = runtime
-                    .modules
-                    .get(ancestor)
-                    .map(|r| r.realm)
-                    .ok_or(crate::EngineFault::RuntimeInvariant {
+                let realm = runtime.modules.get(ancestor).map(|r| r.realm).ok_or(
+                    crate::EngineFault::RuntimeInvariant {
                         message: "executing deferred module body lost its record",
-                    })?;
+                    },
+                )?;
                 let value = crate::vm::module_error_rejection_value(runtime, realm, &error)?;
                 reject_async_module_tree(runtime, ancestor, &value, &error)?;
             }

@@ -19,23 +19,22 @@ use super::{
     Runtime,
 };
 
+mod evaluation;
 mod host;
 mod import_meta;
 mod linking;
-mod evaluation;
 mod namespace;
 
-pub use host::{ImportMetaHook, ModuleLoader, ModuleResolveError, default_import_meta_resolve};
-pub use linking::{ModuleLinkError, link_module};
-pub(crate) use linking::{get_or_create_namespace, get_or_create_namespace_phase};
 pub use evaluation::{ModuleEvaluationError, evaluate_module};
 pub(crate) use evaluation::{
     async_module_execution_fulfilled, async_module_execution_rejected,
-    gather_async_transitive_dependencies, module_is_evaluating_async,
-    module_top_level_capability,
+    gather_async_transitive_dependencies, module_is_evaluating_async, module_top_level_capability,
 };
-pub(crate) use namespace::{DeferredNamespaceEvaluationFailure, ModuleNamespaceState};
+pub use host::{ImportMetaHook, ModuleLoader, ModuleResolveError, default_import_meta_resolve};
 pub(crate) use import_meta::get_or_create_import_meta;
+pub use linking::{ModuleLinkError, link_module};
+pub(crate) use linking::{get_or_create_namespace, get_or_create_namespace_phase};
+pub(crate) use namespace::{DeferredNamespaceEvaluationFailure, ModuleNamespaceState};
 
 use std::fmt;
 
@@ -263,9 +262,7 @@ pub(crate) enum ResolvedExport {
     },
     /// The module namespace object of `module` (ResolveExport of an
     /// `export * as name` entry; [[BindingName]] is ~namespace~).
-    Namespace {
-        module: ModuleRecordId,
-    },
+    Namespace { module: ModuleRecordId },
 }
 
 /// One source-text module record.

@@ -14,8 +14,8 @@ pub use oxc_ast::ast::Program;
 use oxc_ast::{
     AstKind,
     ast::{
-        Argument, Directive, Expression, ImportPhase, Statement,
-        VariableDeclarationKind, WithClauseKeyword,
+        Argument, Directive, Expression, ImportPhase, Statement, VariableDeclarationKind,
+        WithClauseKeyword,
     },
     builder::AstBuilder,
 };
@@ -3579,6 +3579,33 @@ where
     R: Send,
 {
     IsolatedFrontendContext::new().with_parsed_program(source_text, options, callback)
+}
+
+/// Reports whether the source's top level contains a global declaration
+/// statement (`var`, `let`, `const`, `function`, or `class`).
+///
+/// Side-effect-free evaluation probes (CDP `throwOnSideEffect`) use this to
+/// skip sources whose execution would commit a global binding; declarations
+/// nested inside blocks or function bodies are not global bindings and do not
+/// count.
+///
+/// # Errors
+///
+/// Returns the exact frontend rejection for an unparseable source.
+pub fn has_top_level_declarations<'scope, 'arena>(
+    source_text: &str,
+    options: FrontendOptions<'scope>,
+) -> Result<bool, FrontendError> {
+    with_parsed_program(source_text, options, |unit| {
+        unit.program().body.iter().any(|statement| {
+            matches!(
+                statement,
+                Statement::VariableDeclaration(_)
+                    | Statement::FunctionDeclaration(_)
+                    | Statement::ClassDeclaration(_)
+            )
+        })
+    })
 }
 
 /// Parses one registered source inside a short-lived Oxc arena.

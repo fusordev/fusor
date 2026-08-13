@@ -30,15 +30,16 @@ use std::sync::Arc;
 use super::{
     BindingCell, BindingCellId, BytecodeFunction, CompilerCaptureLayout, CompilerCapturedBinding,
     CompilerClosureBinding, CompilerClosureSource, CompilerConstant, CompilerConstantValue,
-    EnvironmentBinding, FrameBindingAddress, FunctionId, FunctionImplementation, FunctionTemplateId,
-    GlobalDeclarationRejectionKind, HeapFunction, HashSet, HeapReference, InstallError,
-    InstalledCode, InstalledCodeId, InstalledConstant, InstalledRoot, InstalledTemplate,
-    InstalledTemplateElement, InstalledTemplateObject, JsBigInt, JsNumber, JsValue, OwnProperty,
-    PropertyKey, RealmGlobalBinding, RealmGlobalBindingState, RealmGlobalRequest, RealmId,
-    RootEnvironment, RootTarget, Runtime, RuntimeError, RuntimeResource, SlotValue, StoredValue,
-    VerifiedBytecode, check_execution_limit, check_install_limit, preflight_opcodes,
-    global_declaration_property_layout, global_function_replacement_layout,
-    rejected_global_declaration, runtime_string, stale_heap_reference, usize_to_u64,
+    EnvironmentBinding, FrameBindingAddress, FunctionId, FunctionImplementation,
+    FunctionTemplateId, GlobalDeclarationRejectionKind, HashSet, HeapFunction, HeapReference,
+    InstallError, InstalledCode, InstalledCodeId, InstalledConstant, InstalledRoot,
+    InstalledTemplate, InstalledTemplateElement, InstalledTemplateObject, JsBigInt, JsNumber,
+    JsValue, OwnProperty, PropertyKey, RealmGlobalBinding, RealmGlobalBindingState,
+    RealmGlobalRequest, RealmId, RootEnvironment, RootTarget, Runtime, RuntimeError,
+    RuntimeResource, SlotValue, StoredValue, VerifiedBytecode, check_execution_limit,
+    check_install_limit, global_declaration_property_layout, global_function_replacement_layout,
+    preflight_opcodes, rejected_global_declaration, runtime_string, stale_heap_reference,
+    usize_to_u64,
 };
 
 fn stage_constant(constant: &CompilerConstant) -> Result<InstalledConstant, InstallError> {
@@ -159,11 +160,12 @@ impl Runtime {
                 resource: RuntimeResource::InstalledCode,
                 additional: 1,
             })?;
-        let function_prototype = HeapReference::Function(
-            self.realm_function_prototype(realm).map_err(|_| InstallError::AuthorityInvariant {
-                message: "constructor realm has no Function.prototype intrinsic",
-            })?,
-        );
+        let function_prototype =
+            HeapReference::Function(self.realm_function_prototype(realm).map_err(|_| {
+                InstallError::AuthorityInvariant {
+                    message: "constructor realm has no Function.prototype intrinsic",
+                }
+            })?);
         let function_record = crate::object::ObjectRecord::empty(Some(function_prototype));
         let function = self
             .insert_heap_function(HeapFunction {
@@ -211,30 +213,36 @@ impl Runtime {
         module_environment: &[BindingCellId],
         parent_environment: &[EnvironmentBinding],
     ) -> Result<FunctionId, InstallError> {
-        let installed = self.code.get(code).ok_or(InstallError::AuthorityInvariant {
-            message: "module installed code is stale",
-        })?;
-        let installed_index = usize::try_from(child.get()).map_err(|_| {
-            InstallError::AuthorityInvariant {
+        let installed = self
+            .code
+            .get(code)
+            .ok_or(InstallError::AuthorityInvariant {
+                message: "module installed code is stale",
+            })?;
+        let installed_index =
+            usize::try_from(child.get()).map_err(|_| InstallError::AuthorityInvariant {
                 message: "function template index is not representable",
-            }
-        })?;
-        let template = installed.templates.get(installed_index).ok_or(
-            InstallError::AuthorityInvariant {
-                message: "module function template is missing",
-            },
-        )?;
-        let child_function = authority.function(child).ok_or(InstallError::AuthorityInvariant {
-            message: "module function template not found in authority",
-        })?;
+            })?;
+        let template =
+            installed
+                .templates
+                .get(installed_index)
+                .ok_or(InstallError::AuthorityInvariant {
+                    message: "module function template is missing",
+                })?;
+        let child_function = authority
+            .function(child)
+            .ok_or(InstallError::AuthorityInvariant {
+                message: "module function template not found in authority",
+            })?;
         let sources = child_function.function().closure_sources();
         let mut environment = Vec::new();
-        environment
-            .try_reserve_exact(sources.len())
-            .map_err(|_| InstallError::AllocationFailed {
+        environment.try_reserve_exact(sources.len()).map_err(|_| {
+            InstallError::AllocationFailed {
                 resource: RuntimeResource::BindingCells,
                 additional: sources.len(),
-            })?;
+            }
+        })?;
         for source in sources {
             match *source {
                 CompilerClosureSource::Module { index } => {
@@ -312,8 +320,7 @@ impl Runtime {
                             .insert(name, global);
                         if prior.is_some() {
                             return Err(InstallError::AuthorityInvariant {
-                                message:
-                                    "constructor-realm global insertion replaced an existing binding",
+                                message: "constructor-realm global insertion replaced an existing binding",
                             });
                         }
                         global
@@ -356,13 +363,12 @@ impl Runtime {
             }
         }
         let eval_shadows = vec![None; environment.len()];
-        let function_prototype = HeapReference::Function(
-            self.realm_function_prototype(realm).map_err(|_| {
+        let function_prototype =
+            HeapReference::Function(self.realm_function_prototype(realm).map_err(|_| {
                 InstallError::AuthorityInvariant {
                     message: "constructor realm has no Function.prototype intrinsic",
                 }
-            })?,
-        );
+            })?);
         let function_record = crate::object::ObjectRecord::empty(Some(function_prototype));
         check_install_limit(
             RuntimeResource::HeapFunctions,

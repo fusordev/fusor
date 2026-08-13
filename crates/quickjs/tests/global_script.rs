@@ -1,7 +1,9 @@
+use std::sync::{Arc, Mutex};
+
 use quickjs::{ScriptEvaluationError, ScriptLimits, evaluate_script};
 use quickjs_runtime::{
-    ErrorObjectKind, ExceptionKind, ExecutionError, GlobalScriptError, JsNumber, Runtime,
-    RuntimeLimits,
+    DebugExecutionSnapshot, DebuggerHook, ErrorObjectKind, ExceptionKind, ExecutionError,
+    GlobalScriptError, JsNumber, Runtime, RuntimeLimits,
 };
 
 fn number(value: &quickjs_runtime::JsValue) -> JsNumber {
@@ -25,6 +27,48 @@ fn exception_kind(error: ScriptEvaluationError) -> ExceptionKind {
         panic!("expected a JavaScript exception");
     };
     exception.kind().expect("engine exception kind")
+}
+
+#[derive(Default)]
+struct RecordingDebugger {
+    locations: Mutex<Vec<(String, u32, bool)>>,
+}
+
+impl DebuggerHook for RecordingDebugger {
+    fn on_instruction(&self, snapshot: &DebugExecutionSnapshot) {
+        let location = snapshot.location();
+        self.locations.lock().expect("locations").push((
+            location.source_name().to_owned(),
+            location.source_span().start(),
+            snapshot.is_debugger_statement(),
+        ));
+    }
+}
+
+#[test]
+fn debugger_hook_observes_verified_instruction_locations_and_debugger_statements() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let hook = Arc::new(RecordingDebugger::default());
+    runtime.set_debugger_hook(hook.clone());
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+
+    evaluate_script(
+        &mut context,
+        "let total = 1; debugger; total + 1;",
+        "debug-hook.js",
+        ScriptLimits::default(),
+    )
+    .expect("script evaluates");
+
+    let locations = hook.locations.lock().expect("locations");
+    assert!(locations.len() > 1);
+    assert!(
+        locations
+            .iter()
+            .all(|(source, _, _)| source == "debug-hook.js")
+    );
+    assert!(locations.iter().any(|(_, _, debugger)| *debugger));
 }
 
 #[test]
@@ -850,4 +894,38 @@ fn tagged_template_site_cache_remains_live_through_cycle_collection() {
     )
     .expect("cached site survives collection");
     assert_eq!(string(&value), "alive|true");
+}
+
+#[test]
+fn compile_script_accepts_scripts_without_executing_them() {
+    let result = quickjs::compile_script(
+        "throw new Error('boom')",
+        "compile-test.js",
+        ScriptLimits::default(),
+    );
+    assert!(
+        result.is_ok(),
+        "runtime-throwing scripts must still compile: {result:?}"
+    );
+}
+
+#[test]
+fn compile_script_rejects_syntax_errors() {
+    let error = quickjs::compile_script("function (", "broken.js", ScriptLimits::default())
+        .expect_err("syntax errors must be rejected");
+    let quickjs::ScriptCompileError::Frontend(frontend) = &error else {
+        panic!("expected a frontend rejection, got {error}");
+    };
+    let diagnostic = frontend
+        .diagnostics()
+        .first()
+        .expect("at least one frontend diagnostic");
+    assert!(
+        !diagnostic.message.is_empty(),
+        "syntax diagnostics carry a message"
+    );
+    assert!(
+        diagnostic.labels.iter().any(|label| label.span.start > 0),
+        "syntax diagnostics carry a source span"
+    );
 }

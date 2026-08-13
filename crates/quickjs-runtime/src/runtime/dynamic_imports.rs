@@ -107,12 +107,12 @@ impl Runtime {
             self.limits.max_pending_dynamic_imports,
             super::usize_to_u64(self.pending_dynamic_imports.len()).saturating_add(1),
         )?;
-        self.pending_dynamic_imports
-            .try_reserve(1)
-            .map_err(|_| ExecutionError::AllocationFailed {
+        self.pending_dynamic_imports.try_reserve(1).map_err(|_| {
+            ExecutionError::AllocationFailed {
                 resource: RuntimeResource::DynamicImportLoads,
                 additional: 1,
-            })?;
+            }
+        })?;
         self.pending_dynamic_imports
             .push_back(PendingDynamicImportRecord {
                 realm,

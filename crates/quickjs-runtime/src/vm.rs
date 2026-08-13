@@ -43,14 +43,14 @@ use quickjs_bytecode::{
 #[cfg(test)]
 use crate::runtime::ForInAdvance;
 use crate::{
-    ArrayIndex, BigIntError, Context, DirectEvalCallerBinding, DirectEvalCallerBindingLocation,
-    DirectEvalCallerBindingScope, DirectEvalCompileRequest, DirectEvalVariableEnvironment,
-    DynamicFunctionCompileFailure, DynamicFunctionFamily, EngineFault, ExceptionKind,
-    ExecutionError, Function, GlobalDeclarationRejectionKind, HandleError, HandleKind,
-    IndirectEvalCompileRequest, JsBigInt, JsException, JsNumber, JsStackFrame, JsString,
-    JsStringError, JsValue, MAX_STRING_CODE_UNITS, OrdinaryDynamicFunctionCompiler,
-    OrdinaryDynamicFunctionSource, PredefinedAtom, PropertyKey, PropertyLayout, Runtime,
-    RuntimeError, RuntimeResource,
+    ArrayIndex, BigIntError, Context, DebugExecutionSnapshot, DebugLocation,
+    DirectEvalCallerBinding, DirectEvalCallerBindingLocation, DirectEvalCallerBindingScope,
+    DirectEvalCompileRequest, DirectEvalVariableEnvironment, DynamicFunctionCompileFailure,
+    DynamicFunctionFamily, EngineFault, ExceptionKind, ExecutionError, Function,
+    GlobalDeclarationRejectionKind, HandleError, HandleKind, IndirectEvalCompileRequest, JsBigInt,
+    JsException, JsNumber, JsStackFrame, JsString, JsStringError, JsValue, MAX_STRING_CODE_UNITS,
+    OrdinaryDynamicFunctionCompiler, OrdinaryDynamicFunctionSource, PredefinedAtom, PropertyKey,
+    PropertyLayout, Runtime, RuntimeError, RuntimeResource,
     conversion::{
         MAX_SAFE_INTEGER, number_to_index, number_to_int8, number_to_int16, number_to_int32,
         number_to_integer_or_infinity, number_to_length, number_to_uint8, number_to_uint16,
@@ -192,10 +192,9 @@ use {
     bindings::*, conversions::*, data_view::*, date::*, define_property_intrinsics::*, dynamic::*,
     dynamic_import::*, error_stack::*, errors::*, exceptions::*, execution::*, for_in::*,
     from_entries::*, generator::*, group_by::*, import_meta::*, intl::*, iterators::*,
-    json_parse::*,
-    json_stringify::*, locale_string::*, map::*, math::*, math_sum_precise::*, native::*,
-    object_intrinsics::*, promise::*, promise_combinators::*, properties::*, proxy::*, reflect::*,
-    regexp::*, set::*, stack::*, string_methods::*, string_raw::*, string_replace::*,
+    json_parse::*, json_stringify::*, locale_string::*, map::*, math::*, math_sum_precise::*,
+    native::*, object_intrinsics::*, promise::*, promise_combinators::*, properties::*, proxy::*,
+    reflect::*, regexp::*, set::*, stack::*, string_methods::*, string_raw::*, string_replace::*,
     string_split::*, temporal::*, typed_array::*, uint8_array::*, uri::*, weak_collections::*,
     weak_references::*, with_environment::*,
 };
@@ -5494,6 +5493,18 @@ pub(crate) fn call_function_internal(
             compiler,
             &mut execution_budget,
         );
+        let dispatch = match dispatch {
+            Ok(dispatch) => resolve_native_dispatch(
+                runtime,
+                dispatch,
+                &[],
+                0,
+                0,
+                compiler,
+                &mut execution_budget,
+            ),
+            Err(error) => Err(error),
+        };
         return execute_root_dispatch_with_budget(
             runtime,
             dispatch,
@@ -5631,6 +5642,86 @@ fn execute_prepared_frames_with_budget(
     result
 }
 
+fn notify_debugger(runtime: &Runtime, frames: &[Frame]) -> Result<(), ExecutionError> {
+    let Some(hook) = runtime.debugger_hook() else {
+        return Ok(());
+    };
+    let current = frames.last().ok_or(EngineFault::MissingInstruction {
+        function: FunctionTemplateId::new(0),
+        instruction: 0,
+    })?;
+    let location = active_frame_location(runtime, current)?;
+    let mut stack = Vec::new();
+    stack
+        .try_reserve_exact(frames.len())
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::ExceptionFrames,
+            additional: frames.len(),
+        })?;
+    for frame in frames.iter().rev() {
+        let location = active_frame_location(runtime, frame)?;
+        stack.push(DebugLocation::new(
+            location.function(),
+            location.pc(),
+            Arc::from(location.source_name()),
+            Arc::from(location.source_text()),
+            location.source_span(),
+        ));
+    }
+    let debugger_statement = current_instruction_is_debugger_statement(runtime, current)?;
+    hook.on_instruction(&DebugExecutionSnapshot::new(
+        DebugLocation::new(
+            location.function(),
+            location.pc(),
+            Arc::from(location.source_name()),
+            Arc::from(location.source_text()),
+            location.source_span(),
+        ),
+        Arc::from(stack),
+        debugger_statement,
+    ));
+    Ok(())
+}
+
+fn current_instruction_is_debugger_statement(
+    runtime: &Runtime,
+    frame: &Frame,
+) -> Result<bool, EngineFault> {
+    let function = code(runtime, frame.code)?
+        .authority
+        .function(frame.template)
+        .ok_or(EngineFault::InvalidClosureEnvironment {
+            function: frame.template,
+        })?;
+    let instruction = function
+        .function()
+        .control_flow()
+        .instruction(frame.instruction)
+        .ok_or(EngineFault::MissingInstruction {
+            function: frame.template,
+            instruction: frame.instruction.get(),
+        })?;
+    if instruction.decoded().instruction().opcode() != FinalOpcode::Nop {
+        return Ok(false);
+    }
+    let span = function
+        .metadata()
+        .source()
+        .mappings()
+        .get(frame.instruction.get() as usize)
+        .ok_or(EngineFault::MissingPoolEntry {
+            pool: "source mapping",
+            index: frame.instruction.get(),
+        })?
+        .span();
+    let source = function.metadata().source().text();
+    let start = span.start() as usize;
+    let end = span.end() as usize;
+    Ok(source
+        .get(start..end)
+        .is_some_and(|text| text.trim_start().starts_with("debugger")))
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "the iterative bytecode/native transition loop remains centralized so every abrupt path shares one cleanup boundary"
@@ -5657,6 +5748,7 @@ fn execute_frame_loop(
                 executed: execution_budget.executed_instructions,
             });
         }
+        notify_debugger(runtime, frames)?;
         let frame = frames.last_mut().ok_or(EngineFault::MissingInstruction {
             function: FunctionTemplateId::new(0),
             instruction: 0,

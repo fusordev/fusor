@@ -81,13 +81,19 @@ fn run_path_executes_a_static_and_dynamic_graph() {
 fn run_path_failing_assertion_exits_non_zero() {
     let directory = temp_dir("run-fail");
     let _cleanup = Cleanup(directory.clone());
-    write_diamond_fixture(&directory, "assert.strictEqual(b, 99, 'deliberate failure');");
+    write_diamond_fixture(
+        &directory,
+        "assert.strictEqual(b, 99, 'deliberate failure');",
+    );
 
     let output = Command::new(env!("CARGO_BIN_EXE_qjs"))
         .arg(directory.join("entry.mjs"))
         .output()
         .expect("spawn qjs");
-    assert!(!output.status.success(), "failing assertion must exit non-zero");
+    assert!(
+        !output.status.success(),
+        "failing assertion must exit non-zero"
+    );
 }
 
 #[test]
@@ -108,7 +114,9 @@ fn repl_evaluates_a_module_entry_with_a_static_import() {
         .stdin
         .as_mut()
         .expect("stdin")
-        .write_all(b"import { answer } from './answer.mjs'; globalThis.a43 = answer + 1;\na43;\n.exit\n")
+        .write_all(
+            b"import { answer } from './answer.mjs'; globalThis.a43 = answer + 1;\na43;\n.exit\n",
+        )
         .expect("write stdin");
     let output = child.wait_with_output().expect("wait for repl");
     assert!(
@@ -117,7 +125,10 @@ fn repl_evaluates_a_module_entry_with_a_static_import() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("43"), "expected 43 in repl output: {stdout}");
+    assert!(
+        stdout.contains("43"),
+        "expected 43 in repl output: {stdout}"
+    );
 }
 
 #[test]
@@ -165,5 +176,8 @@ fn run_path_rejecting_top_level_await_exits_non_zero() {
         "a rejecting top-level await must exit non-zero"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("boom"), "expected the rejection on stderr: {stderr}");
+    assert!(
+        stderr.contains("boom"),
+        "expected the rejection on stderr: {stderr}"
+    );
 }

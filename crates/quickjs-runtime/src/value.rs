@@ -614,7 +614,11 @@ pub struct HostCall {
 }
 
 impl HostCall {
-    pub(crate) fn new(this: JsValue, arguments: Vec<JsValue>, new_target: Option<Function>) -> Self {
+    pub(crate) fn new(
+        this: JsValue,
+        arguments: Vec<JsValue>,
+        new_target: Option<Function>,
+    ) -> Self {
         Self {
             this,
             arguments,

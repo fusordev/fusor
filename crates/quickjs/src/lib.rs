@@ -18,6 +18,7 @@ use quickjs_bytecode::{
     CompilerInitializationPolicy, CompilerWritePolicy, FunctionGraphVerificationLimits,
     VerificationLimits, VerifiedBytecode,
 };
+pub use quickjs_compiler::CompiledFunctionTree;
 use quickjs_compiler::{
     CompilationContext, CompilerError, LeafCompilationError, SourceTextSubstitution,
 };
@@ -41,8 +42,8 @@ use quickjs_frontend::{
     DirectEvalVariableEnvironment as FrontendDirectEvalVariableEnvironment, DynamicFunctionError,
     DynamicFunctionKind, DynamicFunctionSource, FrontendError, FrontendLimits, FrontendOptions,
     GlobalScriptGoal, IndirectEvalGoal, PreparedDynamicFunctionSource, RegisteredFrontendError,
-    SourceFragment, Span, with_dynamic_function_source_and_prepared, with_parsed_program,
-    with_registered_program,
+    SourceFragment, Span, has_top_level_declarations, with_dynamic_function_source_and_prepared,
+    with_parsed_program, with_registered_program,
 };
 use quickjs_runtime::{
     Context, DirectEvalCallerBindingLocation, DirectEvalCallerBindingScope,
@@ -594,6 +595,98 @@ fn runtime_diagnostic_report(
     Ok(DiagnosticReport::new(diagnostic))
 }
 
+/// Failure of the parse-and-compile stage without execution.
+#[derive(Debug)]
+pub enum ScriptCompileError {
+    /// Parsing, the compatibility profile, or ECMAScript early errors failed.
+    Frontend(FrontendError),
+    /// The parsed Script could not become complete verified bytecode.
+    Compiler(ScriptCompilerError),
+}
+
+impl fmt::Display for ScriptCompileError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Frontend(source) => source.fmt(formatter),
+            Self::Compiler(source) => source.fmt(formatter),
+        }
+    }
+}
+
+impl Error for ScriptCompileError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Frontend(source) => Some(source),
+            Self::Compiler(source) => Some(source),
+        }
+    }
+}
+
+impl From<ScriptCompileError> for ScriptEvaluationError {
+    fn from(error: ScriptCompileError) -> Self {
+        match error {
+            ScriptCompileError::Frontend(error) => Self::Frontend(error),
+            ScriptCompileError::Compiler(error) => Self::Compiler(error),
+        }
+    }
+}
+
+/// Reports whether a Global Script's top level contains a global declaration
+/// statement (`var`, `let`, `const`, `function`, or `class`).
+///
+/// Side-effect-free evaluation probes use this to skip sources whose
+/// execution would commit a global binding.
+///
+/// # Errors
+///
+/// Returns the exact failing frontend stage.
+pub fn has_global_declarations(
+    source_text: &str,
+    limits: ScriptLimits,
+) -> Result<bool, ScriptCompileError> {
+    has_top_level_declarations(
+        source_text,
+        FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new()))
+            .with_limits(limits.frontend),
+    )
+    .map_err(ScriptCompileError::Frontend)
+}
+
+/// Parses, compiles, and final-verifies one host-loaded ECMAScript Global
+/// Script without installing or executing it.
+///
+/// The returned tree is the verified bytecode authority that
+/// [`evaluate_script`] installs and executes.
+///
+/// # Errors
+///
+/// Returns the exact failing frontend or compiler stage.
+pub fn compile_script(
+    source_text: &str,
+    source_name: &str,
+    limits: ScriptLimits,
+) -> Result<CompiledFunctionTree, ScriptCompileError> {
+    let source_name: Arc<str> = Arc::from(source_name);
+    with_parsed_program(
+        source_text,
+        FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new()))
+            .with_limits(limits.frontend),
+        move |unit| {
+            let compiler = CompilationContext::new_with_source_name(unit, source_name)
+                .map_err(ScriptCompilerError::Planning)?;
+            compiler
+                .compile_global_script_with_all_limits(
+                    limits.bytecode,
+                    limits.function_graph,
+                    limits.final_graph,
+                )
+                .map_err(ScriptCompilerError::Lowering)
+        },
+    )
+    .map_err(ScriptCompileError::Frontend)?
+    .map_err(ScriptCompileError::Compiler)
+}
+
 /// Parses, compiles, final-verifies, installs, and executes one host-loaded
 /// ECMAScript Global Script.
 ///
@@ -611,25 +704,24 @@ pub fn evaluate_script(
     source_name: &str,
     limits: ScriptLimits,
 ) -> Result<JsValue, ScriptEvaluationError> {
-    let source_name: Arc<str> = Arc::from(source_name);
-    let compiled = with_parsed_program(
-        source_text,
-        FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new()))
-            .with_limits(limits.frontend),
-        move |unit| {
-            let compiler = CompilationContext::new_with_source_name(unit, source_name)
-                .map_err(ScriptCompilerError::Planning)?;
-            compiler
-                .compile_global_script_with_all_limits(
-                    limits.bytecode,
-                    limits.function_graph,
-                    limits.final_graph,
-                )
-                .map_err(ScriptCompilerError::Lowering)
-        },
-    )
-    .map_err(ScriptEvaluationError::Frontend)?
-    .map_err(ScriptEvaluationError::Compiler)?;
+    let compiled = compile_script(source_text, source_name, limits)?;
+    execute_compiled_script(context, &compiled, limits)
+}
+
+/// Installs and executes one previously compiled Global Script authority.
+///
+/// The authority may be reused across evaluations: installation binds the
+/// script's global declarations into the realm again, exactly as a fresh
+/// evaluation of the same source would.
+///
+/// # Errors
+///
+/// Returns the exact failing installation or execution stage.
+pub fn execute_compiled_script(
+    context: &mut Context<'_>,
+    compiled: &CompiledFunctionTree,
+    limits: ScriptLimits,
+) -> Result<JsValue, ScriptEvaluationError> {
     let authority = Arc::new(compiled.verified_bytecode().clone());
     let dynamic_service: Arc<dyn DynamicFunctionCompiler> = Arc::new(
         OxcDynamicFunctionCompiler::new(limits.dynamic_function_limits()),
@@ -945,10 +1037,12 @@ fn compile_module_source(
                 let supported = entry.key().equals_utf8("type")
                     && (entry.value().equals_utf8("json") || entry.value().equals_utf8("text"));
                 if !supported {
-                    return Err(ModuleEvaluationError::Loader(ModuleSourceError::new(format!(
-                        "unsupported import attribute (request '{}')",
-                        decode_request_specifier(request),
-                    ))));
+                    return Err(ModuleEvaluationError::Loader(ModuleSourceError::new(
+                        format!(
+                            "unsupported import attribute (request '{}')",
+                            decode_request_specifier(request),
+                        ),
+                    )));
                 }
             }
         }
@@ -1245,8 +1339,13 @@ pub fn evaluate_preloaded_module_graph(
     )?;
 
     // BFS: register every preloaded dependency
-    let mut queue: Vec<(quickjs_runtime::ModuleKey, quickjs_frontend::ModuleSyntaxRecord)> =
-        vec![(root_compiled.key.clone(), root_compiled.syntax_record.clone())];
+    let mut queue: Vec<(
+        quickjs_runtime::ModuleKey,
+        quickjs_frontend::ModuleSyntaxRecord,
+    )> = vec![(
+        root_compiled.key.clone(),
+        root_compiled.syntax_record.clone(),
+    )];
     let mut seen: HashSet<String> = HashSet::new();
     seen.insert(root_compiled.key.as_str().to_owned());
 
@@ -1270,13 +1369,9 @@ pub fn evaluate_preloaded_module_graph(
                 continue;
             }
             let source = synthetic_module_source(kind, &loaded.source)?;
-            let compiled = compile_module_source(
-                &source,
-                &loaded.display_name,
-                limits,
-                key.clone(),
-            )
-            .map_err(resolution_failure)?;
+            let compiled =
+                compile_module_source(&source, &loaded.display_name, limits, key.clone())
+                    .map_err(resolution_failure)?;
             context.register_module(
                 compiled.key.clone(),
                 compiled.syntax_record.clone(),
@@ -1368,8 +1463,13 @@ fn gather_dynamic_import_graph(
     }
 
     // BFS: gather all dependencies, as in `evaluate_module`.
-    let mut queue: Vec<(quickjs_runtime::ModuleKey, quickjs_frontend::ModuleSyntaxRecord)> =
-        vec![(root_compiled.key.clone(), root_compiled.syntax_record.clone())];
+    let mut queue: Vec<(
+        quickjs_runtime::ModuleKey,
+        quickjs_frontend::ModuleSyntaxRecord,
+    )> = vec![(
+        root_compiled.key.clone(),
+        root_compiled.syntax_record.clone(),
+    )];
     let mut seen: HashSet<String> = HashSet::new();
     seen.insert(root_compiled.key.as_str().to_owned());
 
@@ -1386,13 +1486,9 @@ fn gather_dynamic_import_graph(
                 continue;
             }
             let source = synthetic_module_source(kind, &loaded.source)?;
-            let compiled = compile_module_source(
-                &source,
-                &loaded.display_name,
-                limits,
-                key.clone(),
-            )
-            .map_err(resolution_failure)?;
+            let compiled =
+                compile_module_source(&source, &loaded.display_name, limits, key.clone())
+                    .map_err(resolution_failure)?;
             context.register_module(
                 compiled.key.clone(),
                 compiled.syntax_record.clone(),
@@ -1493,7 +1589,9 @@ pub fn settle_dynamic_import(
         OxcDynamicFunctionCompiler::new(limits.dynamic_function_limits()),
     );
     let root = match root {
-        Ok(root_source) => gather_dynamic_import_graph(context, loader, &import, &root_source, limits),
+        Ok(root_source) => {
+            gather_dynamic_import_graph(context, loader, &import, &root_source, limits)
+        }
         Err(error) => Err(error.into()),
     };
     match root {
@@ -2622,7 +2720,10 @@ mod embed_tests {
             .call_function(
                 &add_fn,
                 context.undefined_value(),
-                vec![context.number(JsNumber::from_f64(2.0)), context.number(JsNumber::from_f64(3.0))],
+                vec![
+                    context.number(JsNumber::from_f64(2.0)),
+                    context.number(JsNumber::from_f64(3.0)),
+                ],
                 ExecutionLimits::default(),
             )
             .expect("call");
@@ -2630,7 +2731,10 @@ mod embed_tests {
 
         let double = context
             .create_host_function("double", |ctx, call| {
-                let n = call.arguments()[0].as_number().expect("arg").expect("number");
+                let n = call.arguments()[0]
+                    .as_number()
+                    .expect("arg")
+                    .expect("number");
                 Ok(ctx.number(n.add_numeric(n)))
             })
             .expect("host function");
@@ -2646,7 +2750,9 @@ mod embed_tests {
 
         // Thrown exceptions surface as CallError::Thrown.
         let thrown = context
-            .create_host_function("boom", |_ctx, _call| Err(_ctx.string(quickjs_runtime::JsString::from_utf8("boom").unwrap())))
+            .create_host_function("boom", |_ctx, _call| {
+                Err(_ctx.string(quickjs_runtime::JsString::from_utf8("boom").unwrap()))
+            })
             .expect("host function");
         let result = context.call_function(
             &thrown,

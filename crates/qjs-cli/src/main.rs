@@ -3,15 +3,15 @@
 #![forbid(unsafe_code)]
 
 mod builtins;
-mod format;
 mod imports;
 mod loader;
 mod repl;
 mod resolver;
 
-use std::{error::Error, path::Path, process::ExitCode};
+use std::{error::Error, path::Path, process::ExitCode, sync::Arc};
 
 use quickjs::{ScriptLimits, evaluate_preloaded_module_graph, evaluate_script};
+use quickjs_cdp::{self as cdp, format::format_argument};
 use quickjs_runtime::{Runtime, RuntimeLimits};
 
 use crate::resolver::NodeLikeResolver;
@@ -19,9 +19,11 @@ use crate::resolver::NodeLikeResolver;
 const USAGE: &str = "\
 usage:
   qjs <file> [args...]        evaluate <file> as an ES module (default)
-  qjs run [--script] <file>   same, with an explicit subcommand
+  qjs run [--script] [--inspect[=PORT]] [--inspect-brk[=PORT]] <file>
+                                run with optional CDP (default port 9229)
   qjs --script <file>         evaluate <file> as a classic script
-  qjs repl                    start the ESM REPL (.exit or Ctrl-D to quit)";
+  qjs repl [--inspect[=PORT]] [--inspect-brk[=PORT]]
+                                start the ESM REPL with optional CDP (default port 9229)";
 
 /// The whole CLI runs on one shared `current_thread` Tokio runtime. The
 /// engine is synchronous and its GC'd types are not `Send`, so all engine
@@ -31,8 +33,17 @@ usage:
 async fn main() -> ExitCode {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     match parse_arguments(&arguments) {
-        Ok(Command::Repl) => ExitCode::from(repl::run().await),
-        Ok(Command::Run { file, as_script, argv }) => ExitCode::from(run_file(&file, as_script, argv).await),
+        Ok(Command::Repl {
+            inspect_port,
+            inspect_break,
+        }) => ExitCode::from(repl::run(inspect_port, inspect_break).await),
+        Ok(Command::Run {
+            file,
+            as_script,
+            argv,
+            inspect_port,
+            inspect_break,
+        }) => ExitCode::from(run_file(&file, as_script, argv, inspect_port, inspect_break).await),
         Ok(Command::Help) => {
             println!("{USAGE}");
             ExitCode::SUCCESS
@@ -45,31 +56,65 @@ async fn main() -> ExitCode {
 }
 
 enum Command {
-    Repl,
-    Run { file: String, as_script: bool, argv: Vec<String> },
+    Repl {
+        inspect_port: Option<u16>,
+        inspect_break: bool,
+    },
+    Run {
+        file: String,
+        as_script: bool,
+        argv: Vec<String>,
+        inspect_port: Option<u16>,
+        inspect_break: bool,
+    },
     Help,
 }
 
 fn parse_arguments(arguments: &[String]) -> Result<Command, String> {
     if arguments.is_empty() {
-        return Ok(Command::Repl);
+        return Ok(Command::Repl {
+            inspect_port: None,
+            inspect_break: false,
+        });
     }
     if arguments[0] == "-h" || arguments[0] == "--help" {
         return Ok(Command::Help);
     }
     let rest: &[String] = if arguments[0] == "repl" {
-        return Ok(Command::Repl);
+        return parse_repl_arguments(&arguments[1..]);
     } else if arguments[0] == "run" {
         &arguments[1..]
     } else {
         arguments
     };
     let mut as_script = false;
+    let mut inspect_port = None;
+    let mut inspect_break = false;
     let mut index = 0;
     while let Some(argument) = rest.get(index) {
         match argument.as_str() {
             "--script" => as_script = true,
             "--module" => as_script = false,
+            "--inspect" => inspect_port = Some(9229),
+            "--inspect-brk" => {
+                inspect_port = Some(9229);
+                inspect_break = true;
+            }
+            _ if argument.starts_with("--inspect-brk=") => {
+                let port = argument.trim_start_matches("--inspect-brk=");
+                inspect_port = Some(
+                    port.parse::<u16>()
+                        .map_err(|_| format!("invalid --inspect-brk port '{port}'"))?,
+                );
+                inspect_break = true;
+            }
+            _ if argument.starts_with("--inspect=") => {
+                let port = argument.trim_start_matches("--inspect=");
+                inspect_port = Some(
+                    port.parse::<u16>()
+                        .map_err(|_| format!("invalid --inspect port '{port}'"))?,
+                );
+            }
             _ => break,
         }
         index += 1;
@@ -79,10 +124,52 @@ fn parse_arguments(arguments: &[String]) -> Result<Command, String> {
         .ok_or_else(|| "missing <file> to evaluate".to_owned())?
         .clone();
     let argv = rest[index + 1..].to_vec();
-    Ok(Command::Run { file, as_script, argv })
+    Ok(Command::Run {
+        file,
+        as_script,
+        argv,
+        inspect_port,
+        inspect_break,
+    })
 }
 
-async fn run_file(file: &str, as_script: bool, argv: Vec<String>) -> u8 {
+fn parse_repl_arguments(arguments: &[String]) -> Result<Command, String> {
+    let mut inspect_port = None;
+    let mut inspect_break = false;
+    for argument in arguments {
+        if argument == "--inspect" {
+            inspect_port = Some(9229);
+        } else if argument == "--inspect-brk" {
+            inspect_port = Some(9229);
+            inspect_break = true;
+        } else if let Some(port) = argument.strip_prefix("--inspect-brk=") {
+            let port = port
+                .parse::<u16>()
+                .map_err(|_| format!("invalid --inspect-brk port '{port}'"))?;
+            inspect_port = Some(port);
+            inspect_break = true;
+        } else if let Some(port) = argument.strip_prefix("--inspect=") {
+            let port = port
+                .parse::<u16>()
+                .map_err(|_| format!("invalid --inspect port '{port}'"))?;
+            inspect_port = Some(port);
+        } else {
+            return Err(format!("unknown repl option '{argument}'"));
+        }
+    }
+    Ok(Command::Repl {
+        inspect_port,
+        inspect_break,
+    })
+}
+
+async fn run_file(
+    file: &str,
+    as_script: bool,
+    argv: Vec<String>,
+    inspect_port: Option<u16>,
+    inspect_break: bool,
+) -> u8 {
     let path = match std::fs::canonicalize(Path::new(file)) {
         Ok(path) => path,
         Err(error) => {
@@ -104,6 +191,25 @@ async fn run_file(file: &str, as_script: bool, argv: Vec<String>) -> u8 {
             return 2;
         }
     };
+    let _debug_session = if let Some(port) = inspect_port {
+        let session = cdp::DebugSession::without_engine();
+        if inspect_break {
+            session.request_initial_pause();
+        }
+        let debugger_hook: Arc<dyn quickjs_runtime::DebuggerHook> = session.clone();
+        runtime.set_debugger_hook(debugger_hook);
+        let bound_port = match cdp::start(port, Arc::clone(&session)) {
+            Ok(port) => port,
+            Err(error) => {
+                eprintln!("qjs: cannot start CDP inspector on 127.0.0.1:{port}: {error}");
+                return 2;
+            }
+        };
+        eprintln!("qjs inspector listening on ws://127.0.0.1:{bound_port}/devtools/page/quickjs");
+        Some(session)
+    } else {
+        None
+    };
     let realm = match runtime.create_realm() {
         Ok(realm) => realm,
         Err(error) => {
@@ -118,9 +224,31 @@ async fn run_file(file: &str, as_script: bool, argv: Vec<String>) -> u8 {
             return 2;
         }
     };
+
+    let print = match context.create_host_function("print", |ctx, call| {
+        let rendered: Vec<String> = call.arguments().iter().map(format_argument).collect();
+        println!("{}", rendered.join(" "));
+        Ok(ctx.undefined_value())
+    }) {
+        Ok(function) => function,
+        Err(error) => {
+            eprintln!("qjs: cannot install print: {error}");
+            return 1;
+        }
+    };
+    if let Err(error) = context.set_global("print", print.as_value()) {
+        eprintln!("qjs: cannot install the print global: {error}");
+        return 1;
+    }
+
     let display_name = path.display().to_string();
     if as_script {
-        match evaluate_script(&mut context, &source, &display_name, ScriptLimits::default()) {
+        match evaluate_script(
+            &mut context,
+            &source,
+            &display_name,
+            ScriptLimits::default(),
+        ) {
             Ok(_) => 0,
             Err(error) => {
                 report_error(&display_name, &error);
@@ -140,28 +268,33 @@ async fn run_file(file: &str, as_script: bool, argv: Vec<String>) -> u8 {
         // Load the static graph asynchronously (concurrent per-level reads on
         // this runtime), evaluate it synchronously, then drain parked
         // dynamic `import()` loads.
-        let result = match loader::gather_static_graph(&resolver, &source, &root_name, limits).await {
-            Ok(edges) => evaluate_preloaded_module_graph(&mut context, &source, &root_name, edges, limits)
-                .map(|_| ()),
+        let result = match loader::gather_static_graph(&resolver, &source, &root_name, limits).await
+        {
+            Ok(edges) => {
+                evaluate_preloaded_module_graph(&mut context, &source, &root_name, edges, limits)
+                    .map(|_| ())
+            }
             Err(error) => Err(error),
         };
         match result {
-            Ok(()) => match imports::drain_pending_imports(&mut context, &mut resolver, limits).await {
-                // A top-level-await graph settles asynchronously while the
-                // drain runs its continuations; a rejection recorded on the
-                // root is the evaluation failure.
-                Ok(()) => match quickjs::module_evaluation_error(&context, &root_name) {
-                    Some(error) => {
+            Ok(()) => {
+                match imports::drain_pending_imports(&mut context, &mut resolver, limits).await {
+                    // A top-level-await graph settles asynchronously while the
+                    // drain runs its continuations; a rejection recorded on the
+                    // root is the evaluation failure.
+                    Ok(()) => match quickjs::module_evaluation_error(&context, &root_name) {
+                        Some(error) => {
+                            report_error(&root_name, &error);
+                            1
+                        }
+                        None => 0,
+                    },
+                    Err(error) => {
                         report_error(&root_name, &error);
                         1
                     }
-                    None => 0,
-                },
-                Err(error) => {
-                    report_error(&root_name, &error);
-                    1
                 }
-            },
+            }
             Err(error) => {
                 report_error(&root_name, &error);
                 1
@@ -190,27 +323,73 @@ mod tests {
     #[test]
     fn parses_the_default_module_run() {
         let command = parse_arguments(&["entry.mjs".to_owned(), "a".to_owned()]).expect("parse");
-        let Command::Run { file, as_script, argv } = command else {
+        let Command::Run {
+            file,
+            as_script,
+            argv,
+            inspect_port,
+            inspect_break,
+        } = command
+        else {
             panic!("expected a run command");
         };
         assert_eq!(file, "entry.mjs");
         assert!(!as_script);
         assert_eq!(argv, vec!["a".to_owned()]);
+        assert_eq!(inspect_port, None);
+        assert!(!inspect_break);
     }
 
     #[test]
     fn parses_script_mode_and_subcommands() {
-        let command = parse_arguments(&["run".to_owned(), "--script".to_owned(), "s.js".to_owned()])
-            .expect("parse");
+        let command =
+            parse_arguments(&["run".to_owned(), "--script".to_owned(), "s.js".to_owned()])
+                .expect("parse");
         let Command::Run { as_script, .. } = command else {
             panic!("expected a run command");
         };
         assert!(as_script);
         assert!(matches!(
             parse_arguments(&["repl".to_owned()]).expect("parse"),
-            Command::Repl
+            Command::Repl {
+                inspect_port: None,
+                inspect_break: false
+            }
         ));
-        assert!(matches!(parse_arguments(&[]).expect("parse"), Command::Repl));
+        assert!(matches!(
+            parse_arguments(&[]).expect("parse"),
+            Command::Repl {
+                inspect_port: None,
+                inspect_break: false
+            }
+        ));
+        assert!(matches!(
+            parse_arguments(&["repl".to_owned(), "--inspect=9333".to_owned()]).expect("parse"),
+            Command::Repl {
+                inspect_port: Some(9333),
+                inspect_break: false
+            }
+        ));
+        assert!(matches!(
+            parse_arguments(&[
+                "run".to_owned(),
+                "--inspect-brk=9334".to_owned(),
+                "entry.js".to_owned()
+            ])
+            .expect("parse"),
+            Command::Run {
+                inspect_port: Some(9334),
+                inspect_break: true,
+                ..
+            }
+        ));
+        assert!(matches!(
+            parse_arguments(&["repl".to_owned(), "--inspect-brk".to_owned()]).expect("parse"),
+            Command::Repl {
+                inspect_port: Some(9229),
+                inspect_break: true
+            }
+        ));
         assert!(parse_arguments(&["run".to_owned()]).is_err());
     }
 }
