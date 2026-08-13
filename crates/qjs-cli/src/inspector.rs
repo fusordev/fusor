@@ -826,10 +826,6 @@ fn get_properties_request(
         .get("generatePreview")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let non_enumerable = params
-        .get("nonEnumerableProperties")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
     let mut result = Vec::new();
     for name in intrinsics
         .own_string_keys(context, &object)
@@ -844,7 +840,6 @@ fn get_properties_request(
                 &context.string(key),
                 &name,
                 accessors_only,
-                non_enumerable,
                 generate_preview,
             ) {
                 result.push(entry);
@@ -862,7 +857,6 @@ fn get_properties_request(
                 &symbol,
                 &name,
                 accessors_only,
-                non_enumerable,
                 generate_preview,
             )
         {
@@ -919,7 +913,6 @@ fn descriptor_entry(
     key: &JsValue,
     name: &str,
     accessors_only: bool,
-    non_enumerable: bool,
     generate_preview: bool,
 ) -> Option<Value> {
     let undefined = context.undefined_value();
@@ -942,9 +935,6 @@ fn descriptor_entry(
     let set = reflect_value(context, intrinsics, &descriptor, "set")
         .filter(|set| set.kind() == Ok(ValueKind::Function));
     let is_accessor = get.is_some() || set.is_some();
-    if !non_enumerable && !enumerable {
-        return None;
-    }
     let mut entry = json!({
         "name": name,
         "configurable": configurable,
@@ -1857,6 +1847,50 @@ mod tests {
             assert_eq!(event["params"]["args"][1]["value"], "hello");
             assert_eq!(event["params"]["executionContextId"], 1);
             assert!(event["params"]["timestamp"].is_u64());
+        });
+    }
+
+    #[test]
+    fn get_properties_lists_builtin_methods_without_the_experimental_flag() {
+        with_engine(|context, state, intrinsics| {
+            let evaluated = protocol(
+                context,
+                state,
+                intrinsics,
+                "Runtime.evaluate",
+                serde_json::json!({"expression": "({})"}),
+            );
+            let object_id = evaluated["result"]["result"]["objectId"]
+                .as_str()
+                .expect("objectId")
+                .to_owned();
+            let own = protocol(
+                context,
+                state,
+                intrinsics,
+                "Runtime.getProperties",
+                serde_json::json!({"objectId": object_id, "ownProperties": true}),
+            );
+            let proto_id = own["result"]["internalProperties"][0]["value"]["objectId"]
+                .as_str()
+                .expect("proto id");
+            let proto_response = protocol(
+                context,
+                state,
+                intrinsics,
+                "Runtime.getProperties",
+                serde_json::json!({"objectId": proto_id, "ownProperties": true}),
+            );
+            let names: Vec<&str> = proto_response["result"]["result"]
+                .as_array()
+                .expect("proto properties")
+                .iter()
+                .map(|entry| entry["name"].as_str().expect("property name"))
+                .collect();
+            assert!(
+                names.contains(&"hasOwnProperty"),
+                "non-enumerable built-in methods are listed without the experimental flag"
+            );
         });
     }
 

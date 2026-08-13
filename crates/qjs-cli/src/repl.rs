@@ -19,7 +19,12 @@
 //! script entries cannot see module-scoped bindings, and only single-line
 //! imports are accumulated.
 
-use std::{cell::RefCell, rc::Rc, sync::Arc, thread};
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+    sync::Arc,
+    thread,
+};
 
 use quickjs::{ScriptLimits, evaluate_preloaded_module_graph, evaluate_script};
 use quickjs_runtime::{Runtime, RuntimeLimits};
@@ -99,7 +104,7 @@ pub(crate) async fn run(inspect_port: Option<u16>, inspect_break: bool) -> u8 {
     // Host `print`: renders each argument like the REPL's completion printer
     // and writes it to stdout. Installed as a global so both script and module
     // entries can reach it.
-    if let Err(error) = install_print(&mut context, None) {
+    if let Err(error) = install_print(&mut context, None, None) {
         eprintln!("qjs: cannot install print: {error}");
         return 1;
     }
@@ -160,12 +165,18 @@ pub(crate) async fn run(inspect_port: Option<u16>, inspect_break: bool) -> u8 {
 /// Installs the host `print` global: renders each argument like the REPL's
 /// completion printer and writes it to stdout. With a capture buffer (the
 /// inspector path), the raw argument values are also retained so they can be
-/// surfaced as `Runtime.consoleAPICalled` events in DevTools.
+/// surfaced as `Runtime.consoleAPICalled` events in DevTools. While the
+/// suppression flag is set (`throwOnSideEffect` eager evaluation), the print
+/// is a silent no-op.
 fn install_print(
     context: &mut quickjs_runtime::Context<'_>,
     capture: Option<Rc<RefCell<Vec<quickjs_runtime::JsValue>>>>,
+    suppress: Option<Rc<Cell<bool>>>,
 ) -> Result<(), quickjs_runtime::ExecutionError> {
     let print = context.create_host_function("print", move |ctx, call| {
+        if suppress.as_ref().is_some_and(|flag| flag.get()) {
+            return Ok(ctx.undefined_value());
+        }
         let rendered: Vec<String> = call
             .arguments()
             .iter()
@@ -236,7 +247,12 @@ async fn run_with_inspector(
     };
     let console_buffer: Rc<RefCell<Vec<quickjs_runtime::JsValue>>> =
         Rc::new(RefCell::new(Vec::new()));
-    if let Err(error) = install_print(context, Some(Rc::clone(&console_buffer))) {
+    let print_suppressed: Rc<Cell<bool>> = Rc::new(Cell::new(false));
+    if let Err(error) = install_print(
+        context,
+        Some(Rc::clone(&console_buffer)),
+        Some(Rc::clone(&print_suppressed)),
+    ) {
         eprintln!("qjs: cannot install print: {error}");
         return 1;
     }
@@ -247,6 +263,7 @@ async fn run_with_inspector(
                     context,
                     &mut inspect,
                     &intrinsics,
+                    &print_suppressed,
                     request.message,
                 );
                 let _ = request.response.send(response);

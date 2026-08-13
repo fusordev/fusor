@@ -260,12 +260,15 @@ impl DebugSession {
     /// handler: evaluation triggered by inspection (including accessor
     /// getters and Proxy traps) must not pause, or the engine task would
     /// block inside the debugger hook while the transport task waits for
-    /// this response.
+    /// this response. `throwOnSideEffect` requests (the frontend's eager
+    /// evaluation) additionally raise the caller's print-suppression flag so
+    /// host output stays silent during a side-effect probe.
     pub(crate) fn handle_engine_protocol(
         &self,
         context: &mut Context<'_>,
         state: &mut crate::inspector::InspectState,
         intrinsics: &crate::inspector::InspectIntrinsics,
+        suppress_print: &std::cell::Cell<bool>,
         message: Value,
     ) -> Value {
         if lock_state(&self.state).paused {
@@ -275,10 +278,17 @@ impl DebugSession {
                 "runtime evaluation is unavailable while the debugger is paused",
             );
         }
+        let suppress = message
+            .get("params")
+            .and_then(|params| params.get("throwOnSideEffect"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let previous = suppress_print.replace(suppress);
         self.servicing_engine_request.store(true, Ordering::Release);
         let response = crate::inspector::handle_engine_request(context, state, intrinsics, message);
         self.servicing_engine_request
             .store(false, Ordering::Release);
+        suppress_print.set(previous);
         response
     }
 
