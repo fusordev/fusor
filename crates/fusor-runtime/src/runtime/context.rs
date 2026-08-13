@@ -28,7 +28,8 @@
 use super::{
     Arc, AtomError, BytecodeFunction, CompilerExecutableKind, Context, DynamicFunctionScriptError,
     EnvironmentBinding, ErrorObjectKind, ExceptionKind, ExecutionLimits, Function,
-    FunctionImplementation, GlobalScriptError, HandleKind, HeapFunction, HeapObject, HeapReference,
+    FunctionImplementation, GlobalScriptError, HandleError, HandleKind, HeapFunction, HeapObject,
+    HeapReference,
     InstallError, InstalledCode, InstalledRoot, InstalledTemplate, JsNumber, JsString, JsValue,
     ObjectId, ObjectRecord, OrdinaryDynamicFunctionCompiler, PendingRootEnvironment,
     PredefinedAtom, PrimitiveValue, PropertyKey, PropertyLayout, RootPublication, Runtime,
@@ -314,6 +315,64 @@ impl Context<'_> {
         let symbol = self.runtime.atoms.predefined(atom);
         (symbol.kind() == crate::AtomKind::Symbol)
             .then(|| JsValue::primitive(&self.runtime.mailbox, PrimitiveValue::Symbol(symbol)))
+    }
+
+    /// Creates a string property key for the host property API.
+    ///
+    /// Integer-like names become canonical array-index keys (ECMA-262 6.1.7);
+    /// every other name interns a string atom. The result feeds
+    /// [`Object::get`], [`Object::set`], [`Object::define_own_property`],
+    /// [`Object::has`], and [`Object::delete`].
+    ///
+    /// This function never panics.
+    ///
+    /// # Errors
+    ///
+    /// Returns a string error when `name` is not valid UTF-16, or an atom
+    /// error when the atom table refuses the interning.
+    pub fn property_key(
+        &mut self,
+        name: &str,
+    ) -> Result<PropertyKey, crate::ExecutionError> {
+        let string = JsString::from_utf8(name)?;
+        Ok(self.runtime.property_key_from_string(&string)?)
+    }
+
+    /// Converts a same-runtime String or Symbol value into a property key.
+    ///
+    /// Unlike ECMA-262 `ToPropertyKey`, no implicit coercion is performed:
+    /// numbers and every other non-key value are rejected instead of being
+    /// stringified, so host code cannot accidentally index an object with a
+    /// surprise key. Symbol values come from [`Self::symbol`] or from any
+    /// JavaScript Symbol observation.
+    ///
+    /// This function never panics.
+    ///
+    /// # Errors
+    ///
+    /// Returns a handle error for an orphaned, foreign, or stale value, a
+    /// wrong-value-kind error (reporting `String` as the expected kind) for
+    /// anything but a String or Symbol, or an atom error when the interning
+    /// fails.
+    pub fn property_key_from_value(
+        &mut self,
+        value: &JsValue,
+    ) -> Result<PropertyKey, crate::ExecutionError> {
+        let owner = value.owner()?;
+        self.runtime.validate_owner(&owner, HandleKind::Value)?;
+        match value.stored()? {
+            StoredValue::String(string) => {
+                Ok(self.runtime.property_key_from_string(string)?)
+            }
+            StoredValue::Symbol(symbol) => {
+                Ok(self.runtime.property_key_from_symbol(symbol)?)
+            }
+            other => Err(HandleError::WrongValueKind {
+                expected: crate::ValueKind::String,
+                actual: other.kind(),
+            }
+            .into()),
+        }
     }
 
     /// Classifies a same-runtime JavaScript Error object by its intrinsic
@@ -1219,6 +1278,24 @@ impl Context<'_> {
         self.runtime.object_properties = self.runtime.object_properties.saturating_add(1);
         self.runtime.collection_pending = true;
         Ok(())
+    }
+
+    /// Roots this context's realm global object as an ordinary object value
+    /// (ECMA-262 9.1.1 `GetGlobalObject`).
+    ///
+    /// The returned value has [`crate::ValueKind::Object`]; convert it with
+    /// [`JsValue::into_object`] and use the [`Object`] property API to read
+    /// and write globals from the host, the inverse of [`Self::set_global`].
+    ///
+    /// This function never panics.
+    ///
+    /// # Errors
+    ///
+    /// Returns an engine error if the realm's global object is internally
+    /// absent or the public root cannot be allocated.
+    pub fn global_object(&mut self) -> Result<JsValue, crate::ExecutionError> {
+        let object = self.runtime.realm_global_object(self.realm)?;
+        self.runtime.public_value(StoredValue::Object(object))
     }
 
     /// Registers a module record in this context's realm.

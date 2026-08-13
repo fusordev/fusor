@@ -30,7 +30,8 @@ use std::{
 };
 
 use crate::{
-    Atom, HandleError, HandleKind, JsBigInt, JsNumber, JsString, ValueKind,
+    Atom, ExecutionError, HandleError, HandleKind, JsBigInt, JsNumber, JsString, PropertyKey,
+    PropertyDescriptor, ValueKind,
     ids::{FunctionId, ObjectId},
 };
 
@@ -598,6 +599,248 @@ impl Object {
             });
         }
         Ok(self.id()? == other.id()?)
+    }
+
+    /// Executes ECMA-262 `Get(O, P)` with the object itself as the receiver
+    /// (ECMA-262 7.3.1, `[[Get]]` in 10.1.8).
+    ///
+    /// The read walks the prototype chain, invokes getters with `this` bound
+    /// to this object, and runs Proxy `get` traps with the full validation the
+    /// interpreter applies. A missing property returns the runtime-local
+    /// `undefined` value. The returned value is a fresh public root; drop it
+    /// to release the root.
+    ///
+    /// Observable user code runs under [`ExecutionLimits::default()`] with no
+    /// dynamic-function compiler available.
+    ///
+    /// This function never panics.
+    ///
+    /// # Errors
+    ///
+    /// Returns a handle error for an orphaned, foreign, or stale object, an
+    /// exception when observable code throws (a throwing getter or Proxy
+    /// trap), and a limit, allocation, or engine error for runtime failures.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use fusor_runtime::{Runtime, RuntimeLimits};
+    /// # let mut runtime = Runtime::try_new(RuntimeLimits::default()).unwrap();
+    /// # let realm = runtime.create_realm().unwrap();
+    /// # let mut context = runtime.context(&realm).unwrap();
+    /// let object = context.global_object().unwrap().into_object().unwrap();
+    /// let key = context.property_key("name").unwrap();
+    /// assert!(object.get(&mut context, key).is_ok());
+    /// ```
+    pub fn get(
+        &self,
+        ctx: &mut crate::Context<'_>,
+        key: PropertyKey,
+    ) -> Result<JsValue, ExecutionError> {
+        let object = self.admitted_id(ctx)?;
+        let stored = crate::vm::host_get_property(
+            ctx.runtime,
+            HeapReference::Object(object),
+            key,
+            ctx.realm,
+        )?;
+        ctx.runtime.public_value(stored)
+    }
+
+    /// Executes ECMA-262 `Set(O, P, V, O)` with strict semantics (ECMA-262
+    /// 7.3.4, `[[Set]]` in 10.1.9).
+    ///
+    /// A host write has no sloppy mode: a failed assignment (non-writable
+    /// property, absent setter, rejected Proxy trap) raises a `TypeError`
+    /// instead of failing silently, so embedding code observes every rejected
+    /// write. Setters run with `this` bound to this object.
+    ///
+    /// Observable user code runs under [`ExecutionLimits::default()`] with no
+    /// dynamic-function compiler available.
+    ///
+    /// This function never panics.
+    ///
+    /// # Errors
+    ///
+    /// Returns a handle error for an orphaned, foreign, or stale object or
+    /// value, a `TypeError` exception when the write is rejected or observable
+    /// code throws, and a limit, allocation, or engine error for runtime
+    /// failures.
+    pub fn set(
+        &self,
+        ctx: &mut crate::Context<'_>,
+        key: PropertyKey,
+        value: JsValue,
+    ) -> Result<(), ExecutionError> {
+        let object = self.admitted_id(ctx)?;
+        let owner = value.owner()?;
+        ctx.runtime.validate_owner(&owner, HandleKind::Value)?;
+        let stored = value.stored()?.duplicate();
+        crate::vm::host_set_property(
+            ctx.runtime,
+            HeapReference::Object(object),
+            key,
+            stored,
+            ctx.realm,
+        )
+    }
+
+    /// Executes ECMA-262 `O.[[DefineOwnProperty]](P, desc)` and returns its
+    /// Boolean result (ECMA-262 10.1.6, algorithm in 10.4.9).
+    ///
+    /// The full `ValidateAndApplyPropertyDescriptor` machinery applies:
+    /// non-configurable and non-writable properties reject incompatible
+    /// changes with `Ok(false)`, non-extensible objects reject new
+    /// properties with `Ok(false)`, and a rejected Proxy trap reports
+    /// `Ok(false)` (the `Reflect.defineProperty` contract). Getter and setter
+    /// values must be callable functions or `undefined`; anything else raises
+    /// a `TypeError`, exactly like `Object.defineProperty`.
+    ///
+    /// Observable user code runs under [`ExecutionLimits::default()`] with no
+    /// dynamic-function compiler available.
+    ///
+    /// This function never panics.
+    ///
+    /// # Errors
+    ///
+    /// Returns a handle error for an orphaned, foreign, or stale object or
+    /// descriptor value, a `TypeError` exception for an invalid accessor or
+    /// throwing observable code, and a limit, allocation, or engine error for
+    /// runtime failures.
+    pub fn define_own_property(
+        &self,
+        ctx: &mut crate::Context<'_>,
+        key: PropertyKey,
+        descriptor: PropertyDescriptor<JsValue>,
+    ) -> Result<bool, ExecutionError> {
+        let object = self.admitted_id(ctx)?;
+        let stored_field = |value: Option<&JsValue>| -> Result<Option<StoredValue>, ExecutionError> {
+            let Some(value) = value else {
+                return Ok(None);
+            };
+            let owner = value.owner()?;
+            ctx.runtime.validate_owner(&owner, HandleKind::Value)?;
+            Ok(Some(value.stored()?.duplicate()))
+        };
+        let value = stored_field(descriptor.value())?;
+        let get = stored_field(descriptor.getter())?;
+        let set = stored_field(descriptor.setter())?;
+        crate::vm::host_define_own_property(
+            ctx.runtime,
+            HeapReference::Object(object),
+            key,
+            value,
+            descriptor.writable(),
+            get,
+            set,
+            descriptor.enumerable(),
+            descriptor.configurable(),
+            ctx.realm,
+        )
+    }
+
+    /// Executes ECMA-262 `HasProperty(O, P)` (ECMA-262 7.3.11, `[[HasProperty]]`
+    /// in 10.1.7).
+    ///
+    /// The prototype chain is walked and Proxy `has` traps run with full
+    /// validation; only the Boolean presence result is reported.
+    ///
+    /// Observable user code runs under [`ExecutionLimits::default()`] with no
+    /// dynamic-function compiler available.
+    ///
+    /// This function never panics.
+    ///
+    /// # Errors
+    ///
+    /// Returns a handle error for an orphaned, foreign, or stale object, an
+    /// exception when observable code throws, and a limit, allocation, or
+    /// engine error for runtime failures.
+    pub fn has(
+        &self,
+        ctx: &mut crate::Context<'_>,
+        key: PropertyKey,
+    ) -> Result<bool, ExecutionError> {
+        let object = self.admitted_id(ctx)?;
+        crate::vm::host_has_property(
+            ctx.runtime,
+            HeapReference::Object(object),
+            key,
+            ctx.realm,
+        )
+    }
+
+    /// Executes ECMA-262 `O.[[Delete]](P)` and returns its Boolean result
+    /// (ECMA-262 10.1.10, algorithm in 10.4.10).
+    ///
+    /// `Ok(false)` reports a non-configurable own property or a rejected Proxy
+    /// trap (`Reflect.deleteProperty` semantics); it never raises for an
+    /// ordinary refusal.
+    ///
+    /// Observable user code runs under [`ExecutionLimits::default()`] with no
+    /// dynamic-function compiler available.
+    ///
+    /// This function never panics.
+    ///
+    /// # Errors
+    ///
+    /// Returns a handle error for an orphaned, foreign, or stale object, an
+    /// exception when observable code throws, and a limit, allocation, or
+    /// engine error for runtime failures.
+    pub fn delete(
+        &self,
+        ctx: &mut crate::Context<'_>,
+        key: PropertyKey,
+    ) -> Result<bool, ExecutionError> {
+        let object = self.admitted_id(ctx)?;
+        crate::vm::host_delete_property(
+            ctx.runtime,
+            HeapReference::Object(object),
+            key,
+            ctx.realm,
+        )
+    }
+
+    /// Executes ECMA-262 `O.[[OwnPropertyKeys]]()` (ECMA-262 10.1.11, algorithm
+    /// in 10.4.11) and returns every own key.
+    ///
+    /// Ordinary objects report integer indices ascending, then string keys and
+    /// symbol keys in creation order. A Proxy reports its validated `ownKeys`
+    /// trap order (duplicate or missing keys raise a `TypeError` per the trap
+    /// invariants).
+    ///
+    /// Observable user code runs under [`ExecutionLimits::default()`] with no
+    /// dynamic-function compiler available.
+    ///
+    /// This function never panics.
+    ///
+    /// # Errors
+    ///
+    /// Returns a handle error for an orphaned, foreign, or stale object, an
+    /// exception when observable code throws, and a limit, allocation, or
+    /// engine error for runtime failures.
+    pub fn own_property_keys(
+        &self,
+        ctx: &mut crate::Context<'_>,
+    ) -> Result<Vec<PropertyKey>, ExecutionError> {
+        let object = self.admitted_id(ctx)?;
+        crate::vm::host_own_property_keys(ctx.runtime, HeapReference::Object(object), ctx.realm)
+    }
+
+    /// Validates that this handle is live in `ctx`'s runtime and returns its
+    /// object identity.
+    fn admitted_id(&self, ctx: &crate::Context<'_>) -> Result<ObjectId, ExecutionError> {
+        let owner = self.owner()?;
+        ctx.runtime.validate_owner(&owner, HandleKind::Object)?;
+        let object = self.id()?;
+        if !ctx.runtime.objects.contains(object) {
+            return Err(HandleError::Stale {
+                kind: HandleKind::Object,
+                index: object.index(),
+                generation: object.generation(),
+            }
+            .into());
+        }
+        Ok(object)
     }
 }
 

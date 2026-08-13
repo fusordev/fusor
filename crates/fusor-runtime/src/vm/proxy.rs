@@ -114,7 +114,9 @@ pub(super) fn proxy_aware_is_array(
     Ok(false)
 }
 
-fn proxy_reference_value(reference: HeapReference) -> StoredValue {
+/// Projects a heap reference back into the stored-value receiver form used by
+/// the internal-method entry points.
+pub(super) fn proxy_reference_value(reference: HeapReference) -> StoredValue {
     match reference {
         HeapReference::Function(function) => StoredValue::Function(function),
         HeapReference::Object(object) => StoredValue::Object(object),

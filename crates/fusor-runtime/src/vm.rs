@@ -138,6 +138,7 @@ mod for_in;
 mod from_entries;
 mod generator;
 mod group_by;
+mod host_properties;
 mod import_meta;
 mod instanceof;
 mod intl;
@@ -197,6 +198,11 @@ use {
     reflect::*, regexp::*, set::*, stack::*, string_methods::*, string_raw::*, string_replace::*,
     string_split::*, temporal::*, typed_array::*, uint8_array::*, uri::*, weak_collections::*,
     weak_references::*, with_environment::*,
+};
+
+pub(crate) use host_properties::{
+    host_define_own_property, host_delete_property, host_get_property, host_has_property,
+    host_own_property_keys, host_set_property,
 };
 
 /// Inclusive per-call interpreter limits.
