@@ -6059,7 +6059,7 @@ fn freeze_bindings(
             arguments_object: draft.arguments_object,
         });
     }
-    for (index, binding) in symbol_bindings.iter().enumerate() {
+    for binding in symbol_bindings.iter() {
         if binding.is_none() {
             return Err(CompilerError::SemanticInvariant {
                 invariant: "every ordinary semantic symbol has compiler binding",
