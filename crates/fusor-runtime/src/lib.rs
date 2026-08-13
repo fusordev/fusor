@@ -76,5 +76,5 @@ pub use runtime::{
 };
 pub use shared_array_buffer::SharedArrayBufferHandle;
 pub use string::{CodeUnits, JsString, JsStringError, MAX_STRING_CODE_UNITS};
-pub use value::{Function, HostCall, HostCallback, JsValue, Object};
+pub use value::{Function, HostCall, HostCallback, JsValue, Object, Promise, PromiseResolver};
 pub use vm::ExecutionLimits;

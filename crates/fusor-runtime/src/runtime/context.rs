@@ -1409,8 +1409,41 @@ impl Context<'_> {
         self.runtime.public_value(StoredValue::Object(object))
     }
 
-    /// Roots this context's realm global object as an ordinary object value
-    /// (ECMA-262 9.1.1 `GetGlobalObject`).
+    /// Creates a fresh host-driven Promise and its resolver.
+    ///
+    /// The Promise is a pending `%Promise%`-prototyped object rooted by its
+    /// handle; JavaScript code observes it like any other Promise (`then`,
+    /// `catch`, `await`). Settle it through the returned
+    /// [`PromiseResolver`]: the first `resolve`/`reject` wins, later calls
+    /// are ignored, and queued reactions run at the next host-job drain
+    /// ([`Self::drain_host_jobs`]).
+    ///
+    /// This function never panics.
+    ///
+    /// # Errors
+    ///
+    /// Returns a limit, allocation, or engine error when the Promise, its
+    /// resolving functions, or their public roots cannot be created.
+    pub fn new_promise(
+        &mut self,
+    ) -> Result<(crate::Promise, crate::PromiseResolver), crate::ExecutionError> {
+        let prototype = self.runtime.realm_promise_prototype(self.realm)?;
+        let promise = self
+            .runtime
+            .allocate_promise_with_prototype(HeapReference::Object(prototype))?;
+        let (resolve, reject) = self
+            .runtime
+            .allocate_promise_resolving_functions(promise, self.realm)?;
+        let promise_value = self.runtime.public_value(StoredValue::Object(promise))?;
+        let resolve_value = self.runtime.public_value(StoredValue::Function(resolve))?;
+        let reject_value = self.runtime.public_value(StoredValue::Function(reject))?;
+        Ok((
+            crate::Promise::from_root(promise_value),
+            crate::PromiseResolver::from_roots(resolve_value, reject_value),
+        ))
+    }
+
+    /// Roots this context's realm global object as an ordinary object value    /// (ECMA-262 9.1.1 `GetGlobalObject`).
     ///
     /// The returned value has [`crate::ValueKind::Object`]; convert it with
     /// [`JsValue::into_object`] and use the [`Object`] property API to read

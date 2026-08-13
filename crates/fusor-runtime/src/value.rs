@@ -888,6 +888,111 @@ impl HostCall {
     }
 }
 
+/// A rooted runtime-local ECMAScript Promise.
+///
+/// Created through [`crate::Context::new_promise`]; the paired
+/// [`PromiseResolver`] settles it. Like every value handle, the wrapper is
+/// an immutable [`Arc`]-backed public root: the Promise object stays
+/// reachable for as long as any handle (or JavaScript reference) survives.
+#[derive(Clone, Debug)]
+pub struct Promise(JsValue);
+
+impl Promise {
+    pub(crate) const fn from_root(value: JsValue) -> Self {
+        Self(value)
+    }
+
+    /// Returns this promise as an arbitrary value root.
+    #[must_use]
+    pub fn as_value(&self) -> JsValue {
+        self.0.clone()
+    }
+}
+
+/// Settles a host-created Promise ([`crate::Context::new_promise`]).
+///
+/// The resolver owns public roots for the engine's resolve and reject
+/// functions, so both stay reachable for as long as the resolver survives
+/// (the Arc-rooting analogue of the dynamic-import park queue). Dropping the
+/// resolver releases them; the Promise itself is rooted by its own handle.
+///
+/// ECMA-262 Promise semantics apply: the first `resolve`/`reject` wins and
+/// every later call is ignored (26.6.1.1, `[[Resolve]]`/`[[Reject]]`), and
+/// queued reactions run at the next host-job drain.
+#[derive(Debug)]
+pub struct PromiseResolver {
+    resolve: JsValue,
+    reject: JsValue,
+}
+
+impl PromiseResolver {
+    pub(crate) const fn from_roots(resolve: JsValue, reject: JsValue) -> Self {
+        Self { resolve, reject }
+    }
+
+    /// Settles the promise with `value` (ECMA-262 `[[Resolve]]`).
+    ///
+    /// This function never panics.
+    ///
+    /// # Errors
+    ///
+    /// Returns a handle error for a foreign value or a limit, allocation, or
+    /// engine error while the resolving function runs; a rejecting value is
+    /// delivered through the promise's reactions, not this error.
+    pub fn resolve(
+        &self,
+        ctx: &mut crate::Context<'_>,
+        value: JsValue,
+    ) -> Result<(), ExecutionError> {
+        self.settle(ctx, &self.resolve, value)
+    }
+
+    /// Settles the promise with the rejection `reason` (ECMA-262
+    /// `[[Reject]]`).
+    ///
+    /// This function never panics.
+    ///
+    /// # Errors
+    ///
+    /// Returns a handle error for a foreign value or a limit, allocation, or
+    /// engine error while the rejecting function runs.
+    pub fn reject(
+        &self,
+        ctx: &mut crate::Context<'_>,
+        reason: JsValue,
+    ) -> Result<(), ExecutionError> {
+        self.settle(ctx, &self.reject, reason)
+    }
+
+    fn settle(
+        &self,
+        ctx: &mut crate::Context<'_>,
+        function: &JsValue,
+        value: JsValue,
+    ) -> Result<(), ExecutionError> {
+        let owner = function.owner()?;
+        ctx.runtime.validate_owner(&owner, HandleKind::Value)?;
+        let owner = value.owner()?;
+        ctx.runtime.validate_owner(&owner, HandleKind::Value)?;
+        let resolve = Function::from_root(function.clone());
+        match ctx.call_function(
+            &resolve,
+            ctx.undefined(),
+            vec![value],
+            crate::ExecutionLimits::default(),
+        ) {
+            Ok(_completion) => Ok(()),
+            Err(crate::CallError::Execution(error)) => Err(error),
+            Err(crate::CallError::Thrown(_)) => {
+                Err(crate::EngineFault::RuntimeInvariant {
+                    message: "promise resolving function threw a value",
+                }
+                .into())
+            }
+        }
+    }
+}
+
 /// A Rust closure backing a host-installed JavaScript function.
 ///
 /// Implemented for every closure of the shape

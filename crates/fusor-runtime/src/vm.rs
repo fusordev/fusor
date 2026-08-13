@@ -5479,6 +5479,39 @@ pub(crate) fn call_function_internal(
     compiler: Option<&Arc<dyn OrdinaryDynamicFunctionCompiler>>,
 ) -> Result<StoredValue, ExecutionError> {
     let mut execution_budget = ExecutionBudget::new(limits);
+    if let Some(resolving) = runtime
+        .functions
+        .get(function)
+        .and_then(|node| node.promise_resolving().cloned())
+    {
+        // Promise resolving functions settle their promise through the
+        // resumable resolution machinery (which may call user code for a
+        // thenable), never through a bytecode frame.
+        let dispatch = dispatch_promise_resolving(
+            runtime,
+            &resolving,
+            CallArguments::from_values(arguments),
+            None,
+            native_function_host_origin(),
+            &mut execution_budget,
+        )
+        .map_err(|failure| match failure {
+            NativeFailure::Execution(error) => error,
+            NativeFailure::Abrupt(pending) | NativeFailure::AbruptAfterTransient(pending) => {
+                match finish_exception(runtime, pending, Vec::new()) {
+                    Ok(exception) => ExecutionError::Exception(exception),
+                    Err(error) => error,
+                }
+            }
+        })?;
+        return execute_root_dispatch_with_budget(
+            runtime,
+            Ok(dispatch),
+            Vec::new(),
+            compiler,
+            &mut execution_budget,
+        );
+    }
     if let Some(native) = runtime
         .functions
         .get(function)

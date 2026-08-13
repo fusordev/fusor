@@ -39,9 +39,9 @@
 
 ### Promise resolver(§4.4)
 
-- [ ] `Context::new_promise()` → `(Promise, PromiseResolver)`,resolver `resolve`/`reject`
-- [ ] 根化采用 park 模式(同 `PendingDynamicImport`)
-- [ ] 测试:resolve/reject 值同一性;跨 `drain_host_jobs` 存活
+- [x] `Context::new_promise()` → `(Promise, PromiseResolver)`,resolver `resolve`/`reject`
+- [x] 根化采用 park 模式(同 `PendingDynamicImport`)
+- [x] 测试:resolve/reject 值同一性;跨 `drain_host_jobs` 存活
 
 ### 值转换(§4.5)
 
