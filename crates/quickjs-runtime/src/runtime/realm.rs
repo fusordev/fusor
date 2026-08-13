@@ -541,6 +541,7 @@ impl Runtime {
             public_roots: 0,
             collection_pending: false,
             interrupts: InterruptState::default(),
+            debugger: None,
             import_meta_hook: None,
             promise_rejections: PromiseRejectionState::default(),
             promise_jobs: VecDeque::new(),

@@ -26,7 +26,8 @@ pub(crate) fn format_value(value: &JsValue) -> String {
         ValueKind::String => match value.as_string() {
             Ok(Some(string)) => {
                 let units: Vec<u16> = string.code_units().take(MAX_STRING_UNITS + 1).collect();
-                let mut text = String::from_utf16_lossy(&units[..units.len().min(MAX_STRING_UNITS)]);
+                let mut text =
+                    String::from_utf16_lossy(&units[..units.len().min(MAX_STRING_UNITS)]);
                 if units.len() > MAX_STRING_UNITS {
                     text.push('…');
                 }
@@ -82,8 +83,13 @@ mod tests {
         let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
         let realm = runtime.create_realm().expect("realm");
         let mut context = runtime.context(&realm).expect("context");
-        let value = evaluate_script(&mut context, source, "format-test.js", ScriptLimits::default())
-            .expect("script evaluates");
+        let value = evaluate_script(
+            &mut context,
+            source,
+            "format-test.js",
+            ScriptLimits::default(),
+        )
+        .expect("script evaluates");
         format_value(&value)
     }
 

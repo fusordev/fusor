@@ -8,9 +8,7 @@ use std::collections::HashSet;
 use quickjs_bytecode::{CompilerInitializationPolicy, ModuleBindingOrigin, ModuleImportName};
 
 use super::{BindingCell, ModuleError, ModuleRecordId, ModuleStatus, ResolvedExport};
-use crate::runtime::{
-    BindingCellId, RealmId, Runtime, SlotValue, StoredValue, usize_to_u64,
-};
+use crate::runtime::{BindingCellId, RealmId, Runtime, SlotValue, StoredValue, usize_to_u64};
 
 use std::fmt;
 
@@ -244,7 +242,12 @@ fn resolve_export(
     }
     resolve_set.push((module, export_name.to_vec()));
 
-    let syntax = runtime.modules.get(module).expect("module exists").syntax_record.clone();
+    let syntax = runtime
+        .modules
+        .get(module)
+        .expect("module exists")
+        .syntax_record
+        .clone();
 
     for entry in syntax.export_entries() {
         let export_matches = match entry.export_name() {
@@ -469,7 +472,12 @@ fn module_export_names_inner(
         return Ok(Vec::new());
     }
     export_star_set.push(module);
-    let syntax = runtime.modules.get(module).expect("module exists").syntax_record.clone();
+    let syntax = runtime
+        .modules
+        .get(module)
+        .expect("module exists")
+        .syntax_record
+        .clone();
     let mut result = Vec::new();
     let mut seen = HashSet::new();
 
@@ -489,7 +497,8 @@ fn module_export_names_inner(
         // Resolve by the *export* name: a local entry's local binding name
         // (e.g. the synthetic `default` binding) is not itself an export.
         let mut rs = Vec::new();
-        if let ExportResolution::Resolved(r) = resolve_export(runtime, module, &export_name, &mut rs)?
+        if let ExportResolution::Resolved(r) =
+            resolve_export(runtime, module, &export_name, &mut rs)?
         {
             result.push((export_name, r));
         }
@@ -542,8 +551,7 @@ pub(crate) fn module_dependencies(
     let mut deps = Vec::new();
     let mut seen = HashSet::new();
     for (i, _) in syntax.requests().iter().enumerate() {
-        if let Ok(dep) = resolve_request(runtime, module, i as u32)
-        {
+        if let Ok(dep) = resolve_request(runtime, module, i as u32) {
             if seen.insert(dep) {
                 deps.push(dep);
             }
@@ -687,9 +695,7 @@ fn resolve_and_forward_import(
                         .equals_utf8(&String::from_utf8_lossy(&local_name))
             })
             .map_or(local_name.clone(), |entry| match entry.import_name() {
-                quickjs_frontend::ModuleImportName::Name(name) => {
-                    units_to_utf8(name.code_units())
-                }
+                quickjs_frontend::ModuleImportName::Name(name) => units_to_utf8(name.code_units()),
                 quickjs_frontend::ModuleImportName::Default(_) => b"default".to_vec(),
                 _ => local_name.clone(),
             })
@@ -774,7 +780,10 @@ pub(crate) fn get_or_create_namespace_phase(
     deferred: bool,
 ) -> Result<crate::runtime::ObjectId, ModuleError> {
     let cached = if deferred {
-        runtime.modules.get(module).and_then(|r| r.deferred_namespace)
+        runtime
+            .modules
+            .get(module)
+            .and_then(|r| r.deferred_namespace)
     } else {
         runtime.modules.get(module).and_then(|r| r.namespace_object)
     };
@@ -858,9 +867,17 @@ pub(crate) fn get_or_create_namespace_phase(
         .map_err(|_| ModuleError::link("namespace insert failed"))?;
 
     if deferred {
-        runtime.modules.get_mut(module).expect("module exists").deferred_namespace = Some(object);
+        runtime
+            .modules
+            .get_mut(module)
+            .expect("module exists")
+            .deferred_namespace = Some(object);
     } else {
-        runtime.modules.get_mut(module).expect("module exists").namespace_object = Some(object);
+        runtime
+            .modules
+            .get_mut(module)
+            .expect("module exists")
+            .namespace_object = Some(object);
     }
     // Realize re-exported namespaces only after installing this one, so
     // self-references and namespace re-export cycles terminate against the
@@ -933,4 +950,3 @@ fn units_to_utf8(units: &[u16]) -> Vec<u8> {
 fn collect_units(units: impl Iterator<Item = u16>) -> Vec<u16> {
     units.collect()
 }
-

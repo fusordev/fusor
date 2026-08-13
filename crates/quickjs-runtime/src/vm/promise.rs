@@ -2196,9 +2196,7 @@ pub(super) fn begin_promise_job(
             PromiseReactionTarget::AsyncModule { module } => {
                 match reaction.kind {
                     PromiseReactionKind::Fulfill => {
-                        crate::runtime::modules::async_module_execution_fulfilled(
-                            runtime, module,
-                        )?;
+                        crate::runtime::modules::async_module_execution_fulfilled(runtime, module)?;
                     }
                     PromiseReactionKind::Reject => {
                         crate::runtime::modules::async_module_execution_rejected(
@@ -2235,25 +2233,24 @@ pub(super) fn begin_promise_job(
                         reject_promise(runtime, promise, argument)?;
                     }
                     PromiseReactionKind::Fulfill => {
-                        let remaining = runtime
-                            .deferred_import_waiters
-                            .get_mut(&promise)
-                            .and_then(|count| {
-                                *count = count.saturating_sub(1);
-                                (*count == 0).then_some(())
-                            });
+                        let remaining =
+                            runtime
+                                .deferred_import_waiters
+                                .get_mut(&promise)
+                                .and_then(|count| {
+                                    *count = count.saturating_sub(1);
+                                    (*count == 0).then_some(())
+                                });
                         if remaining.is_some() {
                             runtime.deferred_import_waiters.remove(&promise);
-                            let namespace =
-                                crate::runtime::modules::get_or_create_namespace_phase(
-                                    runtime,
-                                    module,
-                                    true,
-                                )
-                                .map_err(|_| EngineFault::RuntimeInvariant {
-                                    message:
-                                        "deferred namespace creation failed after async deps",
-                                })?;
+                            let namespace = crate::runtime::modules::get_or_create_namespace_phase(
+                                runtime, module, true,
+                            )
+                            .map_err(|_| {
+                                EngineFault::RuntimeInvariant {
+                                    message: "deferred namespace creation failed after async deps",
+                                }
+                            })?;
                             fulfill_promise(runtime, promise, StoredValue::Object(namespace))?;
                         }
                     }

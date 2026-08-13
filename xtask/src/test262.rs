@@ -3,9 +3,8 @@
 use crate::DEFAULT_TIMEOUT_MS;
 use quickjs::{
     DynamicFunctionLimits, LoadedModuleSource, ModuleEvaluationError, ModuleSourceError,
-    ModuleSourceLoader, ScriptEvaluationError, ScriptLimits,
-    call_with_dynamic_function_support, evaluate_module, evaluate_script, module_evaluation_error,
-    pump_dynamic_imports,
+    ModuleSourceLoader, ScriptEvaluationError, ScriptLimits, call_with_dynamic_function_support,
+    evaluate_module, evaluate_script, module_evaluation_error, pump_dynamic_imports,
 };
 use quickjs_frontend::DiagnosticStage;
 use quickjs_runtime::{
@@ -1228,10 +1227,18 @@ fn execute_case(
         if plan.metadata.flags.contains("async") {
             // Async tests report completion through `print(...)`; install the
             // host `print` recorder first, then `$DONE` (doneprintHandle.js).
-            if let Err(error) =
-                evaluate_script(&mut context, TEST262_ASYNC_PRINT_SOURCE, "harness/print.js", limits)
-            {
-                return Ok(Some(harness_failure(plan, mode, "harness/print.js", &error)));
+            if let Err(error) = evaluate_script(
+                &mut context,
+                TEST262_ASYNC_PRINT_SOURCE,
+                "harness/print.js",
+                limits,
+            ) {
+                return Ok(Some(harness_failure(
+                    plan,
+                    mode,
+                    "harness/print.js",
+                    &error,
+                )));
             }
             if let Err(error) = evaluate_script(
                 &mut context,
@@ -1438,8 +1445,7 @@ impl ModuleSourceLoader for Test262ModuleLoader<'_> {
                 "could not load module `{specifier}` referenced by `{referrer}`: {error}"
             ))
         })?;
-        self.resolved
-            .insert(resolved.clone(), resolved.clone());
+        self.resolved.insert(resolved.clone(), resolved.clone());
         Ok(LoadedModuleSource {
             key: ModuleKey::new(Arc::from(resolved.as_str())),
             source,
@@ -1454,9 +1460,9 @@ fn resolve_module_specifier(referrer: &str, specifier: &str) -> Result<String, M
             "unsupported module specifier `{specifier}`"
         )));
     }
-    let mut components: Vec<&str> = referrer.rsplit_once('/').map_or_else(Vec::new, |(directory, _)| {
-        directory.split('/').collect()
-    });
+    let mut components: Vec<&str> = referrer
+        .rsplit_once('/')
+        .map_or_else(Vec::new, |(directory, _)| directory.split('/').collect());
     for segment in specifier.split('/') {
         match segment {
             "" | "." => {}
@@ -1685,12 +1691,7 @@ fn classify_module_error(
                     })
                     .or_else(|| {
                         module_error.rejection_value().and_then(|value| {
-                            value_type(
-                                context,
-                                value,
-                                test262_error_classifier,
-                                classifier_limits,
-                            )
+                            value_type(context, value, test262_error_classifier, classifier_limits)
                         })
                     }),
             },
@@ -2448,8 +2449,11 @@ Test262Error.prototype.toString = function () {
         let root = unique_temp_dir("module-resolution");
         let test_root = root.join("test");
         fs::create_dir_all(test_root.join("dir")).expect("test directory");
-        fs::write(test_root.join("dir/dep_FIXTURE.js"), "export var present = 1;")
-            .expect("fixture source");
+        fs::write(
+            test_root.join("dir/dep_FIXTURE.js"),
+            "export var present = 1;",
+        )
+        .expect("fixture source");
         let source = "/*---\nflags: [module]\nnegative:\n  phase: resolution\n  type: SyntaxError\n---*/\n\
             import { missing } from './dep_FIXTURE.js';";
         let metadata = parse_metadata(source).expect("metadata");

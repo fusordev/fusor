@@ -61,7 +61,12 @@ pub(crate) async fn gather_static_graph(
         for (referrer, source) in &frontier {
             for request in module_import_requests(source, limits)? {
                 let resolution = resolver.resolve_request(&request.specifier, Some(referrer))?;
-                requests.push((referrer.clone(), request.specifier, request.kind, resolution));
+                requests.push((
+                    referrer.clone(),
+                    request.specifier,
+                    request.kind,
+                    resolution,
+                ));
             }
         }
 
@@ -111,7 +116,9 @@ pub(crate) async fn gather_static_graph(
         // cross the await boundary.
         for task in read_tasks {
             let source = task.await.unwrap_or_else(|error| {
-                Err(ModuleSourceError::new(format!("module read task failed: {error}")))
+                Err(ModuleSourceError::new(format!(
+                    "module read task failed: {error}"
+                )))
             })?;
             fresh.push(source);
         }
@@ -188,7 +195,12 @@ mod tests {
 
     /// Gathers the static graph below `root_name`, evaluates it, drains parked
     /// dynamic imports, then runs `probe` as a script (throwing on mismatch).
-    async fn run_entry(directory: &Path, root_name: &str, source: &str, probe: &str) -> Result<(), String> {
+    async fn run_entry(
+        directory: &Path,
+        root_name: &str,
+        source: &str,
+        probe: &str,
+    ) -> Result<(), String> {
         let mut runtime = Runtime::try_new(RuntimeLimits::default()).map_err(|e| e.to_string())?;
         let realm = runtime.create_realm().map_err(|e| e.to_string())?;
         let mut context = runtime.context(&realm).map_err(|e| e.to_string())?;

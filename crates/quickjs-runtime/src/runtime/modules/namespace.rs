@@ -39,9 +39,7 @@ pub(crate) enum NamespaceExport {
     /// An `export * as name` re-export: the target module, whose namespace
     /// object is realized after this namespace is installed (self-references
     /// and cycles resolve once creation unwinds).
-    Namespace {
-        module: ModuleRecordId,
-    },
+    Namespace { module: ModuleRecordId },
 }
 
 /// The current value state of a namespace export's target binding.
@@ -136,14 +134,15 @@ impl Runtime {
                 crate::runtime::ExecutionLimits::default(),
                 None,
             ) {
-                let value = crate::vm::module_error_rejection_value(self, realm, &error)
-                    .map_err(|_execution| {
+                let value = crate::vm::module_error_rejection_value(self, realm, &error).map_err(
+                    |_execution| {
                         DeferredNamespaceEvaluationFailure::Fault(
                             crate::EngineFault::RuntimeInvariant {
                                 message: "deferred evaluation rejection value failed",
                             },
                         )
-                    })?;
+                    },
+                )?;
                 return Err(DeferredNamespaceEvaluationFailure::Thrown(value));
             }
         }

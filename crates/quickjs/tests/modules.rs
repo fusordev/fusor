@@ -205,7 +205,10 @@ fn cycles_link_and_evaluate_with_hoisted_functions() {
                 "import { fromA } from './root.entry.mjs';\n\
                  export function fromB() { return fromA() + '+b'; }",
             ),
-            ("./root.entry.mjs", "export function fromA() { return 'a'; }"),
+            (
+                "./root.entry.mjs",
+                "export function fromA() { return 'a'; }",
+            ),
         ],
     )
     .expect("cyclic graph links and evaluates");
@@ -215,13 +218,16 @@ fn cycles_link_and_evaluate_with_hoisted_functions() {
 fn reading_an_uninitialized_imported_binding_throws_reference_error() {
     let error = evaluate(
         "import { late } from './dep.mjs';\n",
-        &[(
-            "./dep.mjs",
-            "import { readLate } from './probe.mjs';\nreadLate();\nexport let late = 1;",
-        ), (
-            "./probe.mjs",
-            "import { late } from './dep.mjs';\nexport function readLate() { return late; }",
-        )],
+        &[
+            (
+                "./dep.mjs",
+                "import { readLate } from './probe.mjs';\nreadLate();\nexport let late = 1;",
+            ),
+            (
+                "./probe.mjs",
+                "import { late } from './dep.mjs';\nexport function readLate() { return late; }",
+            ),
+        ],
     )
     .expect_err("TDZ read throws");
     assert!(
@@ -278,8 +284,7 @@ fn debug_module_local_let_read_in_same_module() {
 
 #[test]
 fn debug_exported_const_read_in_same_module() {
-    evaluate("export const x = 3; globalThis.out = x;", &[])
-        .expect("exported const round-trips");
+    evaluate("export const x = 3; globalThis.out = x;", &[]).expect("exported const round-trips");
 }
 
 #[test]
@@ -967,8 +972,13 @@ fn dynamic_import_of_tla_module_fulfills_after_evaluation() {
         ScriptLimits::default(),
     )
     .expect("the import promise stays pending while the module awaits");
-    evaluate_script(&mut context, "globalThis.open();", "release.js", ScriptLimits::default())
-        .expect("the gate opens");
+    evaluate_script(
+        &mut context,
+        "globalThis.open();",
+        "release.js",
+        ScriptLimits::default(),
+    )
+    .expect("the gate opens");
     pump_dynamic_imports(&mut context, &mut loader, ScriptLimits::default())
         .expect("second pump completes the async evaluation");
     evaluate_script(
@@ -1053,4 +1063,3 @@ fn facade_module_evaluation_error_reports_the_async_outcome() {
         "expected the rejection message, got: {error}"
     );
 }
-

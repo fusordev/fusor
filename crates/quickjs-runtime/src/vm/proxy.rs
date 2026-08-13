@@ -688,13 +688,7 @@ pub(super) fn begin_internal_get_own_property(
     if let HeapReference::Object(object) = reference
         && runtime.module_namespace_is_deferred(object)
     {
-        ensure_deferred_namespace_access(
-            runtime,
-            object,
-            &key,
-            realm,
-            origin.clone(),
-        )?;
+        ensure_deferred_namespace_access(runtime, object, &key, realm, origin.clone())?;
     }
     if let HeapReference::Object(object) = reference
         && runtime.module_namespace_export_is_uninitialized(object, &key)?
@@ -1002,13 +996,7 @@ pub(super) fn begin_internal_define_own_property(
         {
             // ECMA-262 10.4.6.4 [[DefineOwnProperty]] resolves the exports
             // list through [[GetOwnProperty]], triggering deferred evaluation.
-            ensure_deferred_namespace_access(
-                runtime,
-                object,
-                &key,
-                realm,
-                origin.clone(),
-            )?;
+            ensure_deferred_namespace_access(runtime, object, &key, realm, origin.clone())?;
         }
         if let HeapReference::Object(object) = proxy
             && let Some(allowed) = runtime.module_namespace_define_export(
@@ -2294,13 +2282,7 @@ pub(super) fn begin_internal_has(
         {
             // ECMA-262 10.4.6.5 [[HasProperty]] step 2: the exports list
             // triggers deferred evaluation for string keys (except "then").
-            ensure_deferred_namespace_access(
-                runtime,
-                object,
-                &key,
-                realm,
-                origin.clone(),
-            )?;
+            ensure_deferred_namespace_access(runtime, object, &key, realm, origin.clone())?;
         }
         if let HeapReference::Object(object) = current
             && let TypedArrayOwnProperty::IntegerIndexed(property) =
@@ -2356,13 +2338,7 @@ pub(super) fn begin_internal_delete(
     {
         // ECMA-262 10.4.6.7 [[Delete]] step 2: the exports list triggers
         // deferred evaluation for string keys (except "then").
-        ensure_deferred_namespace_access(
-            runtime,
-            object,
-            &key,
-            realm,
-            origin.clone(),
-        )?;
+        ensure_deferred_namespace_access(runtime, object, &key, realm, origin.clone())?;
     }
     let target = proxy_reference_value(reference);
     let result = match delete_static_property(runtime, &target, &key)? {
@@ -3173,13 +3149,7 @@ pub(super) fn begin_internal_get(
         {
             // ECMA-262 10.4.6.2 [[Get]] step 2: GetModuleExportsList triggers
             // deferred evaluation for string keys (except "then").
-            ensure_deferred_namespace_access(
-                runtime,
-                object,
-                &key,
-                realm,
-                origin.clone(),
-            )?;
+            ensure_deferred_namespace_access(runtime, object, &key, realm, origin.clone())?;
         }
         if let HeapReference::Object(object) = current
             && runtime.module_namespace_export_is_uninitialized(object, &key)?

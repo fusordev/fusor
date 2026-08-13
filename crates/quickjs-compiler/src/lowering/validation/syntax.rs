@@ -192,10 +192,9 @@ impl CompilationContext<'_, '_, '_> {
                         break;
                     }
                     AstKind::Class(class) => {
-                        let in_heritage = class
-                            .super_class
-                            .as_ref()
-                            .is_some_and(|super_class| super_class.span() == nodes.kind(child).span());
+                        let in_heritage = class.super_class.as_ref().is_some_and(|super_class| {
+                            super_class.span() == nodes.kind(child).span()
+                        });
                         if !in_heritage {
                             break;
                         }

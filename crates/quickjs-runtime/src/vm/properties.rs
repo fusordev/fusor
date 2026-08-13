@@ -1399,7 +1399,9 @@ pub(super) fn delete_static_property(
         });
     }
     if let HeapReference::Object(object) = reference
-        && runtime.module_namespace_export_state(object, key)?.is_some()
+        && runtime
+            .module_namespace_export_state(object, key)?
+            .is_some()
     {
         // Module namespace [[Delete]] (ECMA-262 10.4.6.5): a string export is
         // never deletable, so strict `delete` throws a TypeError while

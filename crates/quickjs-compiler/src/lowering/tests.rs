@@ -882,9 +882,7 @@ fn module_arrows_and_class_constructors_compile_in_module_units() {
                 "ordinary arrow compiles, got: {kinds:?}"
             );
             assert!(
-                kinds.contains(&ExecutableKind::Arrow {
-                    asynchronous: true
-                }),
+                kinds.contains(&ExecutableKind::Arrow { asynchronous: true }),
                 "async arrow compiles, got: {kinds:?}"
             );
             assert!(

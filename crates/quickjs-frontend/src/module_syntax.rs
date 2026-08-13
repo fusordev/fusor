@@ -11,8 +11,8 @@ use std::{
 };
 
 use oxc_ast::ast::{
-    ExportDefaultDeclarationKind, ImportAttributeKey as OxcImportAttributeKey, ImportPhase, Program,
-    Statement, StringLiteral, WithClause,
+    ExportDefaultDeclarationKind, ImportAttributeKey as OxcImportAttributeKey, ImportPhase,
+    Program, Statement, StringLiteral, WithClause,
 };
 use oxc_span::Span;
 use oxc_syntax::module_record::{
@@ -599,9 +599,10 @@ impl ModuleSyntaxRecord {
             let ModuleExportLocalName::Name(local_name) = &entry.local_name else {
                 continue;
             };
-            let Some(import) = import_entries.iter().find(|import| {
-                import.local_name.code_units() == local_name.code_units()
-            }) else {
+            let Some(import) = import_entries
+                .iter()
+                .find(|import| import.local_name.code_units() == local_name.code_units())
+            else {
                 continue;
             };
             *entry = ModuleExportEntry {

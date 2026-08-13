@@ -1621,8 +1621,8 @@ pub(super) fn duplicate_binding(
     let value = match binding {
         FrameBinding::Direct(value) => value,
         FrameBinding::Captured(cell) => {
-            let resolved = BindingCell::resolve_forward(runtime, *cell)
-                .map_err(BindingAccessError::Fault)?;
+            let resolved =
+                BindingCell::resolve_forward(runtime, *cell).map_err(BindingAccessError::Fault)?;
             &runtime
                 .cells
                 .get(resolved)
@@ -1997,7 +1997,8 @@ pub(super) fn duplicate_environment(
             },
         ));
     };
-    let resolved = BindingCell::resolve_forward(runtime, cell).map_err(BindingAccessError::Fault)?;
+    let resolved =
+        BindingCell::resolve_forward(runtime, cell).map_err(BindingAccessError::Fault)?;
     let value = &runtime
         .cells
         .get(resolved)

@@ -45,9 +45,10 @@ use crate::{
     JsValue, OrdinaryDynamicFunctionCompiler, PredefinedAtom, PropertyKey, PropertyLayout,
     PropertyLayoutKind, RuntimeError, RuntimeResource,
     arena::{Arena, RuntimeIdentity},
+    debug::DebuggerHook,
     ids::{
-        BindingCellId, FunctionId, InstalledCodeId, ObjectId, RealmGlobalBindingId, RealmId,
-        ModuleRecordId,
+        BindingCellId, FunctionId, InstalledCodeId, ModuleRecordId, ObjectId, RealmGlobalBindingId,
+        RealmId,
     },
     interrupt::InterruptState,
     object::{
@@ -65,8 +66,8 @@ mod array_buffers;
 mod async_functions;
 mod atomics_waiters;
 mod data_views;
-mod dynamic_imports;
 mod dates;
+mod dynamic_imports;
 mod intls;
 mod iterators;
 mod limits;
@@ -5528,6 +5529,7 @@ pub struct Runtime {
     public_roots: u64,
     pub(crate) collection_pending: bool,
     pub(crate) interrupts: InterruptState,
+    debugger: Option<Arc<dyn DebuggerHook>>,
     pub(crate) import_meta_hook: Option<Arc<dyn ImportMetaHook>>,
     pub(crate) promise_rejections: PromiseRejectionState,
     pub(crate) promise_jobs: VecDeque<PromiseJob>,
@@ -5539,8 +5541,7 @@ pub struct Runtime {
         tokio::sync::mpsc::UnboundedReceiver<crate::shared_array_buffer::AtomicsWakeEvent>,
     pub(crate) atomics_agent_id: usize,
     pub(crate) atomics_timer: Option<atomics_waiters::AtomicsTimerDriver>,
-    pub(crate) pending_dynamic_imports:
-        VecDeque<dynamic_imports::PendingDynamicImportRecord>,
+    pub(crate) pending_dynamic_imports: VecDeque<dynamic_imports::PendingDynamicImportRecord>,
     /// Remaining async-dependency count per in-flight `import.defer()` promise
     /// (SafePerformPromiseAll bookkeeping).
     pub(crate) deferred_import_waiters: HashMap<ObjectId, u32>,
@@ -5561,6 +5562,30 @@ pub struct Runtime {
 }
 
 impl Runtime {
+    /// Installs a debugger hook invoked at each verified instruction boundary.
+    ///
+    /// The hook is synchronous so an embedding can retain the live VM stack
+    /// while a debugger client chooses to resume. It must not re-enter this
+    /// runtime.
+    pub fn set_debugger_hook(&mut self, hook: Arc<dyn DebuggerHook>) {
+        self.debugger = Some(hook);
+    }
+
+    /// Removes the debugger hook.
+    pub fn clear_debugger_hook(&mut self) {
+        self.debugger = None;
+    }
+
+    /// Returns whether a debugger hook is installed.
+    #[must_use]
+    pub fn has_debugger_hook(&self) -> bool {
+        self.debugger.is_some()
+    }
+
+    pub(crate) fn debugger_hook(&self) -> Option<Arc<dyn DebuggerHook>> {
+        self.debugger.clone()
+    }
+
     /// Installs the host interrupt handler, replacing any previous one.
     ///
     /// The handler is polled on a decrementing counter rather than on every
@@ -5654,11 +5679,11 @@ mod heap;
 mod installation;
 pub(crate) mod modules;
 mod realm;
+pub use dynamic_imports::PendingDynamicImport;
 pub use modules::{
     ImportMetaHook, ModuleError, ModuleErrorPhase, ModuleEvaluationError, ModuleKey,
     ModuleLinkError, ModuleLoader, ModuleResolveError, default_import_meta_resolve,
 };
-pub use dynamic_imports::PendingDynamicImport;
 #[cfg(test)]
 mod realm_snapshot;
 mod template_objects;

@@ -14,8 +14,8 @@ pub use oxc_ast::ast::Program;
 use oxc_ast::{
     AstKind,
     ast::{
-        Argument, Directive, Expression, ImportPhase, Statement,
-        VariableDeclarationKind, WithClauseKeyword,
+        Argument, Directive, Expression, ImportPhase, Statement, VariableDeclarationKind,
+        WithClauseKeyword,
     },
     builder::AstBuilder,
 };

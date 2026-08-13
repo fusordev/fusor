@@ -19,6 +19,7 @@ mod array_index;
 mod atom;
 mod bigint;
 mod conversion;
+mod debug;
 mod define_property;
 mod diagnostic;
 mod error;
@@ -43,6 +44,7 @@ pub use atom::{
     PREDEFINED_INTERNER_SLOTS, PropertyKey,
 };
 pub use bigint::{BigIntError, JsBigInt};
+pub use debug::{DebugExecutionSnapshot, DebugLocation, DebuggerHook};
 pub use diagnostic::RuntimeDiagnosticError;
 pub use error::{
     CallError, DynamicFunctionCompileFailure, DynamicFunctionScriptError, EngineFault,
