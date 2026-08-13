@@ -345,7 +345,7 @@ mod tests {
         }
 
         assert_eq!(invalid, 1);
-        assert_eq!(supported, 225);
+        assert_eq!(supported, 226);
         assert_eq!(unsupported, 22);
         assert_eq!(invalid + supported + unsupported, ALL_FINAL_OPCODES.len());
         assert_eq!(
