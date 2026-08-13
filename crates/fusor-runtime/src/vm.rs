@@ -970,6 +970,7 @@ impl ProxyOwnKeysContinuation {
 
 enum NativeContinuation {
     FunctionSource(FunctionSourceContinuation),
+    HostConstruct(Box<crate::vm::native::HostConstructContinuation>),
     FunctionApply(FunctionApplyContinuation),
     FunctionBind(FunctionBindContinuation),
     PropertyKey(PropertyKeyContinuation),
@@ -1165,6 +1166,7 @@ impl NativeContinuation {
         match self {
             Self::FunctionSource(state) => usize_to_u64(state.arguments.len())
                 .saturating_add(u64::from(state.construction.is_some())),
+            Self::HostConstruct(state) => state.retained_values(),
             Self::FunctionApply(state) => state.retained_values(),
             Self::FunctionBind(state) => state.retained_values(),
             Self::PropertyKey(state) => state.retained_values(),
@@ -3824,6 +3826,7 @@ fn trace_native_continuation_roots(
                 mark(CollectionRoot::Heap(HeapReference::Function(construction)));
             }
         }
+        NativeContinuation::HostConstruct(state) => state.trace_roots(mark),
         NativeContinuation::FunctionApply(state) => {
             trace_function_apply_roots(state, mark);
         }

@@ -27,9 +27,9 @@
 
 ### 构造路径(§4.2)
 
-- [ ] `create_host_function` 安装规范 `prototype` 自有属性 + `constructor` 回指
-- [ ] `dispatch_host_function` 构造分支:`OrdinaryCreateFromConstructor`、原语返回值回退 this
-- [ ] 测试:`new f()` 得对象、`instanceof` 成立、`new_target` 身份、原语返回回退
+- [x] `create_host_function` 安装规范 `prototype` 自有属性 + `constructor` 回指
+- [x] `dispatch_host_function` 构造分支:`OrdinaryCreateFromConstructor`、原语返回值回退 this
+- [x] 测试:`new f()` 得对象、`instanceof` 成立、`new_target` 身份、原语返回回退
 
 ### 异常 API(§4.3)
 

@@ -1171,9 +1171,21 @@ impl Context<'_> {
     /// Installs a Rust closure as a JavaScript function.
     ///
     /// The callback is `Fn(&mut Context, HostCall) -> Result<JsValue, JsValue>`:
-    /// return `Ok` with the result, or `Err` with the value to throw. Host
-    /// functions are constructable; a construct call has
-    /// [`HostCall::new_target`] set.
+    /// return `Ok` with the result, or `Err` with the value to throw.
+    ///
+    /// The installed function carries the spec construct shape (ECMA-262
+    /// 9.2.12 / 20.2.4.3): a non-enumerable, non-configurable, writable own
+    /// `prototype` property whose value is a fresh ordinary object with a
+    /// non-enumerable `constructor` property pointing back at the function,
+    /// so `instanceof` works and subclasses inherit the shape.
+    ///
+    /// A construct call (`new f()`, `[[Construct]]` in ECMA-262 9.2.2) first
+    /// performs `OrdinaryCreateFromConstructor(new_target,
+    /// "%Object.prototype%")` — including the observable `Get(newTarget,
+    /// "prototype")` — and hands that fresh object to the callback as
+    /// [`HostCall::this`] with [`HostCall::new_target`] set. An object result
+    /// replaces `this`; a primitive result falls back to `this`. A plain call
+    /// keeps the ordinary receiver and reports no `new.target`.
     ///
     /// # Errors
     ///
@@ -1193,13 +1205,15 @@ impl Context<'_> {
         let prototype = self.runtime.realm_function_prototype(self.realm)?;
         let name_key = self.runtime.predefined_property_key(PredefinedAtom::Name);
         let length_key = self.runtime.predefined_property_key(PredefinedAtom::Length);
+        let prototype_key = self.runtime.predefined_property_key(PredefinedAtom::Prototype);
+        let constructor_key = self.runtime.predefined_property_key(PredefinedAtom::Constructor);
         let function_name = JsString::from_utf8(name).map_err(crate::ExecutionError::from)?;
         let mut record = ObjectRecord::empty(Some(HeapReference::Function(prototype)));
         record
-            .try_reserve_data(2)
+            .try_reserve_data(3)
             .map_err(|_| crate::ExecutionError::AllocationFailed {
                 resource: RuntimeResource::ObjectProperties,
-                additional: 2,
+                additional: 3,
             })?;
         record
             .append_data(
@@ -1221,6 +1235,61 @@ impl Context<'_> {
                 resource: RuntimeResource::ObjectProperties,
                 additional: 1,
             })?;
+        record
+            .append_data(
+                prototype_key,
+                PropertyLayout::data(true, false, false),
+                StoredValue::Undefined,
+            )
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::ObjectProperties,
+                additional: 1,
+            })?;
+
+        // The spec `prototype` own property is a fresh ordinary object whose
+        // prototype is `%Object.prototype%`, with a non-enumerable
+        // `constructor` back reference (ECMA-262 9.2.12 / 20.2.4.3).
+        let object_prototype = self.runtime.realm_object_prototype(self.realm)?;
+        super::check_execution_limit(
+            RuntimeResource::HeapObjects,
+            self.runtime.limits.max_heap_objects,
+            usize_to_u64(self.runtime.objects.len()).saturating_add(1),
+        )?;
+        let mut prototype_record =
+            ObjectRecord::empty(Some(HeapReference::Object(object_prototype)));
+        prototype_record
+            .try_reserve_data(1)
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::ObjectProperties,
+                additional: 1,
+            })?;
+        prototype_record
+            .append_data(
+                constructor_key.clone(),
+                PropertyLayout::data(true, false, true),
+                StoredValue::Undefined,
+            )
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::ObjectProperties,
+                additional: 1,
+            })?;
+        let prototype_object = self
+            .runtime
+            .insert_heap_object(HeapObject::ordinary(prototype_record))
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::HeapObjects,
+                additional: 1,
+            })?;
+        if !record.replace_existing_data(
+            &self.runtime.predefined_property_key(PredefinedAtom::Prototype),
+            StoredValue::Object(prototype_object),
+        ) {
+            let removed = self.runtime.objects.remove(prototype_object);
+            debug_assert!(removed.is_some());
+            return Err(crate::ExecutionError::from(crate::EngineFault::RuntimeInvariant {
+                message: "host function lost its prototype property before installation",
+            }));
+        }
 
         super::check_execution_limit(
             RuntimeResource::HeapFunctions,
@@ -1247,6 +1316,24 @@ impl Context<'_> {
                 resource: RuntimeResource::HeapFunctions,
                 additional: 1,
             })?;
+        let updated = self
+            .runtime
+            .objects
+            .get_mut(prototype_object)
+            .is_some_and(|node| {
+                node.record
+                    .replace_existing_data(&constructor_key, StoredValue::Function(function))
+            });
+        if !updated {
+            let removed = self.runtime.functions.remove(function);
+            debug_assert!(removed.is_some());
+            let removed = self.runtime.objects.remove(prototype_object);
+            debug_assert!(removed.is_some());
+            return Err(crate::ExecutionError::from(crate::EngineFault::RuntimeInvariant {
+                message: "host function prototype lost its constructor property",
+            }));
+        }
+        self.runtime.object_properties = self.runtime.object_properties.saturating_add(4);
         self.runtime.collection_pending = true;
         let value = self.runtime.public_value(StoredValue::Function(function))?;
         Ok(Function::from_root(value))
