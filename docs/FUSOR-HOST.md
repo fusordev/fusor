@@ -138,6 +138,14 @@ pub fn own_property_keys(&self, ctx: &mut Context) -> Result<Vec<PropertyKey>, E
 - 全部路由到 `define_property.rs` 不变量校验路径(不可配置/不可写/`[[Extensible]]` 全生效)——宿主与 JS 共享同一套语义
 - `Context::set_global` 改为 `[[DefineOwnProperty]]` 语义(`{value, writable: true, enumerable: false, configurable: true}`):重复 key 走已有属性更新路径;补 `validate_owner`;对冻结 global 按规范抛错
 
+**API 补全(2026-08-14 实现期确认,原设计隐含但未写明)**:宿主需要构造 key 与取得对象,随本项一并落地:
+
+- `Context::property_key(&str)`:字符串 key(整数字符串 → 规范数组索引 key)
+- `Context::property_key_from_value(&JsValue)`:同 runtime String/Symbol 值 → key;不做 `ToPropertyKey` 隐式强转,其余类型报错(fail closed)
+- `Context::global_object()`:realm global 为 `Object` 句柄,宿主读/写全局属性的入口(`set_global` 的逆操作)
+
+**语义决策(实现期确认)**:六个方法无 `ExecutionLimits` 参数,可观察用户代码(getter/setter/Proxy trap)统一在 `ExecutionLimits::default()` 下执行,且不提供 dynamic-function 编译器;`set` 恒为严格模式(无 sloppy 静默吞错),拒绝写抛 `TypeError`——fail closed;`define_own_property` 与 `delete` 返回内部方法布尔结果(`Reflect.*` 契约,普通拒绝不抛错);`own_property_keys` 普通对象走零分配快照路径,Proxy 走 trap 验证机制。
+
 ### 4.2 构造路径修复(高严重度)
 
 `create_host_function` 安装时创建规范 `prototype` 自有属性(普通对象 +

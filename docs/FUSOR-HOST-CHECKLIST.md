@@ -19,7 +19,7 @@
 
 ### 属性 API(§4.1)
 
-- [ ] `Object::get/set/define_own_property/has/delete/own_property_keys` + `PropertyKey`/`PropertyDescriptor`
+- [x] `Object::get/set/define_own_property/has/delete/own_property_keys` + `PropertyKey`/`PropertyDescriptor`
 - [ ] 全部路由到 `define_property.rs` 不变量校验路径(不可配置/不可写/`[[Extensible]]` 全生效)
 - [ ] `Context::set_global` 改为 `[[DefineOwnProperty]]` 语义(writable/enumerable:false/configurable)
 - [ ] `set_global` 三缺陷回归测试:foreign 值 → `HandleError::ForeignRuntime`;重复 key 覆盖(无影子槽位,delete 后无残留);冻结 global → 按规范抛错
