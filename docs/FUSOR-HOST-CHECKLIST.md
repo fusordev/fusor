@@ -58,8 +58,8 @@
 
 ### 模块契约
 
-- [ ] 静态模块图注册前 `has_module` 检查(与动态 import 路径一致);跨图共享模块只求值一次(测试:双图 + 副作用计数)
-- [ ] 模块求值错误保留类型化 cause(修复字符串拍平;测试:limit abort 与 JS exception 可区分)
+- [x] 静态模块图注册前 `has_module` 检查(与动态 import 路径一致);跨图共享模块只求值一次(测试:双图 + 副作用计数)
+- [x] 模块求值错误保留类型化 cause(修复字符串拍平;测试:limit abort 与 JS exception 可区分)
 
 ## 子项目 2:ops 绑定层 + 资源管理(fusor-ops + fusor-host::ops)§5
 

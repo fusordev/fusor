@@ -711,7 +711,7 @@ fn execute_module_body(
         Err(crate::ExecutionError::Exception(exception)) => {
             Err(ModuleError::evaluate_exception(runtime, exception))
         }
-        Err(e) => Err(ModuleError::evaluate(format!("execution error: {e}"))),
+        Err(e) => Err(ModuleError::evaluate_execution(e)),
     }
 }
 

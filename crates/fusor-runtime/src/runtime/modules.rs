@@ -102,6 +102,10 @@ pub struct ModuleError {
     /// failure (ECMA-262 [[EvaluationError]] of an async module). A heap value
     /// stays rooted by this public root until the error is dropped.
     pub(crate) rejection_value: Option<crate::JsValue>,
+    /// The original typed engine failure of a synchronous evaluation that
+    /// did not produce a JavaScript exception (limits, allocation, engine
+    /// fault). Never flattened into the message only.
+    pub(crate) execution_error: Option<std::sync::Arc<crate::ExecutionError>>,
 }
 
 impl ModuleError {
@@ -111,6 +115,7 @@ impl ModuleError {
             message: message.into(),
             exception: None,
             rejection_value: None,
+            execution_error: None,
         }
     }
 
@@ -120,6 +125,21 @@ impl ModuleError {
             message: message.into(),
             exception: None,
             rejection_value: None,
+            execution_error: None,
+        }
+    }
+
+    /// Creates an evaluation-phase error that retains the original typed
+    /// engine failure (limit exhaustion, allocation failure, engine fault)
+    /// instead of flattening it into a message string.
+    pub(crate) fn evaluate_execution(error: crate::ExecutionError) -> Self {
+        let message = error.to_string();
+        Self {
+            phase: ModuleErrorPhase::Evaluate,
+            message,
+            exception: None,
+            rejection_value: None,
+            execution_error: Some(std::sync::Arc::new(error)),
         }
     }
 
@@ -130,6 +150,7 @@ impl ModuleError {
             message,
             exception: Some(exception),
             rejection_value: None,
+            execution_error: None,
         }
     }
 
@@ -144,6 +165,7 @@ impl ModuleError {
             message: rejection_value_message(runtime, value),
             exception: None,
             rejection_value: Some(runtime.public_value(value.duplicate())?),
+            execution_error: None,
         })
     }
 
@@ -169,6 +191,14 @@ impl ModuleError {
     #[must_use]
     pub const fn exception(&self) -> Option<&crate::JsException> {
         self.exception.as_ref()
+    }
+
+    /// Returns the original typed engine failure for a synchronous
+    /// evaluation that did not produce a JavaScript exception (instruction
+    /// limit exhaustion, allocation failure, engine fault).
+    #[must_use]
+    pub fn execution_error(&self) -> Option<&crate::ExecutionError> {
+        self.execution_error.as_deref()
     }
 }
 

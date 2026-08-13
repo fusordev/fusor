@@ -1331,12 +1331,16 @@ pub fn evaluate_preloaded_module_graph(
     let root_key = fusor_runtime::ModuleKey::new(Arc::from(root_name));
     let root_compiled = compile_module_source(root_source, root_name, limits, root_key.clone())?;
 
-    // Register root
-    context.register_module(
-        root_compiled.key.clone(),
-        root_compiled.syntax_record.clone(),
-        root_compiled.authority.clone(),
-    )?;
+    // Register root. A module record is evaluated at most once per realm
+    // (ECMA-262 [[Evaluation]]): a pre-registered root reuses its existing
+    // record instead of shadowing it.
+    if !context.has_module(&root_compiled.key) {
+        context.register_module(
+            root_compiled.key.clone(),
+            root_compiled.syntax_record.clone(),
+            root_compiled.authority.clone(),
+        )?;
+    }
 
     // BFS: register every preloaded dependency
     let mut queue: Vec<(
@@ -1372,11 +1376,13 @@ pub fn evaluate_preloaded_module_graph(
             let compiled =
                 compile_module_source(&source, &loaded.display_name, limits, key.clone())
                     .map_err(resolution_failure)?;
-            context.register_module(
-                compiled.key.clone(),
-                compiled.syntax_record.clone(),
-                compiled.authority.clone(),
-            )?;
+            if !context.has_module(&key) {
+                context.register_module(
+                    compiled.key.clone(),
+                    compiled.syntax_record.clone(),
+                    compiled.authority.clone(),
+                )?;
+            }
             // HostResolveImportedModule: record the (referrer, specifier)
             // edge now that both records are registered.
             context.register_module_dependency(&referrer_key, &specifier, &key)?;
@@ -1489,11 +1495,13 @@ fn gather_dynamic_import_graph(
             let compiled =
                 compile_module_source(&source, &loaded.display_name, limits, key.clone())
                     .map_err(resolution_failure)?;
-            context.register_module(
-                compiled.key.clone(),
-                compiled.syntax_record.clone(),
-                compiled.authority.clone(),
-            )?;
+            if !context.has_module(&key) {
+                context.register_module(
+                    compiled.key.clone(),
+                    compiled.syntax_record.clone(),
+                    compiled.authority.clone(),
+                )?;
+            }
             // HostResolveImportedModule: record the (referrer, specifier)
             // edge now that both records are registered.
             context.register_module_dependency(&referrer_key, &specifier, &key)?;

@@ -661,15 +661,18 @@ fn dynamic_import_rejects_for_a_missing_module() {
 
 #[test]
 fn dynamic_import_rejects_unsupported_attributes() {
+    // `type: "json"` / `type: "text"` are supported and park at the host
+    // boundary; every other attribute key rejects before
+    // HostLoadImportedModule (AllImportAttributesSupported).
     evaluate_dynamic(
-        "import('./dep.mjs', { with: { type: 'json' } }).then(\n\
+        "import('./dep.mjs', { with: { type: 'css' } }).then(\n\
              function () { globalThis.settled = 'fulfilled'; },\n\
              function (error) { globalThis.settled = 'rejected'; globalThis.reason = String(error); });",
         &[("./dep.mjs", "export const value = 1;")],
         "if (globalThis.settled !== 'rejected') { throw new Error('settled ' + globalThis.settled); }\n\
          if (!globalThis.reason.includes('unsupported dynamic import attribute')) { throw new Error('reason ' + globalThis.reason); }",
     )
-    .expect("non-empty attributes still reject before the host boundary");
+    .expect("unsupported attributes still reject before the host boundary");
 }
 
 #[test]
@@ -1062,4 +1065,109 @@ fn facade_module_evaluation_error_reports_the_async_outcome() {
         error.to_string().contains("boom"),
         "expected the rejection message, got: {error}"
     );
+}
+
+
+#[test]
+fn a_shared_module_across_two_graphs_evaluates_exactly_once() {
+    let entries = [
+        (
+            "shared.mjs",
+            "globalThis.sideEffects = (globalThis.sideEffects || 0) + 1;\
+             export const value = globalThis.sideEffects;",
+        ),
+        (
+            "a.mjs",
+            "import { value } from 'shared.mjs'; globalThis.aValue = value;",
+        ),
+        (
+            "b.mjs",
+            "import { value } from 'shared.mjs'; globalThis.bValue = value;",
+        ),
+    ];
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let mut loader = MapLoader::new(&entries);
+    evaluate_module(
+        &mut context,
+        entries[1].1,
+        "a.mjs",
+        &mut loader,
+        ScriptLimits::default(),
+    )
+    .expect("first graph");
+    evaluate_module(
+        &mut context,
+        entries[2].1,
+        "b.mjs",
+        &mut loader,
+        ScriptLimits::default(),
+    )
+    .expect("second graph");
+    let probe = fusor::evaluate_script(
+        &mut context,
+        "String(globalThis.sideEffects + ':' + globalThis.aValue + ':' + globalThis.bValue);",
+        "probe.mjs",
+        ScriptLimits::default(),
+    )
+    .expect("probe script");
+    assert_eq!(
+        probe
+            .as_string()
+            .expect("live string")
+            .expect("String")
+            .to_utf8_lossy()
+            .expect("UTF-8"),
+        "1:1:1",
+        "the shared module must evaluate exactly once across both graphs"
+    );
+}
+
+#[test]
+fn module_evaluation_errors_distinguish_typed_engine_failures_from_exceptions() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+
+    // A JavaScript throw: the ModuleError retains the exception and no
+    // typed engine failure.
+    let mut throwing = MapLoader::new(&[]);
+    let thrown = evaluate_module(
+        &mut context,
+        "throw new TypeError('boom');",
+        "throwing.mjs",
+        &mut throwing,
+        ScriptLimits::default(),
+    );
+    match thrown {
+        Err(fusor::ModuleEvaluationError::Runtime(error)) => {
+            assert!(error.exception().is_some());
+            assert!(error.execution_error().is_none());
+        }
+        other => panic!("expected a runtime module error, got {other:?}"),
+    }
+
+    // Instruction exhaustion: the ModuleError retains the typed engine
+    // failure and no exception.
+    let mut spinning = MapLoader::new(&[]);
+    let exhausted = evaluate_module(
+        &mut context,
+        "while (true) {}",
+        "spinning.mjs",
+        &mut spinning,
+        ScriptLimits::default().with_execution(
+            fusor_runtime::ExecutionLimits::default().with_instruction_fuel(100),
+        ),
+    );
+    match exhausted {
+        Err(fusor::ModuleEvaluationError::Runtime(error)) => {
+            assert!(error.exception().is_none());
+            assert!(matches!(
+                error.execution_error(),
+                Some(fusor_runtime::ExecutionError::InstructionLimitExceeded { .. })
+            ));
+        }
+        other => panic!("expected a runtime module error, got {other:?}"),
+    }
 }
