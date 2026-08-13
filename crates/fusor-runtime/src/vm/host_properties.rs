@@ -329,3 +329,47 @@ pub(crate) fn host_own_property_keys(
     generated_key_list(runtime, completion)
         .map_err(|failure| execution_from_native_failure(runtime, failure))
 }
+
+/// Executes the `Context::set_global` definition: ECMA-262
+/// `[[DefineOwnProperty]]` with the fixed descriptor
+/// `{ value, writable: true, enumerable: false, configurable: true }` and
+/// `Reflect.defineProperty`-style rejection reporting (an incompatible
+/// existing property or a non-extensible global raises a `TypeError`).
+///
+/// The target is the realm global object, which is always an ordinary object
+/// (a Proxy can never become the realm global), so the synchronous ordinary
+/// descriptor authority applies directly and rejected definitions carry the
+/// exact `ValidateAndApplyPropertyDescriptor` message ("object is not
+/// extensible", "property is not configurable") instead of a generic
+/// dispatch-level one.
+pub(crate) fn host_set_global(
+    runtime: &mut Runtime,
+    reference: HeapReference,
+    key: PropertyKey,
+    value: StoredValue,
+    realm: RealmId,
+) -> Result<(), ExecutionError> {
+    let mut execution_budget = ExecutionBudget::new(ExecutionLimits::default());
+    let origin = host_property_origin("set global");
+    let name = property_key_name(&key).unwrap_or_else(JsString::empty);
+    let definition = host_property_definition(
+        Some(value),
+        Some(true),
+        None,
+        None,
+        Some(false),
+        Some(true),
+        realm,
+        &origin,
+    )
+    .map_err(|failure| execution_from_native_failure(runtime, failure))?;
+    let base = proxy_reference_value(reference);
+    let outcome = define_own_property(runtime, &base, key, &definition, &mut execution_budget)?;
+    match outcome {
+        PropertyDefinitionOutcome::Complete => Ok(()),
+        PropertyDefinitionOutcome::Failed(failure) => Err(execution_from_native_failure(
+            runtime,
+            NativeFailure::Abrupt(property_exception_at(realm, origin, Some(&name), failure)?),
+        )),
+    }
+}

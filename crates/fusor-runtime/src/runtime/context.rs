@@ -1252,32 +1252,42 @@ impl Context<'_> {
         Ok(Function::from_root(value))
     }
 
-    /// Defines a writable, non-enumerable, configurable data property named
-    /// `name` on the realm's global object, hosting a value (for example a
-    /// [`Function`] returned by [`Self::create_host_function`]) so that
-    /// JavaScript code can reach it as `globalThis.name`.
+    /// Defines a data property named `name` on the realm's global object with
+    /// the fixed descriptor `{ value, writable: true, enumerable: false,
+    /// configurable: true }`, so JavaScript code reaches it as
+    /// `globalThis.name`.
+    ///
+    /// The definition goes through the ordinary `[[DefineOwnProperty]]`
+    /// authority (`ValidateAndApplyPropertyDescriptor`): redefining an
+    /// existing compatible property updates its slot in place (no shadow
+    /// property is appended), and an incompatible existing property or a
+    /// non-extensible (frozen) global raises the same `TypeError` JavaScript
+    /// observes. A global `var` binding is non-configurable and enumerable,
+    /// so overwriting it with this enumerable:false descriptor raises
+    /// "property is not configurable" — fail closed by design.
+    ///
+    /// This function never panics.
     ///
     /// # Errors
     ///
-    /// Returns an [`ExecutionError`] for a foreign/orphaned value, a resource
-    /// limit, or an engine fault.
+    /// Returns a handle error for a foreign or orphaned value, a `TypeError`
+    /// exception when the definition is rejected by the descriptor
+    /// authority, and a limit, allocation, or engine error for runtime
+    /// failures.
     pub fn set_global(&mut self, name: &str, value: JsValue) -> Result<(), crate::ExecutionError> {
-        let object = self.runtime.realm_global_object(self.realm)?;
+        let owner = value.owner()?;
+        self.runtime.validate_owner(&owner, HandleKind::Value)?;
         let stored = value.stored()?.duplicate();
+        let object = self.runtime.realm_global_object(self.realm)?;
         let name_string = JsString::from_utf8(name)?;
         let key = self.runtime.property_key_from_string(&name_string)?;
-        let record = self
-            .runtime
-            .object_record_mut(HeapReference::Object(object))?;
-        record
-            .append_data(key, PropertyLayout::data(true, false, true), stored)
-            .map_err(|_| crate::ExecutionError::AllocationFailed {
-                resource: RuntimeResource::ObjectProperties,
-                additional: 1,
-            })?;
-        self.runtime.object_properties = self.runtime.object_properties.saturating_add(1);
-        self.runtime.collection_pending = true;
-        Ok(())
+        crate::vm::host_set_global(
+            self.runtime,
+            HeapReference::Object(object),
+            key,
+            stored,
+            self.realm,
+        )
     }
 
     /// Roots this context's realm global object as an ordinary object value

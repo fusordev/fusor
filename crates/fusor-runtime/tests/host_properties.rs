@@ -296,6 +296,32 @@ fn host_define_own_property_creates_and_enforces_invariants() {
 }
 
 #[test]
+fn host_define_own_property_on_a_non_extensible_object_reports_false() {
+    with_setup("var frozen = Object.freeze({});", |context, global| {
+        let frozen_key = key(context, "frozen");
+        let x = key(context, "x");
+        let frozen = global
+            .get(context, frozen_key)
+            .expect("get frozen")
+            .into_object()
+            .expect("frozen is an object");
+
+        let creation = DescriptorFields::<JsValue> {
+            value: Some(context.number(JsNumber::from_i32(1))),
+            ..DescriptorFields::new()
+        }
+        .into_descriptor()
+        .expect("data descriptor");
+        assert!(
+            !frozen
+                .define_own_property(context, x, creation)
+                .expect("non-extensible creation rejected"),
+            "[[Extensible]]: false rejects every new property with the Boolean result"
+        );
+    });
+}
+
+#[test]
 fn host_define_own_property_installs_and_validates_accessors() {
     with_setup("var o = {};", |context, global| {
         let o_key = key(context, "o");

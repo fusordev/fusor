@@ -202,7 +202,7 @@ use {
 
 pub(crate) use host_properties::{
     host_define_own_property, host_delete_property, host_get_property, host_has_property,
-    host_own_property_keys, host_set_property,
+    host_own_property_keys, host_set_global, host_set_property,
 };
 
 /// Inclusive per-call interpreter limits.

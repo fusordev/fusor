@@ -146,6 +146,8 @@ pub fn own_property_keys(&self, ctx: &mut Context) -> Result<Vec<PropertyKey>, E
 
 **语义决策(实现期确认)**:六个方法无 `ExecutionLimits` 参数,可观察用户代码(getter/setter/Proxy trap)统一在 `ExecutionLimits::default()` 下执行,且不提供 dynamic-function 编译器;`set` 恒为严格模式(无 sloppy 静默吞错),拒绝写抛 `TypeError`——fail closed;`define_own_property` 与 `delete` 返回内部方法布尔结果(`Reflect.*` 契约,普通拒绝不抛错);`own_property_keys` 普通对象走零分配快照路径,Proxy 走 trap 验证机制。
 
+**`set_global` 重写(实现期确认)**:固定描述符 `{value, writable: true, enumerable: false, configurable: true}` 经普通 `[[DefineOwnProperty]]` 权威安装;重复 key 原地更新槽位(无影子槽位);拒绝路径抛规范消息 `TypeError`("object is not extensible"/"property is not configurable",fail closed)——注意:对脚本声明的 `var` 绑定(configurable:false、enumerable:true)set_global 会按规范拒绝(enumerable 不可变),宿主初始化应避开与脚本绑定同名。
+
 ### 4.2 构造路径修复(高严重度)
 
 `create_host_function` 安装时创建规范 `prototype` 自有属性(普通对象 +
