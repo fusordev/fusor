@@ -1048,7 +1048,7 @@ pub(super) fn begin_internal_define_own_property(
                 execution_budget,
             );
         }
-        let outcome = define_own_property(runtime, &base, key, &definition, execution_budget)?;
+        let outcome = define_own_property(runtime, &base, key.clone(), &definition, execution_budget)?;
         return match outcome {
             PropertyDefinitionOutcome::Complete => Ok(NativeDispatch::Immediate(match result {
                 DefinePropertyResult::Target => base,
@@ -1059,9 +1059,14 @@ pub(super) fn begin_internal_define_own_property(
             {
                 Ok(NativeDispatch::Immediate(StoredValue::Boolean(false)))
             }
-            PropertyDefinitionOutcome::Failed(_) => {
-                proxy_abrupt(realm, origin, "property definition was rejected")
-            }
+            PropertyDefinitionOutcome::Failed(failure) => Err(NativeFailure::Abrupt(
+                property_exception_at(
+                    realm,
+                    origin,
+                    property_key_name(&key).as_ref(),
+                    failure,
+                )?,
+            )),
         };
     };
     let (Some(target), Some(handler)) = (proxy_state.target, proxy_state.handler) else {

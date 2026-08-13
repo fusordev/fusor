@@ -74,7 +74,7 @@ fn boolean(source: &str) -> bool {
 fn a_proto_literal_key_changes_the_literal_prototype() {
     assert!(boolean(
         "function run(){let base={m:1};let o={__proto__:base};\
-         return o.m===1&&o.__proto__===void 0;}"
+         return o.m===1&&o.__proto__===base;}"
     ));
 }
 
@@ -109,13 +109,13 @@ fn a_non_object_proto_literal_value_is_ignored() {
     assert!(boolean(
         "function run(){\
             let ignored={__proto__:5};\
-            return typeof ignored.toString==='function'&&ignored.__proto__===void 0;\
+            return typeof ignored.toString==='function'&&ignored.__proto__===({}).__proto__;\
         }"
     ));
     assert!(boolean(
         "function run(){\
             let literal={__proto__:void 0};\
-            return typeof literal.toString==='function'&&literal.__proto__===void 0;\
+            return typeof literal.toString==='function'&&literal.__proto__===({}).__proto__;\
         }"
     ));
 }
@@ -125,7 +125,7 @@ fn a_non_object_proto_literal_value_is_ignored() {
 fn a_quoted_proto_literal_key_changes_the_literal_prototype() {
     assert!(boolean(
         "function run(){let base={m:1};let o={\"__proto__\":base};\
-         return o.m===1&&o.__proto__===void 0;}"
+         return o.m===1&&o.__proto__===base;}"
     ));
 }
 
