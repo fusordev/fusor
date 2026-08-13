@@ -122,4 +122,5 @@ coverage.
 ## License
 
 MIT. The original QuickJS copyright and permission notice are retained in
+[LICENSE-quickjs](LICENSE-quickjs); the engine's own notice is in
 [LICENSE](LICENSE).
