@@ -4,3 +4,4 @@
 .DS_Store
 /tests/test262/suite/
 /docs/
+/.claude/worktrees/
