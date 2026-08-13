@@ -45,8 +45,8 @@
 
 ### 值转换(§4.5)
 
-- [ ] `as_i32/as_u32/as_f64/as_bigint`、`to_string/to_number/to_boolean`
-- [ ] 测试:每转换 × 边界值(安全整数界、NaN/Infinity、非法字符串)
+- [x] `as_i32/as_u32/as_f64/as_bigint`、`to_string/to_number/to_boolean`
+- [x] 测试:每转换 × 边界值(安全整数界、NaN/Infinity、非法字符串)
 
 ### 错误契约(§4.6)
 

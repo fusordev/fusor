@@ -427,6 +427,120 @@ impl JsValue {
         })
     }
 
+    /// Returns the BigInt payload, or `None` for another live value kind.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an orphaned handle.
+    pub fn as_bigint(&self) -> Result<Option<&JsBigInt>, HandleError> {
+        Ok(match self.stored()? {
+            StoredValue::BigInt(value) => Some(value),
+            _ => None,
+        })
+    }
+
+    /// Returns the Number payload as an `f64`, or `None` for another live
+    /// value kind.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an orphaned handle.
+    pub fn as_f64(&self) -> Result<Option<f64>, HandleError> {
+        Ok(match self.stored()? {
+            StoredValue::Number(value) => Some(value.as_f64()),
+            _ => None,
+        })
+    }
+
+    /// Applies ECMA-262 `ToInt32` (7.1.6) to a Number payload; every other
+    /// value kind returns `None`.
+    ///
+    /// `NaN` and the infinities narrow to `0`; values outside the domain wrap
+    /// modulo 2³² and then re-interpret as signed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an orphaned handle.
+    pub fn as_i32(&self) -> Result<Option<i32>, HandleError> {
+        Ok(match self.stored()? {
+            StoredValue::Number(value) => Some(crate::conversion::number_to_int32(*value)),
+            _ => None,
+        })
+    }
+
+    /// Applies ECMA-262 `ToUint32` (7.1.7) to a Number payload; every other
+    /// value kind returns `None`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an orphaned handle.
+    pub fn as_u32(&self) -> Result<Option<u32>, HandleError> {
+        Ok(match self.stored()? {
+            StoredValue::Number(value) => Some(crate::conversion::number_to_uint32(*value)),
+            _ => None,
+        })
+    }
+
+    /// Applies ECMA-262 `ToBoolean` (7.1.2) without invoking user code: only
+    /// `undefined`, `null`, `false`, `±0`, `NaN`, the empty string, and `0n`
+    /// are falsy; every object and function is truthy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an orphaned handle.
+    pub fn to_boolean(&self) -> Result<bool, HandleError> {
+        let stored = self.stored()?;
+        Ok(stored
+            .primitive_to_boolean()
+            .unwrap_or(true))
+    }
+
+    /// Applies ECMA-262 `ToString` (7.1.17) to a primitive payload.
+    ///
+    /// Objects and functions are rejected with a `TypeError`: a synchronous
+    /// host conversion cannot run the user code an object `ToPrimitive`
+    /// requires (fail closed).
+    ///
+    /// This function never panics.
+    ///
+    /// # Errors
+    ///
+    /// Returns a handle error for an orphaned or foreign value, a `TypeError`
+    /// exception for an object/function/Symbol conversion, and a string or
+    /// engine error for a conversion failure.
+    pub fn to_string(
+        &self,
+        ctx: &mut crate::Context<'_>,
+    ) -> Result<JsString, ExecutionError> {
+        let owner = self.owner()?;
+        ctx.runtime.validate_owner(&owner, HandleKind::Value)?;
+        let stored = self.stored()?.duplicate();
+        crate::vm::host_to_string(ctx.runtime, stored, ctx.realm)
+    }
+
+    /// Applies ECMA-262 `ToNumber` (7.1.4) to a primitive payload.
+    ///
+    /// Objects and functions are rejected with a `TypeError`: a synchronous
+    /// host conversion cannot run the user code an object `ToPrimitive`
+    /// requires (fail closed).
+    ///
+    /// This function never panics.
+    ///
+    /// # Errors
+    ///
+    /// Returns a handle error for an orphaned or foreign value, a `TypeError`
+    /// exception for an object/function/BigInt/Symbol conversion, and a
+    /// string or engine error for a conversion failure.
+    pub fn to_number(
+        &self,
+        ctx: &mut crate::Context<'_>,
+    ) -> Result<JsNumber, ExecutionError> {
+        let owner = self.owner()?;
+        ctx.runtime.validate_owner(&owner, HandleKind::Value)?;
+        let stored = self.stored()?.duplicate();
+        crate::vm::host_to_number(ctx.runtime, stored, ctx.realm)
+    }
+
     /// Converts a live function value into its typed embedding handle.
     ///
     /// # Errors

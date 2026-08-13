@@ -330,7 +330,52 @@ pub(crate) fn host_own_property_keys(
         .map_err(|failure| execution_from_native_failure(runtime, failure))
 }
 
-/// Executes the `Context::set_global` definition: ECMA-262
+/// Applies ECMA-262 `ToString` to a host value that is already a primitive.
+///
+/// Objects are rejected with a `TypeError`: a synchronous host conversion
+/// cannot run the user code an object `ToPrimitive` requires (fail closed).
+pub(crate) fn host_to_string(
+    runtime: &mut Runtime,
+    value: StoredValue,
+    realm: RealmId,
+) -> Result<JsString, ExecutionError> {
+    if matches!(value, StoredValue::Function(_) | StoredValue::Object(_)) {
+        return Err(synchronous_object_conversion_error(runtime, realm, "string"));
+    }
+    let origin = host_property_origin("to string");
+    operator_primitive_to_string(value, realm, &origin)
+        .map_err(|failure| execution_from_native_failure(runtime, failure))
+}
+
+/// Applies ECMA-262 `ToNumber` to a host value that is already a primitive.
+///
+/// Objects are rejected with a `TypeError`: a synchronous host conversion
+/// cannot run the user code an object `ToPrimitive` requires (fail closed).
+pub(crate) fn host_to_number(
+    runtime: &mut Runtime,
+    value: StoredValue,
+    realm: RealmId,
+) -> Result<JsNumber, ExecutionError> {
+    if matches!(value, StoredValue::Function(_) | StoredValue::Object(_)) {
+        return Err(synchronous_object_conversion_error(runtime, realm, "number"));
+    }
+    let origin = host_property_origin("to number");
+    operator_to_number(value, realm, &origin)
+        .map_err(|failure| execution_from_native_failure(runtime, failure))
+}
+
+/// Builds the fail-closed `TypeError` for a synchronous object conversion.
+fn synchronous_object_conversion_error(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    _target: &'static str,
+) -> ExecutionError {
+    let origin = host_property_origin("to primitive");
+    match property_exception_at(realm, origin, None, PropertyFailure::NotObject) {
+        Ok(pending) => execution_from_native_failure(runtime, NativeFailure::Abrupt(pending)),
+        Err(failure) => failure,
+    }
+}
 /// `[[DefineOwnProperty]]` with the fixed descriptor
 /// `{ value, writable: true, enumerable: false, configurable: true }` and
 /// `Reflect.defineProperty`-style rejection reporting (an incompatible
