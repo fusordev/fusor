@@ -303,7 +303,10 @@ impl DebugSession {
         let source_name = params
             .get("sourceURL")
             .and_then(Value::as_str)
-            .unwrap_or("<cdp-compile>");
+            .filter(|name| !name.is_empty())
+            // The frontend sends an empty sourceURL for console syntax
+            // checks; the engine requires a non-empty display name.
+            .unwrap_or("console");
         match quickjs::compile_script(expression, source_name, quickjs::ScriptLimits::default()) {
             Ok(_) => protocol_result(id, json!({"scriptId": source_name})),
             Err(error) => {
@@ -721,7 +724,7 @@ fn is_engine_bound_method(method: &str) -> bool {
 
 /// Renders a compile failure as `(text, line, column)`, extracting the
 /// frontend diagnostic span when one is attached.
-fn script_compile_error_position(
+pub(crate) fn script_compile_error_position(
     error: &quickjs::ScriptCompileError,
     source: &str,
 ) -> (String, u64, u64) {
@@ -989,6 +992,21 @@ mod tests {
         }));
         assert_eq!(response["result"]["scriptId"], "ok.js");
         assert!(response["result"]["exceptionDetails"].is_null());
+    }
+
+    #[test]
+    fn compile_script_tolerates_an_empty_source_url() {
+        let session = DebugSession::without_engine();
+        let response = session.handle_protocol(json!({
+            "id": 3,
+            "method": "Runtime.compileScript",
+            "params": {"expression": "1 + 1", "sourceURL": ""},
+        }));
+        assert!(
+            response["result"]["exceptionDetails"].is_null(),
+            "an empty sourceURL must fall back to a valid name, got {response}"
+        );
+        assert_eq!(response["result"]["scriptId"], "console");
     }
 
     #[test]

@@ -18,9 +18,9 @@ use quickjs_bytecode::{
     CompilerInitializationPolicy, CompilerWritePolicy, FunctionGraphVerificationLimits,
     VerificationLimits, VerifiedBytecode,
 };
+pub use quickjs_compiler::CompiledFunctionTree;
 use quickjs_compiler::{
-    CompilationContext, CompiledFunctionTree, CompilerError, LeafCompilationError,
-    SourceTextSubstitution,
+    CompilationContext, CompilerError, LeafCompilationError, SourceTextSubstitution,
 };
 pub use quickjs_diagnostics::{
     ByteSpan, ColumnEncoding, Diagnostic, DiagnosticCode, DiagnosticCodeError, DiagnosticLabel,
@@ -42,8 +42,8 @@ use quickjs_frontend::{
     DirectEvalVariableEnvironment as FrontendDirectEvalVariableEnvironment, DynamicFunctionError,
     DynamicFunctionKind, DynamicFunctionSource, FrontendError, FrontendLimits, FrontendOptions,
     GlobalScriptGoal, IndirectEvalGoal, PreparedDynamicFunctionSource, RegisteredFrontendError,
-    SourceFragment, Span, with_dynamic_function_source_and_prepared, with_parsed_program,
-    with_registered_program,
+    SourceFragment, Span, has_top_level_declarations, with_dynamic_function_source_and_prepared,
+    with_parsed_program, with_registered_program,
 };
 use quickjs_runtime::{
     Context, DirectEvalCallerBindingLocation, DirectEvalCallerBindingScope,
@@ -631,6 +631,27 @@ impl From<ScriptCompileError> for ScriptEvaluationError {
     }
 }
 
+/// Reports whether a Global Script's top level contains a global declaration
+/// statement (`var`, `let`, `const`, `function`, or `class`).
+///
+/// Side-effect-free evaluation probes use this to skip sources whose
+/// execution would commit a global binding.
+///
+/// # Errors
+///
+/// Returns the exact failing frontend stage.
+pub fn has_global_declarations(
+    source_text: &str,
+    limits: ScriptLimits,
+) -> Result<bool, ScriptCompileError> {
+    has_top_level_declarations(
+        source_text,
+        FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new()))
+            .with_limits(limits.frontend),
+    )
+    .map_err(ScriptCompileError::Frontend)
+}
+
 /// Parses, compiles, and final-verifies one host-loaded ECMAScript Global
 /// Script without installing or executing it.
 ///
@@ -683,11 +704,25 @@ pub fn evaluate_script(
     source_name: &str,
     limits: ScriptLimits,
 ) -> Result<JsValue, ScriptEvaluationError> {
-    let authority = Arc::new(
-        compile_script(source_text, source_name, limits)?
-            .verified_bytecode()
-            .clone(),
-    );
+    let compiled = compile_script(source_text, source_name, limits)?;
+    execute_compiled_script(context, &compiled, limits)
+}
+
+/// Installs and executes one previously compiled Global Script authority.
+///
+/// The authority may be reused across evaluations: installation binds the
+/// script's global declarations into the realm again, exactly as a fresh
+/// evaluation of the same source would.
+///
+/// # Errors
+///
+/// Returns the exact failing installation or execution stage.
+pub fn execute_compiled_script(
+    context: &mut Context<'_>,
+    compiled: &CompiledFunctionTree,
+    limits: ScriptLimits,
+) -> Result<JsValue, ScriptEvaluationError> {
+    let authority = Arc::new(compiled.verified_bytecode().clone());
     let dynamic_service: Arc<dyn DynamicFunctionCompiler> = Arc::new(
         OxcDynamicFunctionCompiler::new(limits.dynamic_function_limits()),
     );

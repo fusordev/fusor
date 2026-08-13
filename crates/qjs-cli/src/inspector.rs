@@ -7,28 +7,35 @@
 //! handles used to inspect values through the engine's own builtins — the
 //! same technique V8's InjectedScript uses.
 
-use std::collections::HashMap;
+use std::{
+    collections::{HashMap, VecDeque},
+    sync::Arc,
+};
 
-use quickjs::{ScriptEvaluationError, ScriptLimits, evaluate_script};
+use quickjs::{CompiledFunctionTree, ScriptEvaluationError, ScriptLimits, evaluate_script};
 use quickjs_runtime::{
     CallError, Context, ExecutionError, ExecutionLimits, Function, GlobalScriptError, JsNumber,
     JsString, JsValue, ValueKind,
 };
 use serde_json::{Map, Value, json};
 
-use crate::cdp::{protocol_error, protocol_result, source_position};
+use crate::cdp::{protocol_error, protocol_result, script_compile_error_position, source_position};
 
 /// Engine-side inspection state owned by the runtime task for one session.
 pub(crate) struct InspectState {
     pub(crate) objects: ObjectRegistry,
+    pub(crate) script_cache: ScriptCache,
     next_exception_id: u64,
+    next_vm: u64,
 }
 
 impl InspectState {
     pub(crate) fn new() -> Self {
         Self {
             objects: ObjectRegistry::new(),
+            script_cache: ScriptCache::new(),
             next_exception_id: 1,
+            next_vm: 0,
         }
     }
 
@@ -36,6 +43,60 @@ impl InspectState {
         let id = self.next_exception_id;
         self.next_exception_id += 1;
         id
+    }
+
+    pub(crate) fn next_vm(&mut self) -> u64 {
+        let id = self.next_vm;
+        self.next_vm += 1;
+        id
+    }
+}
+
+/// Bounded LRU cache of compiled console scripts.
+///
+/// The frontend re-evaluates identical source text constantly (eager
+/// evaluation probes, completion prefixes, getter invocations), so reusing
+/// the verified bytecode skips the whole parse-compile-verify pipeline.
+pub(crate) struct ScriptCache {
+    entries: HashMap<String, Arc<CompiledFunctionTree>>,
+    order: VecDeque<String>,
+    hits: u64,
+}
+
+const SCRIPT_CACHE_CAPACITY: usize = 64;
+
+impl ScriptCache {
+    pub(crate) fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+            order: VecDeque::new(),
+            hits: 0,
+        }
+    }
+
+    pub(crate) fn hits(&self) -> u64 {
+        self.hits
+    }
+
+    pub(crate) fn get(&mut self, source: &str) -> Option<Arc<CompiledFunctionTree>> {
+        let compiled = self.entries.get(source).cloned()?;
+        self.hits += 1;
+        self.order.retain(|entry| entry != source);
+        self.order.push_back(source.to_owned());
+        Some(compiled)
+    }
+
+    pub(crate) fn insert(&mut self, source: String, compiled: CompiledFunctionTree) {
+        if self.entries.contains_key(&source) {
+            return;
+        }
+        if self.entries.len() >= SCRIPT_CACHE_CAPACITY
+            && let Some(oldest) = self.order.pop_front()
+        {
+            self.entries.remove(&oldest);
+        }
+        self.entries.insert(source.clone(), Arc::new(compiled));
+        self.order.push_back(source);
     }
 }
 
@@ -140,6 +201,7 @@ pub(crate) struct InspectIntrinsics {
     object_to_string: Function,
     reflect_get: Function,
     json_stringify: Function,
+    function_to_string: Function,
     symbol_replacer: Function,
     symbol_by_name: Function,
     global_object: JsValue,
@@ -193,6 +255,7 @@ impl InspectIntrinsics {
             object_to_string: intrinsic(context, "Object.prototype.toString")?,
             reflect_get: intrinsic(context, "Reflect.get")?,
             json_stringify: intrinsic(context, "JSON.stringify")?,
+            function_to_string: intrinsic(context, "Function.prototype.toString")?,
             symbol_replacer: intrinsic(
                 context,
                 "(key, value) => typeof value === 'symbol' ? String(value) : value",
@@ -346,8 +409,8 @@ impl InspectIntrinsics {
         Ok(text
             .strip_prefix("[object ")
             .and_then(|tag| tag.strip_suffix(']'))
-            .unwrap_or("object")
-            .to_ascii_lowercase())
+            .unwrap_or("Object")
+            .to_owned())
     }
 }
 
@@ -396,7 +459,7 @@ fn remote_object_subtype(tag: &str) -> Option<&'static str> {
 /// Maps an engine class tag to the V8-style capitalized label used in
 /// `RemoteObject` descriptions.
 fn tag_label(tag: &str) -> String {
-    let known = match tag {
+    let known = match tag.to_ascii_lowercase().as_str() {
         "object" => "Object",
         "array" => "Array",
         "arraybuffer" => "ArrayBuffer",
@@ -427,23 +490,43 @@ fn tag_label(tag: &str) -> String {
         "uint32array" => "Uint32Array",
         "weakmap" => "WeakMap",
         "weakset" => "WeakSet",
+        // V8 drops the `Temporal.` prefix from the class label; the DevTools
+        // frontend re-adds it when rendering Temporal values.
+        "temporal.plaindate" => "PlainDate",
+        "temporal.plaindatetime" => "PlainDateTime",
+        "temporal.plaintime" => "PlainTime",
+        "temporal.plainmonthday" => "PlainMonthDay",
+        "temporal.plainyearmonth" => "PlainYearMonth",
+        "temporal.instant" => "Instant",
+        "temporal.zoneddatetime" => "ZonedDateTime",
+        "temporal.duration" => "Duration",
+        "temporal.calendar" => "Calendar",
+        "temporal.timezone" => "TimeZone",
         _ => {
-            return {
-                let mut chars = tag.chars();
-                match chars.next() {
-                    Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
-                    None => String::new(),
-                }
-            };
+            // Preserve the engine's casing and capitalize each
+            // dot-separated segment (e.g. a vendor namespaced tag).
+            return tag
+                .split('.')
+                .map(|segment| {
+                    let mut chars = segment.chars();
+                    match chars.next() {
+                        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                        None => String::new(),
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(".");
         }
     };
     known.to_owned()
 }
 
 /// The V8-style class identity of one live object: the capitalized label
-/// used as the `RemoteObject` description and the CDP subtype.
+/// used as the `RemoteObject` description, the CDP subtype, and the
+/// length-free `className`.
 struct ObjectClass {
     label: String,
+    class_name: String,
     subtype: Option<&'static str>,
 }
 
@@ -455,24 +538,40 @@ fn object_class(
     if context.object_is_proxy(value).unwrap_or(false) {
         return ObjectClass {
             label: "Proxy".to_owned(),
+            class_name: "Proxy".to_owned(),
             subtype: Some("proxy"),
         };
     }
     let tag = intrinsics
         .class_tag(context, value)
-        .unwrap_or_else(|_| "object".to_owned());
-    let subtype = remote_object_subtype(&tag);
-    let mut label = tag_label(&tag);
-    if subtype == Some("array") || subtype == Some("typedarray") {
+        .unwrap_or_else(|_| "Object".to_owned());
+    let subtype = remote_object_subtype(&tag.to_ascii_lowercase());
+    let mut class_name = tag_label(&tag);
+    let mut label = class_name.clone();
+    if subtype == Some("regexp") {
+        // V8 labels regexps as their literal: `/source/flags`.
+        let source = reflect_string(context, intrinsics, value, "source").unwrap_or_default();
+        let flags = reflect_string(context, intrinsics, value, "flags").unwrap_or_default();
+        label = format!("/{source}/{flags}");
+    } else if subtype == Some("array") || subtype == Some("typedarray") {
         if let Some(length) = reflect_number(context, intrinsics, value, "length") {
             label = format!("{label}({length})");
         }
+    } else if matches!(subtype, Some("arraybuffer") | Some("dataview"))
+        && let Some(length) = reflect_number(context, intrinsics, value, "byteLength")
+    {
+        label = format!("{label}({length})");
     } else if subtype.is_none()
         && let Some(binding) = intrinsics.global_binding_name(value)
     {
         label = binding.to_owned();
+        class_name = binding.to_owned();
     }
-    ObjectClass { label, subtype }
+    ObjectClass {
+        label,
+        class_name,
+        subtype,
+    }
 }
 
 /// Renders one `Runtime.consoleAPICalled` event for host `print` output, so
@@ -531,13 +630,14 @@ pub(crate) fn remote_object(
         ValueKind::Undefined => json!({"type": "undefined"}),
         ValueKind::Null => json!({"type": "object", "subtype": "null", "value": null}),
         ValueKind::Boolean => {
-            json!({"type": "boolean", "value": value.as_boolean().ok().flatten()})
+            let boolean = value.as_boolean().ok().flatten();
+            json!({"type": "boolean", "value": boolean, "description": boolean.map(|v| v.to_string())})
         }
         ValueKind::Number => match value.as_number().ok().flatten() {
             Some(number) => {
                 let number = number.as_f64();
                 if number.is_finite() {
-                    json!({"type": "number", "value": number})
+                    json!({"type": "number", "value": number, "description": short_number(value)})
                 } else if number.is_nan() {
                     json!({"type": "number", "unserializableValue": "NaN", "description": "NaN"})
                 } else if number > 0.0 {
@@ -548,10 +648,14 @@ pub(crate) fn remote_object(
             }
             None => json!({"type": "number", "description": "[number]"}),
         },
-        ValueKind::String => json!({
-            "type": "string",
-            "value": string_value(value),
-        }),
+        ValueKind::String => {
+            let text = string_value(value);
+            json!({
+                "type": "string",
+                "value": text,
+                "description": text,
+            })
+        }
         ValueKind::BigInt => json!({"type": "bigint", "description": "[bigint]"}),
         ValueKind::Symbol => json!({
             "type": "symbol",
@@ -565,13 +669,20 @@ pub(crate) fn remote_object(
                 .unwrap_or_else(|| "[symbol]".to_owned()),
         }),
         ValueKind::Function => {
-            let name = reflect_string(context, intrinsics, value, "name")
-                .filter(|name| !name.is_empty())
-                .unwrap_or_else(|| "anonymous".to_owned());
+            // V8's function descriptions come from Function.prototype.toString
+            // and the frontend parses them to derive the displayed name.
+            let description =
+                reflect_function_source(context, intrinsics, value).unwrap_or_else(|| {
+                    let name = reflect_string(context, intrinsics, value, "name")
+                        .filter(|name| !name.is_empty())
+                        .unwrap_or_else(|| "anonymous".to_owned());
+                    format!("\u{0192} {name}()")
+                });
             let object_id = registry.register(value, group);
             json!({
                 "type": "function",
-                "description": format!("\u{0192} {name}()"),
+                "className": "Function",
+                "description": description,
                 "objectId": object_id,
             })
         }
@@ -579,6 +690,7 @@ pub(crate) fn remote_object(
             let class = object_class(context, intrinsics, value);
             let mut rendered = json!({
                 "type": "object",
+                "className": class.class_name,
                 "description": class.label,
             });
             if let Some(subtype) = class.subtype {
@@ -663,32 +775,64 @@ fn call_function_on_request(
         );
     };
     let function_source = format!("({declaration})");
-    let function = match evaluate_script(
-        context,
-        &function_source,
-        "<cdp-function>",
-        ScriptLimits::default(),
-    ) {
-        Ok(value) => match value.into_function() {
-            Ok(function) => function,
-            Err(_) => {
-                return protocol_error(
+    let function = {
+        let limits = ScriptLimits::default();
+        let compiled = match state.script_cache.get(&function_source) {
+            Some(compiled) => compiled,
+            None => match quickjs::compile_script(&function_source, "console", limits) {
+                Ok(compiled) => {
+                    let compiled = Arc::new(compiled);
+                    state
+                        .script_cache
+                        .insert(function_source.clone(), (*compiled).clone());
+                    compiled
+                }
+                Err(error) => {
+                    let (text, line, column) =
+                        script_compile_error_position(&error, &function_source);
+                    return protocol_result(
+                        id,
+                        json!({
+                            "result": {"type": "object", "subtype": "error", "description": text},
+                            "exceptionDetails": exception_details(
+                                state,
+                                &text,
+                                line,
+                                column,
+                                "console",
+                                json!({}),
+                                json!({"type": "object", "subtype": "error", "description": text}),
+                            ),
+                        }),
+                    );
+                }
+            },
+        };
+        match quickjs::execute_compiled_script(context, &compiled, limits) {
+            Ok(value) => match value.into_function() {
+                Ok(function) => function,
+                Err(_) => {
+                    return protocol_error(
+                        id,
+                        -32602,
+                        "functionDeclaration did not evaluate to a function",
+                    );
+                }
+            },
+            Err(error) => {
+                let (text, line, column, stack_trace) =
+                    script_error_position(context, intrinsics, &error, &function_source);
+                let exception = exception_remote_object(context, state, intrinsics, &error);
+                return protocol_result(
                     id,
-                    -32602,
-                    "functionDeclaration did not evaluate to a function",
+                    json!({
+                        "result": {"type": "object", "subtype": "error", "description": text},
+                        "exceptionDetails": exception_details(
+                            state, &text, line, column, "console", stack_trace, exception,
+                        ),
+                    }),
                 );
             }
-        },
-        Err(error) => {
-            let (text, line, column) =
-                script_error_position(context, intrinsics, &error, &function_source);
-            return protocol_result(
-                id,
-                json!({
-                    "result": {"type": "object", "subtype": "error", "description": text},
-                    "exceptionDetails": exception_details(state, &text, line, column, "<cdp-function>"),
-                }),
-            );
         }
     };
     let mut arguments = Vec::new();
@@ -730,11 +874,27 @@ fn call_function_on_request(
         Err(CallError::Thrown(exception)) => {
             let text = thrown_value_text(context, intrinsics, &exception)
                 .unwrap_or_else(|| "[exception]".to_owned());
+            let exception_object = remote_object(
+                context,
+                &mut state.objects,
+                intrinsics,
+                &exception,
+                None,
+                true,
+            );
             protocol_result(
                 id,
                 json!({
                     "result": {"type": "object", "subtype": "error", "description": text},
-                    "exceptionDetails": exception_details(state, &text, 0, 0, "<cdp-function>"),
+                    "exceptionDetails": exception_details(
+                        state,
+                        &text,
+                        0,
+                        0,
+                        "console",
+                        json!({}),
+                        exception_object,
+                    ),
                 }),
             )
         }
@@ -826,11 +986,21 @@ fn get_properties_request(
         .get("generatePreview")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    // For large arrays the frontend renders index range groups itself and
+    // asks for non-indexed properties only; returning the indices too would
+    // duplicate every element row under the range headers.
+    let non_indexed_only = params
+        .get("nonIndexedPropertiesOnly")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let mut result = Vec::new();
     for name in intrinsics
         .own_string_keys(context, &object)
         .unwrap_or_default()
     {
+        if non_indexed_only && is_array_index_key(&name) {
+            continue;
+        }
         if let Ok(key) = JsString::from_utf8(&name) {
             if let Some(entry) = descriptor_entry(
                 context,
@@ -871,8 +1041,11 @@ fn get_properties_request(
             &intrinsics.get_prototype_of,
             undefined,
             vec![object.clone()],
-        ) && prototype.kind() == Ok(ValueKind::Object)
-        {
+        ) && matches!(
+            prototype.kind(),
+            // Prototypes may be ordinary objects or callable functions.
+            Ok(ValueKind::Object) | Ok(ValueKind::Function)
+        ) {
             if !own_only {
                 result.push(json!({
                     "name": "__proto__",
@@ -891,9 +1064,15 @@ fn get_properties_request(
             }));
         }
     }
+    if accessors_only {
+        // V8 omits the key entirely; the frontend's destructuring defaults
+        // handle `undefined` but iterate `null`, so an explicit null breaks
+        // the whole expansion.
+        return protocol_result(id, json!({"result": result}));
+    }
     protocol_result(
         id,
-        json!({"result": result, "internalProperties": internal}),
+        json!({"result": result, "internalProperties": Value::Array(internal)}),
     )
 }
 
@@ -939,44 +1118,25 @@ fn descriptor_entry(
         "name": name,
         "configurable": configurable,
         "enumerable": enumerable,
-        "writable": writable,
         "isOwn": true,
     });
     if is_accessor {
-        if let Some(get) = &get {
-            entry["get"] = remote_object(context, &mut state.objects, intrinsics, get, None, false);
-        }
-        if let Some(set) = &set {
-            entry["set"] = remote_object(context, &mut state.objects, intrinsics, set, None, false);
-        }
-        if accessors_only {
-            let mut value = undefined;
-            let mut was_thrown = false;
-            if let Some(getter) = &get {
-                match call(
-                    context,
-                    &getter.clone().into_function().expect("function kind"),
-                    object.clone(),
-                    vec![],
-                ) {
-                    Ok(result) => value = result,
-                    Err(_) => was_thrown = true,
-                }
-            }
-            entry["value"] = remote_object(
-                context,
-                &mut state.objects,
-                intrinsics,
-                &value,
-                None,
-                generate_preview,
-            );
-            entry["wasThrown"] = Value::Bool(was_thrown);
-        }
+        // V8 never executes getters here — the frontend invokes them itself
+        // through Runtime.callFunctionOn — and it always reports both sides,
+        // with an undefined RemoteObject for the missing one.
+        entry["get"] = match &get {
+            Some(get) => remote_object(context, &mut state.objects, intrinsics, get, None, false),
+            None => json!({"type": "undefined"}),
+        };
+        entry["set"] = match &set {
+            Some(set) => remote_object(context, &mut state.objects, intrinsics, set, None, false),
+            None => json!({"type": "undefined"}),
+        };
     } else {
         if accessors_only {
             return None;
         }
+        entry["writable"] = Value::Bool(writable);
         let value = reflect_value(context, intrinsics, &descriptor, "value")
             .unwrap_or_else(|| undefined.clone());
         entry["value"] = remote_object(
@@ -1013,13 +1173,60 @@ fn evaluate_request(
     let Some(expression) = params.get("expression").and_then(Value::as_str) else {
         return protocol_error(id, -32602, "Runtime.evaluate requires params.expression");
     };
+    let limits = ScriptLimits::default();
+    // Chrome's eager evaluation (`throwOnSideEffect`) never commits global
+    // declarations; executing `let x = ...` there would steal the binding
+    // from the real Enter evaluation and make it fail as a redeclaration.
+    if params.get("throwOnSideEffect").and_then(Value::as_bool) == Some(true)
+        && quickjs::has_global_declarations(expression, limits).unwrap_or(false)
+    {
+        return protocol_result(id, json!({"result": {"type": "undefined"}}));
+    }
     let source_name = params
         .get("sourceURL")
         .and_then(Value::as_str)
+        .filter(|name| !name.is_empty())
         .map(ToOwned::to_owned)
-        // One stable name keeps the debugger's script registry and the
-        // frontend's script list from churning on every console evaluation.
-        .unwrap_or_else(|| "console".to_owned());
+        // User-entered console entries get Chrome-style `VM<n>` script
+        // names; eager and completion probes share the stable `console`
+        // name so the debugger's script list does not churn per keystroke.
+        .unwrap_or_else(|| {
+            if params.get("userGesture").and_then(Value::as_bool) == Some(true) {
+                format!("VM{}", state.next_vm())
+            } else {
+                "console".to_owned()
+            }
+        });
+    let compiled = match state.script_cache.get(expression) {
+        Some(compiled) => compiled,
+        None => match quickjs::compile_script(expression, &source_name, limits) {
+            Ok(compiled) => {
+                let compiled = Arc::new(compiled);
+                state
+                    .script_cache
+                    .insert(expression.to_owned(), (*compiled).clone());
+                compiled
+            }
+            Err(error) => {
+                let (text, line, column) = script_compile_error_position(&error, expression);
+                return protocol_result(
+                    id,
+                    json!({
+                        "result": {"type": "object", "subtype": "error", "description": text},
+                        "exceptionDetails": exception_details(
+                            state,
+                            &text,
+                            line,
+                            column,
+                            &source_name,
+                            json!({}),
+                            json!({"type": "object", "subtype": "error", "description": text}),
+                        ),
+                    }),
+                );
+            }
+        },
+    };
     let return_by_value = params
         .get("returnByValue")
         .and_then(Value::as_bool)
@@ -1029,7 +1236,7 @@ fn evaluate_request(
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let group = params.get("objectGroup").and_then(Value::as_str);
-    match evaluate_script(context, expression, &source_name, ScriptLimits::default()) {
+    match quickjs::execute_compiled_script(context, &compiled, limits) {
         Ok(value) => {
             let mut result = remote_object(
                 context,
@@ -1047,13 +1254,16 @@ fn evaluate_request(
             protocol_result(id, json!({"result": result}))
         }
         Err(error) => {
-            let (text, line, column) =
+            let (text, line, column, stack_trace) =
                 script_error_position(context, intrinsics, &error, expression);
+            let exception = exception_remote_object(context, state, intrinsics, &error);
             protocol_result(
                 id,
                 json!({
                     "result": {"type": "object", "subtype": "error", "description": text},
-                    "exceptionDetails": exception_details(state, &text, line, column, &source_name),
+                    "exceptionDetails": exception_details(
+                        state, &text, line, column, &source_name, stack_trace, exception,
+                    ),
                 }),
             )
         }
@@ -1073,16 +1283,54 @@ fn object_preview(
         return None;
     }
     let class = object_class(context, intrinsics, value);
+    // V8 previews enumerate every own property, enumerable or not — that is
+    // why namespace objects like Math show their functions inline. Array
+    // previews list index keys only (no `length`) and cap at 100 elements.
     let keys = intrinsics
-        .enumerable_string_keys(context, value)
+        .own_string_keys(context, value)
         .unwrap_or_default();
-    const CAP: usize = 5;
-    let overflow = keys.len() > CAP;
-    let properties = keys
+    let array_like = matches!(class.subtype, Some("array") | Some("typedarray"));
+    let cap = if array_like { 100 } else { 5 };
+    let fields = standard_preview_fields(class.subtype);
+    let own_count = keys
         .iter()
-        .take(CAP)
+        .filter(|key| !array_like || is_array_index_key(key))
+        .count();
+    let fixed_count =
+        fields.map_or(0, <[&str]>::len) + usize::from(class.subtype == Some("typedarray"));
+    let overflow = if array_like {
+        own_count > cap
+    } else {
+        own_count + fixed_count > cap
+    };
+    let mut properties = keys
+        .iter()
+        .filter(|key| !array_like || is_array_index_key(key))
+        .take(if array_like { 100 } else { cap })
         .filter_map(|key| property_preview(context, intrinsics, value, key, depth))
         .collect::<Vec<_>>();
+    if let Some(fields) = fields {
+        // V8 appends the standard fields after the indices; they live on the
+        // prototype, so they are read directly.
+        for field in fields {
+            if let Some(field_value) = reflect_value(context, intrinsics, value, field)
+                && let Some(entry) = preview_entry(context, intrinsics, field, &field_value, depth)
+            {
+                properties.push(entry);
+            }
+        }
+        if class.subtype == Some("typedarray") {
+            properties.push(json!({
+                "name": "Symbol(Symbol.toStringTag)",
+                "type": "string",
+                "value": class.class_name,
+            }));
+        }
+    }
+    if !array_like {
+        // The cap applies to own and standard fields together.
+        properties.truncate(cap);
+    }
     let mut preview = json!({
         "type": "object",
         "description": class.label,
@@ -1093,6 +1341,33 @@ fn object_preview(
         preview["subtype"] = Value::String(subtype.to_owned());
     }
     Some(preview)
+}
+
+fn is_array_index_key(key: &str) -> bool {
+    key.parse::<u64>()
+        .is_ok_and(|index| index.to_string() == key)
+}
+
+/// The fixed preview fields V8 appends for built-in binary view classes.
+fn standard_preview_fields(subtype: Option<&str>) -> Option<&'static [&'static str]> {
+    match subtype {
+        Some("typedarray") => Some(&["buffer", "byteLength", "byteOffset", "length"]),
+        Some("arraybuffer") => Some(&["byteLength", "maxByteLength", "resizable", "detached"]),
+        Some("dataview") => Some(&["buffer", "byteLength", "byteOffset"]),
+        Some("map") | Some("set") | Some("weakmap") | Some("weakset") => Some(&["size"]),
+        Some("regexp") => Some(&[
+            "dotAll",
+            "flags",
+            "global",
+            "hasIndices",
+            "ignoreCase",
+            "multiline",
+            "source",
+            "sticky",
+            "unicode",
+        ]),
+        _ => None,
+    }
 }
 
 fn property_preview(
@@ -1121,8 +1396,19 @@ fn property_preview(
     } else {
         return None;
     };
+    preview_entry(context, intrinsics, key, &value, depth)
+}
+
+/// Renders one `PropertyPreview` entry for a live value.
+fn preview_entry(
+    context: &mut Context<'_>,
+    intrinsics: &InspectIntrinsics,
+    key: &str,
+    value: &JsValue,
+    _depth: usize,
+) -> Option<Value> {
     let kind = value.kind().ok()?;
-    let mut entry = match kind {
+    let entry = match kind {
         ValueKind::Undefined => json!({"name": key, "type": "undefined"}),
         ValueKind::Null => {
             json!({"name": key, "type": "object", "subtype": "null", "value": "null"})
@@ -1135,12 +1421,12 @@ fn property_preview(
         ValueKind::Number => json!({
             "name": key,
             "type": "number",
-            "value": short_number(&value),
+            "value": short_number(value),
         }),
         ValueKind::String => json!({
             "name": key,
             "type": "string",
-            "value": short_string(&value),
+            "value": short_string(value),
         }),
         ValueKind::BigInt => json!({"name": key, "type": "bigint", "value": "[bigint]"}),
         ValueKind::Symbol => json!({
@@ -1158,22 +1444,15 @@ fn property_preview(
         ValueKind::Function => json!({
             "name": key,
             "type": "function",
-            "value": reflect_string(context, intrinsics, &value, "name")
-                .filter(|name| !name.is_empty())
-                .unwrap_or_else(|| "anonymous".to_owned()),
+            "value": "",
         }),
         ValueKind::Object => {
-            let class = object_class(context, intrinsics, &value);
+            let class = object_class(context, intrinsics, value);
             let mut nested = json!({
                 "name": key,
                 "type": "object",
                 "value": class.label,
             });
-            if depth == 0
-                && let Some(preview) = object_preview(context, intrinsics, &value, depth + 1)
-            {
-                nested["valuePreview"] = preview;
-            }
             if let Some(subtype) = class.subtype {
                 nested["subtype"] = Value::String(subtype.to_owned());
             }
@@ -1223,8 +1502,8 @@ fn serialize_value(
         ValueKind::Object => {
             let tag = intrinsics
                 .class_tag(context, value)
-                .unwrap_or_else(|_| "object".to_owned());
-            if tag == "array" {
+                .unwrap_or_else(|_| "Object".to_owned());
+            if tag.eq_ignore_ascii_case("array") {
                 let length =
                     reflect_number(context, intrinsics, value, "length")?.min(MAX_ELEMENTS);
                 let mut elements = Vec::with_capacity(length as usize);
@@ -1261,6 +1540,8 @@ fn exception_details(
     line: u64,
     column: u64,
     url: &str,
+    stack_trace: Value,
+    exception: Value,
 ) -> Value {
     json!({
         "exceptionId": state.next_exception_id(),
@@ -1268,18 +1549,74 @@ fn exception_details(
         "lineNumber": line,
         "columnNumber": column,
         "url": url,
-        "exception": {"type": "object", "subtype": "error", "description": text},
+        "stackTrace": stack_trace,
+        "exception": exception,
     })
 }
 
-/// Renders a script failure as `(text, line, column)`, extracting the thrown
-/// exception's own position and message when the engine retained one.
+/// Renders the thrown exception as an expandable `RemoteObject` when the
+/// engine retained the actual value, and as a synthetic error description
+/// otherwise.
+fn exception_remote_object(
+    context: &mut Context<'_>,
+    state: &mut InspectState,
+    intrinsics: &InspectIntrinsics,
+    error: &ScriptEvaluationError,
+) -> Value {
+    if let ScriptEvaluationError::Runtime(GlobalScriptError::Execution(ExecutionError::Exception(
+        exception,
+    ))) = error
+        && let Some(value) = exception.thrown_value()
+    {
+        return remote_object(context, &mut state.objects, intrinsics, value, None, true);
+    }
+    json!({"type": "object", "subtype": "error", "description": error.to_string()})
+}
+
+/// Builds the CDP `StackTrace` for one escaped JavaScript exception from the
+/// engine's retained caller frames, falling back to the throw origin.
+fn exception_stack_trace(exception: &quickjs_runtime::JsException) -> Value {
+    let frame = |source_name: &str, source_text: &str, start: usize| {
+        let (line, column) = source_position(source_text, start);
+        json!({
+            "functionName": "",
+            "scriptId": source_name,
+            "url": source_name,
+            "lineNumber": line,
+            "columnNumber": column,
+        })
+    };
+    let frames = if exception.caller_frames().is_empty() {
+        vec![frame(
+            exception.source_name(),
+            exception.source_text(),
+            exception.source_span().start() as usize,
+        )]
+    } else {
+        exception
+            .caller_frames()
+            .iter()
+            .map(|entry| {
+                frame(
+                    entry.source_name(),
+                    entry.source_text(),
+                    entry.source_span().start() as usize,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    json!({"callFrames": frames})
+}
+
+/// Renders a script failure as `(text, line, column, stackTrace)`, extracting
+/// the thrown exception's own position and message when the engine retained
+/// one.
 fn script_error_position(
     context: &mut Context<'_>,
     intrinsics: &InspectIntrinsics,
     error: &ScriptEvaluationError,
     source: &str,
-) -> (String, u64, u64) {
+) -> (String, u64, u64, Value) {
     match error {
         ScriptEvaluationError::Runtime(GlobalScriptError::Execution(
             ExecutionError::Exception(exception),
@@ -1288,7 +1625,12 @@ fn script_error_position(
                 exception.source_text(),
                 exception.source_span().start() as usize,
             );
-            (exception_text(context, intrinsics, exception), line, column)
+            (
+                exception_text(context, intrinsics, exception),
+                line,
+                column,
+                exception_stack_trace(exception),
+            )
         }
         ScriptEvaluationError::Frontend(frontend) => {
             let diagnostic = frontend
@@ -1304,9 +1646,9 @@ fn script_error_position(
                 })
                 .unwrap_or_default();
             let (line, column) = source_position(source, diagnostic.1);
-            (diagnostic.0, line, column)
+            (diagnostic.0, line, column, json!({}))
         }
-        other => (other.to_string(), 0, 0),
+        other => (other.to_string(), 0, 0, json!({})),
     }
 }
 
@@ -1351,6 +1693,23 @@ fn thrown_value_text(
         return Some(text);
     }
     string_value(value).or_else(|| Some(crate::format::format_value(value)))
+}
+
+/// Renders one function value through `Function.prototype.toString`, the
+/// source V8's `RemoteObject` descriptions come from.
+fn reflect_function_source(
+    context: &mut Context<'_>,
+    intrinsics: &InspectIntrinsics,
+    value: &JsValue,
+) -> Option<String> {
+    let result = call(
+        context,
+        &intrinsics.function_to_string,
+        value.clone(),
+        vec![],
+    )
+    .ok()?;
+    string_value(&result)
 }
 
 /// Reads one property through `Reflect.get`, returning `None` when the
@@ -1506,12 +1865,13 @@ mod tests {
     fn intrinsics_report_well_known_object_tags() {
         with_engine(|context, _, intrinsics| {
             for (source, tag) in [
-                ("({})", "object"),
-                ("[]", "array"),
-                ("new Date(0)", "date"),
-                ("/x/", "regexp"),
-                ("new Map()", "map"),
-                ("new Uint8Array(2)", "uint8array"),
+                ("({})", "Object"),
+                ("[]", "Array"),
+                ("new Date(0)", "Date"),
+                ("/x/", "RegExp"),
+                ("new Map()", "Map"),
+                ("new Uint8Array(2)", "Uint8Array"),
+                ("Temporal.Now.plainDateTimeISO()", "Temporal.PlainDateTime"),
             ] {
                 let value = evaluate(context, source);
                 let rendered = intrinsics.class_tag(context, &value).expect("class tag");
@@ -1599,6 +1959,17 @@ mod tests {
             let result = &response["result"]["result"];
             assert_eq!(result["value"]["a"].as_f64(), Some(1.0));
             assert_eq!(result["value"]["nested"]["b"].as_f64(), Some(2.0));
+
+            let array = protocol(
+                context,
+                state,
+                intrinsics,
+                "Runtime.evaluate",
+                serde_json::json!({"expression": "[7, 8]", "returnByValue": true}),
+            );
+            let value = &array["result"]["result"]["value"];
+            assert_eq!(value[0].as_f64(), Some(7.0));
+            assert_eq!(value[1].as_f64(), Some(8.0));
         });
     }
 
@@ -1710,14 +2081,21 @@ mod tests {
     }
 
     #[test]
-    fn get_properties_executes_accessor_getters_on_request() {
+    fn get_properties_lists_accessors_without_executing_getters() {
         with_engine(|context, state, intrinsics| {
+            let _ = protocol(
+                context,
+                state,
+                intrinsics,
+                "Runtime.evaluate",
+                serde_json::json!({"expression": "globalThis.__accessor_probes = 0"}),
+            );
             let evaluated = protocol(
                 context,
                 state,
                 intrinsics,
                 "Runtime.evaluate",
-                serde_json::json!({"expression": "({ get answer() { return 42; }, plain: 1 })"}),
+                serde_json::json!({"expression": "({ get answer() { globalThis.__accessor_probes += 1; return 42; }, set answer(v) {}, plain: 1 })"}),
             );
             let object_id = evaluated["result"]["result"]["objectId"]
                 .as_str()
@@ -1736,9 +2114,63 @@ mod tests {
                 .map(|entry| entry["name"].as_str().expect("property name"))
                 .collect();
             assert_eq!(names, vec!["answer"], "only accessors are returned");
-            assert_eq!(result[0]["value"]["value"].as_f64(), Some(42.0));
-            assert_eq!(result[0]["get"]["type"], "function");
-            assert!(!result[0]["wasThrown"].as_bool().unwrap_or(true));
+            let entry = &result[0];
+            assert_eq!(entry["get"]["type"], "function");
+            assert_eq!(entry["set"]["type"], "function");
+            assert!(
+                entry.get("value").is_none(),
+                "V8 never executes getters in getProperties"
+            );
+            assert!(entry.get("wasThrown").is_none());
+            assert!(
+                response["result"].get("internalProperties").is_none(),
+                "accessor-only listings omit internalProperties entirely"
+            );
+
+            let probes = protocol(
+                context,
+                state,
+                intrinsics,
+                "Runtime.evaluate",
+                serde_json::json!({"expression": "globalThis.__accessor_probes"}),
+            );
+            assert_eq!(
+                probes["result"]["result"]["value"].as_f64(),
+                Some(0.0),
+                "listing properties must not run getter bodies"
+            );
+        });
+    }
+
+    #[test]
+    fn get_properties_marks_missing_accessor_sides_as_undefined() {
+        with_engine(|context, state, intrinsics| {
+            let evaluated = protocol(
+                context,
+                state,
+                intrinsics,
+                "Runtime.evaluate",
+                serde_json::json!({"expression": "({ set only(v) {} })"}),
+            );
+            let object_id = evaluated["result"]["result"]["objectId"]
+                .as_str()
+                .expect("objectId")
+                .to_owned();
+            let response = protocol(
+                context,
+                state,
+                intrinsics,
+                "Runtime.getProperties",
+                serde_json::json!({"objectId": object_id, "ownProperties": true}),
+            );
+            let entry = &response["result"]["result"][0];
+            assert_eq!(entry["name"], "only");
+            assert_eq!(
+                entry["get"],
+                serde_json::json!({"type": "undefined"}),
+                "V8 reports the missing getter as an undefined RemoteObject"
+            );
+            assert_eq!(entry["set"]["type"], "function");
         });
     }
 
@@ -1786,11 +2218,21 @@ mod tests {
                 ("new Proxy({}, {})", "Proxy", Some("proxy")),
                 ("globalThis.Reflect", "Reflect", None),
                 ("new Uint8Array(3)", "Uint8Array(3)", Some("typedarray")),
+                ("Temporal.Now.plainDateTimeISO()", "PlainDateTime", None),
+                ("Temporal.Now.instant()", "Instant", None),
+                ("new ArrayBuffer(6)", "ArrayBuffer(6)", Some("arraybuffer")),
+                ("/x/g", "/x/g", Some("regexp")),
             ] {
                 let value = evaluate(context, source);
                 let rendered =
                     remote_object(context, &mut state.objects, intrinsics, &value, None, false);
                 assert_eq!(rendered["description"], description, "label for {source}");
+                let class_name = if subtype == Some("regexp") {
+                    "RegExp"
+                } else {
+                    description.split('(').next().unwrap_or(description)
+                };
+                assert_eq!(rendered["className"], class_name, "className for {source}");
                 match subtype {
                     Some(expected) => {
                         assert_eq!(rendered["subtype"], expected, "subtype for {source}")
@@ -1895,6 +2337,496 @@ mod tests {
     }
 
     #[test]
+    fn previews_include_non_enumerable_properties() {
+        with_engine(|context, state, intrinsics| {
+            let response = protocol(
+                context,
+                state,
+                intrinsics,
+                "Runtime.evaluate",
+                serde_json::json!({"expression": "Math", "generatePreview": true}),
+            );
+            let preview = &response["result"]["result"]["preview"];
+            let properties = preview["properties"]
+                .as_array()
+                .expect("preview properties");
+            assert!(
+                properties.len() == 5 && preview["overflow"] == true,
+                "Math has dozens of own props; previews cap at five, got {preview:?}"
+            );
+            let first = &properties[0];
+            assert_eq!(first["type"], "function");
+            assert_eq!(first["value"], "");
+            assert!(
+                !first["name"].as_str().unwrap_or_default().is_empty(),
+                "preview entries carry their property name"
+            );
+        });
+    }
+
+    #[test]
+    fn previews_do_not_nest_value_previews() {
+        with_engine(|context, state, intrinsics| {
+            let response = protocol(
+                context,
+                state,
+                intrinsics,
+                "Runtime.evaluate",
+                serde_json::json!({"expression": "({ b: { c: 1 } })", "generatePreview": true}),
+            );
+            let properties = response["result"]["result"]["preview"]["properties"]
+                .as_array()
+                .expect("preview properties");
+            assert!(
+                properties[0].get("valuePreview").is_none(),
+                "V8 never sends valuePreview in these flows, got {properties:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn array_previews_list_indices_without_length() {
+        with_engine(|context, state, intrinsics| {
+            let response = protocol(
+                context,
+                state,
+                intrinsics,
+                "Runtime.evaluate",
+                serde_json::json!({"expression": "[1, 2, 3]", "generatePreview": true}),
+            );
+            let preview = &response["result"]["result"]["preview"];
+            let names: Vec<&str> = preview["properties"]
+                .as_array()
+                .expect("preview properties")
+                .iter()
+                .map(|entry| entry["name"].as_str().expect("property name"))
+                .collect();
+            assert_eq!(names, vec!["0", "1", "2"], "indices only, no length");
+            assert_eq!(preview["overflow"], false);
+        });
+    }
+
+    #[test]
+    fn array_previews_cap_at_one_hundred_elements() {
+        with_engine(|context, state, intrinsics| {
+            let response = protocol(
+                context,
+                state,
+                intrinsics,
+                "Runtime.evaluate",
+                serde_json::json!({
+                    "expression": "Array.from({ length: 101 }, (_, index) => index)",
+                    "generatePreview": true,
+                }),
+            );
+            let preview = &response["result"]["result"]["preview"];
+            assert_eq!(
+                preview["properties"].as_array().expect("properties").len(),
+                100,
+                "array previews cap at 100 elements"
+            );
+            assert_eq!(preview["overflow"], true);
+        });
+    }
+
+    #[test]
+    fn primitive_property_values_carry_descriptions() {
+        with_engine(|context, state, intrinsics| {
+            let evaluated = protocol(
+                context,
+                state,
+                intrinsics,
+                "Runtime.evaluate",
+                serde_json::json!({"expression": "({ count: 1, label: 'x' })"}),
+            );
+            let object_id = evaluated["result"]["result"]["objectId"]
+                .as_str()
+                .expect("objectId")
+                .to_owned();
+            let response = protocol(
+                context,
+                state,
+                intrinsics,
+                "Runtime.getProperties",
+                serde_json::json!({"objectId": object_id, "ownProperties": true}),
+            );
+            let entries = response["result"]["result"].as_array().expect("properties");
+            assert_eq!(entries[0]["value"]["description"], "1");
+            assert_eq!(entries[1]["value"]["description"], "x");
+        });
+    }
+
+    #[test]
+    fn typed_array_previews_include_the_standard_fields() {
+        with_engine(|context, state, intrinsics| {
+            let response = protocol(
+                context,
+                state,
+                intrinsics,
+                "Runtime.evaluate",
+                serde_json::json!({
+                    "expression": "new Uint8Array([1, 2, 3, 4, 5, 6])",
+                    "generatePreview": true,
+                }),
+            );
+            let preview = &response["result"]["result"]["preview"];
+            let names: Vec<&str> = preview["properties"]
+                .as_array()
+                .expect("preview properties")
+                .iter()
+                .map(|entry| entry["name"].as_str().expect("property name"))
+                .collect();
+            assert_eq!(
+                names,
+                vec![
+                    "0",
+                    "1",
+                    "2",
+                    "3",
+                    "4",
+                    "5",
+                    "buffer",
+                    "byteLength",
+                    "byteOffset",
+                    "length",
+                    "Symbol(Symbol.toStringTag)",
+                ],
+                "typed arrays preview indices plus the standard fields"
+            );
+            let buffer = &preview["properties"][6];
+            assert_eq!(buffer["type"], "object");
+            assert_eq!(buffer["subtype"], "arraybuffer");
+            assert_eq!(buffer["value"], "ArrayBuffer(6)");
+            let tag = &preview["properties"][10];
+            assert_eq!(tag["type"], "string");
+            assert_eq!(tag["value"], "Uint8Array");
+        });
+    }
+
+    #[test]
+    fn buffer_previews_include_the_standard_fields() {
+        with_engine(|context, state, intrinsics| {
+            let response = protocol(
+                context,
+                state,
+                intrinsics,
+                "Runtime.evaluate",
+                serde_json::json!({"expression": "new ArrayBuffer(6)", "generatePreview": true}),
+            );
+            let preview = &response["result"]["result"]["preview"];
+            let names: Vec<&str> = preview["properties"]
+                .as_array()
+                .expect("preview properties")
+                .iter()
+                .map(|entry| entry["name"].as_str().expect("property name"))
+                .collect();
+            assert_eq!(
+                names,
+                vec!["byteLength", "maxByteLength", "resizable", "detached"],
+                "ArrayBuffer previews list the standard fields"
+            );
+            assert_eq!(preview["properties"][0]["value"], "6");
+            assert_eq!(preview["properties"][2]["value"], "false");
+
+            let response = protocol(
+                context,
+                state,
+                intrinsics,
+                "Runtime.evaluate",
+                serde_json::json!({"expression": "new DataView(new ArrayBuffer(8))", "generatePreview": true}),
+            );
+            let result = &response["result"]["result"];
+            assert_eq!(result["description"], "DataView(8)");
+            let names: Vec<&str> = result["preview"]["properties"]
+                .as_array()
+                .expect("preview properties")
+                .iter()
+                .map(|entry| entry["name"].as_str().expect("property name"))
+                .collect();
+            assert_eq!(
+                names,
+                vec!["buffer", "byteLength", "byteOffset"],
+                "DataView previews list the standard fields"
+            );
+            assert_eq!(
+                result["preview"]["properties"][0]["value"],
+                "ArrayBuffer(8)"
+            );
+        });
+    }
+
+    #[test]
+    fn collection_and_regexp_previews_include_standard_fields() {
+        with_engine(|context, state, intrinsics| {
+            let response = protocol(
+                context,
+                state,
+                intrinsics,
+                "Runtime.evaluate",
+                serde_json::json!({"expression": "new Map()", "generatePreview": true}),
+            );
+            let preview = &response["result"]["result"]["preview"];
+            assert_eq!(preview["properties"][0]["name"], "size");
+            assert_eq!(preview["properties"][0]["value"], "0");
+            assert_eq!(preview["overflow"], false);
+
+            let response = protocol(
+                context,
+                state,
+                intrinsics,
+                "Runtime.evaluate",
+                serde_json::json!({"expression": "/x/", "generatePreview": true}),
+            );
+            let preview = &response["result"]["result"]["preview"];
+            let names: Vec<&str> = preview["properties"]
+                .as_array()
+                .expect("preview properties")
+                .iter()
+                .map(|entry| entry["name"].as_str().expect("property name"))
+                .collect();
+            assert_eq!(
+                names,
+                vec!["lastIndex", "dotAll", "flags", "global", "hasIndices"],
+                "the five-property cap applies to own and standard fields together"
+            );
+            assert_eq!(preview["overflow"], true);
+        });
+    }
+
+    #[test]
+    fn prototypes_may_be_functions() {
+        with_engine(|context, state, intrinsics| {
+            let evaluated = protocol(
+                context,
+                state,
+                intrinsics,
+                "Runtime.evaluate",
+                serde_json::json!({
+                    "expression": "globalThis.__fn_proto = (function base() {}); globalThis.__fn_derived = Object.setPrototypeOf((function derived() {}), globalThis.__fn_proto); globalThis.__fn_derived",
+                }),
+            );
+            let object_id = evaluated["result"]["result"]["objectId"]
+                .as_str()
+                .expect("objectId")
+                .to_owned();
+            let response = protocol(
+                context,
+                state,
+                intrinsics,
+                "Runtime.getProperties",
+                serde_json::json!({"objectId": object_id, "ownProperties": true}),
+            );
+            let internal = response["result"]["internalProperties"]
+                .as_array()
+                .expect("internal properties");
+            assert_eq!(internal[0]["name"], "[[Prototype]]");
+            assert_eq!(
+                internal[0]["value"]["type"], "function",
+                "function prototypes are reported too"
+            );
+        });
+    }
+
+    #[test]
+    fn non_indexed_properties_only_filters_array_indices() {
+        with_engine(|context, state, intrinsics| {
+            let evaluated = protocol(
+                context,
+                state,
+                intrinsics,
+                "Runtime.evaluate",
+                serde_json::json!({
+                    "expression": "({ 0: 'a', 1: 'b', length: 2, foo: 9 })"
+                }),
+            );
+            let object_id = evaluated["result"]["result"]["objectId"]
+                .as_str()
+                .expect("objectId")
+                .to_owned();
+            let response = protocol(
+                context,
+                state,
+                intrinsics,
+                "Runtime.getProperties",
+                serde_json::json!({"objectId": object_id, "ownProperties": true, "nonIndexedPropertiesOnly": true}),
+            );
+            let names: Vec<&str> = response["result"]["result"]
+                .as_array()
+                .expect("properties")
+                .iter()
+                .map(|entry| entry["name"].as_str().expect("property name"))
+                .collect();
+            assert_eq!(
+                names,
+                vec!["length", "foo"],
+                "index keys are omitted for range-grouped displays"
+            );
+
+            // The default listing still includes every own key.
+            let response = protocol(
+                context,
+                state,
+                intrinsics,
+                "Runtime.getProperties",
+                serde_json::json!({"objectId": object_id, "ownProperties": true}),
+            );
+            let names: Vec<&str> = response["result"]["result"]
+                .as_array()
+                .expect("properties")
+                .iter()
+                .map(|entry| entry["name"].as_str().expect("property name"))
+                .collect();
+            assert_eq!(names, vec!["0", "1", "length", "foo"]);
+        });
+    }
+
+    #[test]
+    fn console_entries_use_incrementing_vm_source_names() {
+        with_engine(|context, state, intrinsics| {
+            let first = protocol(
+                context,
+                state,
+                intrinsics,
+                "Runtime.evaluate",
+                serde_json::json!({"expression": "throw 1", "userGesture": true}),
+            );
+            let second = protocol(
+                context,
+                state,
+                intrinsics,
+                "Runtime.evaluate",
+                serde_json::json!({"expression": "throw 2", "userGesture": true}),
+            );
+            let eager = protocol(
+                context,
+                state,
+                intrinsics,
+                "Runtime.evaluate",
+                serde_json::json!({"expression": "throw 3", "userGesture": false}),
+            );
+            assert_eq!(first["result"]["exceptionDetails"]["url"], "VM0");
+            assert_eq!(second["result"]["exceptionDetails"]["url"], "VM1");
+            assert_eq!(
+                eager["result"]["exceptionDetails"]["url"], "console",
+                "eager probes keep the shared console name"
+            );
+        });
+    }
+
+    #[test]
+    fn exception_details_carry_the_stack_trace_and_exception_object() {
+        with_engine(|context, state, intrinsics| {
+            let response = protocol(
+                context,
+                state,
+                intrinsics,
+                "Runtime.evaluate",
+                serde_json::json!({
+                    "expression": "function boom() { throw new Error('kapow') } boom()",
+                    "userGesture": true,
+                }),
+            );
+            let details = &response["result"]["exceptionDetails"];
+            assert!(
+                details["text"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("kapow"))
+            );
+            let frames = details["stackTrace"]["callFrames"]
+                .as_array()
+                .expect("call frames");
+            assert!(!frames.is_empty(), "thrown errors carry their stack");
+            assert!(frames[0]["lineNumber"].is_u64());
+            assert!(frames[0]["columnNumber"].is_u64());
+            assert_eq!(frames[0]["url"], "VM0");
+            let exception = &details["exception"];
+            assert_eq!(exception["subtype"], "error");
+            assert!(
+                exception["objectId"].is_string(),
+                "the real exception object is expandable in the console"
+            );
+        });
+    }
+
+    #[test]
+    fn evaluations_reuse_compiled_bytecode() {
+        with_engine(|context, state, intrinsics| {
+            let expression = "40 + 2";
+            let first = protocol(
+                context,
+                state,
+                intrinsics,
+                "Runtime.evaluate",
+                serde_json::json!({"expression": expression}),
+            );
+            let second = protocol(
+                context,
+                state,
+                intrinsics,
+                "Runtime.evaluate",
+                serde_json::json!({"expression": expression}),
+            );
+            assert_eq!(first["result"]["result"]["value"].as_f64(), Some(42.0));
+            assert_eq!(second["result"]["result"]["value"].as_f64(), Some(42.0));
+            assert_eq!(
+                state.script_cache.hits(),
+                1,
+                "identical expressions compile once"
+            );
+        });
+    }
+
+    #[test]
+    fn eager_evaluation_does_not_commit_global_declarations() {
+        with_engine(|context, state, intrinsics| {
+            let eager = protocol(
+                context,
+                state,
+                intrinsics,
+                "Runtime.evaluate",
+                serde_json::json!({
+                    "expression": "let eager_c = class {}",
+                    "throwOnSideEffect": true,
+                }),
+            );
+            assert_eq!(
+                eager["result"]["result"],
+                serde_json::json!({"type": "undefined"}),
+                "declaration sources are not executed by side-effect probes"
+            );
+            assert!(eager["result"].get("exceptionDetails").is_none());
+
+            let committed = protocol(
+                context,
+                state,
+                intrinsics,
+                "Runtime.evaluate",
+                serde_json::json!({
+                    "expression": "let eager_c = class {}",
+                    "userGesture": true,
+                }),
+            );
+            assert!(
+                committed["result"].get("exceptionDetails").is_none(),
+                "the real evaluation declares without a redeclaration error, got {committed:?}"
+            );
+            assert_eq!(
+                committed["result"]["result"]["type"], "undefined",
+                "declaration statements complete with undefined"
+            );
+
+            let value = protocol(
+                context,
+                state,
+                intrinsics,
+                "Runtime.evaluate",
+                serde_json::json!({"expression": "eager_c"}),
+            );
+            assert_eq!(value["result"]["result"]["type"], "function");
+        });
+    }
+
+    #[test]
     fn get_properties_rejects_unknown_object_ids() {
         with_engine(|context, state, intrinsics| {
             let response = protocol(
@@ -1990,12 +2922,9 @@ mod tests {
                 "Runtime.getProperties",
                 serde_json::json!({"objectId": object_id, "accessorPropertiesOnly": true}),
             );
-            let internal = response["result"]["internalProperties"]
-                .as_array()
-                .expect("internal properties");
             assert!(
-                internal.is_empty(),
-                "accessor-only listings omit internal properties"
+                response["result"].get("internalProperties").is_none(),
+                "accessor-only listings omit internalProperties entirely (V8 omits the key)"
             );
         });
     }
@@ -2190,6 +3119,7 @@ mod tests {
                 false,
             );
             assert_eq!(rendered["type"], "object");
+            assert_eq!(rendered["className"], "Object", "V8-style className");
             assert!(
                 rendered["objectId"]
                     .as_str()
@@ -2207,11 +3137,28 @@ mod tests {
                 false,
             );
             assert_eq!(rendered["type"], "function");
+            assert_eq!(rendered["className"], "Function");
             assert!(
                 rendered["description"]
                     .as_str()
                     .is_some_and(|text| text.contains("named")),
                 "function descriptions include the name"
+            );
+
+            let native = evaluate(context, "Math.abs");
+            let rendered = remote_object(
+                context,
+                &mut state.objects,
+                intrinsics,
+                &native,
+                None,
+                false,
+            );
+            assert!(
+                rendered["description"].as_str().is_some_and(|text| text
+                    .starts_with("function abs()")
+                    && text.contains("[native code]")),
+                "native function descriptions match V8's toString shape, got {rendered:?}"
             );
 
             let number = evaluate(context, "40 + 2");
@@ -2225,7 +3172,7 @@ mod tests {
             );
             assert_eq!(
                 rendered,
-                serde_json::json!({"type": "number", "value": 42.0})
+                serde_json::json!({"type": "number", "value": 42.0, "description": "42"})
             );
         });
     }

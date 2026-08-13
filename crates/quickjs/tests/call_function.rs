@@ -82,3 +82,36 @@ fn call_function_runs_accessor_getters() {
         .expect("accessor getter call");
     assert_eq!(number(&result), 42.0);
 }
+
+#[test]
+fn execute_compiled_script_runs_a_compiled_authority() {
+    let (mut runtime, realm) = engine();
+    let mut context = runtime.context(&realm).expect("context");
+    let compiled = quickjs::compile_script("40 + 2", "compiled-test.js", ScriptLimits::default())
+        .expect("compilation");
+    let result = quickjs::execute_compiled_script(&mut context, &compiled, ScriptLimits::default())
+        .expect("execution");
+    assert_eq!(number(&result), 42.0);
+}
+
+#[test]
+fn has_global_declarations_detects_top_level_bindings() {
+    let limits = ScriptLimits::default();
+    for (source, expected) in [
+        ("let x = 1", true),
+        ("class A {}", true),
+        ("function f() {}", true),
+        ("var v", true),
+        ("const k = 2", true),
+        ("1 + 1", false),
+        ("x = 5", false),
+        ("{ let y = 1 }", false),
+        ("if (x) { let y = 1 }", false),
+        ("for (let i = 0; i < 1; i++) {}", false),
+        ("(() => { let z })()", false),
+    ] {
+        let actual = quickjs::has_global_declarations(source, limits)
+            .unwrap_or_else(|error| panic!("{source}: {error}"));
+        assert_eq!(actual, expected, "has_global_declarations({source:?})");
+    }
+}
