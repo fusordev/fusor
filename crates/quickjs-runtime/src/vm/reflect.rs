@@ -402,6 +402,19 @@ pub(super) fn reflect_set_property(
         return Ok(NativeDispatch::Immediate(StoredValue::Boolean(false)));
     };
     if let HeapReference::Object(object) = receiver_reference
+        && runtime.module_namespace_is_deferred(object)
+    {
+        // OrdinarySetWithOwnDescriptor reads the receiver's [[GetOwnProperty]]
+        // first (ECMA-262 10.4.6.3), which triggers deferred evaluation.
+        crate::vm::proxy::ensure_deferred_namespace_access(
+            runtime,
+            object,
+            &key,
+            realm,
+            origin.clone(),
+        )?;
+    }
+    if let HeapReference::Object(object) = receiver_reference
         && runtime.module_namespace_export_is_uninitialized(object, &key)?
     {
         return Err(NativeFailure::Abrupt(namespace_uninitialized_exception(

@@ -1622,7 +1622,7 @@ pub(super) fn execute_one(
             )?;
             push(frame, StoredValue::Object(object));
         }
-        FinalOpcode::Import => {
+        FinalOpcode::Import | FinalOpcode::ImportDefer => {
             let options = pop(frame)?;
             let specifier = pop(frame)?;
             let realm = code(runtime, frame.code)?.realm;
@@ -1651,6 +1651,7 @@ pub(super) fn execute_one(
                     origin,
                     referrer,
                     execution_budget,
+                    opcode == FinalOpcode::ImportDefer,
                 ),
                 return_to,
             );

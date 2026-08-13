@@ -2668,15 +2668,14 @@ fn push_import_phase_violation(
     phase: Option<ImportPhase>,
     span: Span,
 ) {
+    // `import defer` is supported end-to-end; only `import source` (source
+    // phase imports) remains gated.
     let (code, message) = match phase {
         Some(ImportPhase::Source) => (
             FrontendDiagnosticCode::UnsupportedImportSource,
             "QuickJS 2026-06-04 does not support `import source`",
         ),
-        Some(ImportPhase::Defer) => (
-            FrontendDiagnosticCode::UnsupportedImportDefer,
-            "QuickJS 2026-06-04 does not support `import defer`",
-        ),
+        Some(ImportPhase::Defer) => return,
         None => return,
     };
     violations.push(ProfileViolation {

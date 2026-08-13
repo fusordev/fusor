@@ -420,7 +420,7 @@ fn resolve_local_export(
     Ok(None)
 }
 
-fn resolve_request(
+pub(crate) fn resolve_request(
     runtime: &Runtime,
     module: ModuleRecordId,
     request_index: u32,
@@ -748,7 +748,7 @@ fn create_namespace_import(
 ) -> Result<(), ModuleError> {
     let request_idx = import.request();
     let dep = resolve_request(runtime, module, request_idx)?;
-    let ns = get_or_create_namespace(runtime, dep)?;
+    let ns = get_or_create_namespace_phase(runtime, dep, import.is_deferred_namespace())?;
     runtime
         .cells
         .get_mut(cell)
@@ -762,7 +762,23 @@ pub(crate) fn get_or_create_namespace(
     runtime: &mut Runtime,
     module: ModuleRecordId,
 ) -> Result<crate::runtime::ObjectId, ModuleError> {
-    if let Some(ns) = runtime.modules.get(module).and_then(|r| r.namespace_object) {
+    get_or_create_namespace_phase(runtime, module, false)
+}
+
+/// `GetModuleNamespace(module, phase)` with a per-phase cache and phase-aware
+/// `@@toStringTag`: deferred namespaces report `"Deferred Module"` and start
+/// with `[[Deferred]]` set.
+pub(crate) fn get_or_create_namespace_phase(
+    runtime: &mut Runtime,
+    module: ModuleRecordId,
+    deferred: bool,
+) -> Result<crate::runtime::ObjectId, ModuleError> {
+    let cached = if deferred {
+        runtime.modules.get(module).and_then(|r| r.deferred_namespace)
+    } else {
+        runtime.modules.get(module).and_then(|r| r.namespace_object)
+    };
+    if let Some(ns) = cached {
         return Ok(ns);
     }
     let exports = module_export_names(runtime, module)?;
@@ -811,8 +827,12 @@ pub(crate) fn get_or_create_namespace(
         to_string_tag_key,
         crate::PropertyLayout::data(false, false, false),
         StoredValue::String(
-            crate::string::JsString::from_utf8("Module")
-                .map_err(|_| ModuleError::link("string creation failed"))?,
+            crate::string::JsString::from_utf8(if deferred {
+                "Deferred Module"
+            } else {
+                "Module"
+            })
+            .map_err(|_| ModuleError::link("string creation failed"))?,
         ),
     );
     // A module namespace exotic object is always non-extensible (ECMA-262
@@ -832,11 +852,16 @@ pub(crate) fn get_or_create_namespace(
             super::namespace::ModuleNamespaceState {
                 module,
                 exports: ns_exports,
+                deferred,
             },
         ))
         .map_err(|_| ModuleError::link("namespace insert failed"))?;
 
-    runtime.modules.get_mut(module).expect("module exists").namespace_object = Some(object);
+    if deferred {
+        runtime.modules.get_mut(module).expect("module exists").deferred_namespace = Some(object);
+    } else {
+        runtime.modules.get_mut(module).expect("module exists").namespace_object = Some(object);
+    }
     // Realize re-exported namespaces only after installing this one, so
     // self-references and namespace re-export cycles terminate against the
     // already-installed object (ECMA-262 GetModuleNamespace idempotence).

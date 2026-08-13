@@ -722,6 +722,7 @@ pub(crate) enum ModuleImportNameKind {
     Named(AtomPoolIndex),
     Default,
     Namespace,
+    DeferredNamespace,
 }
 
 impl ModuleImportName {
@@ -752,6 +753,16 @@ impl ModuleImportName {
         }
     }
 
+    /// Creates a deferred (`import defer * as ns`) namespace import binding
+    /// descriptor.
+    #[must_use]
+    pub const fn deferred_namespace(request: u32) -> Self {
+        Self {
+            request,
+            kind: ModuleImportNameKind::DeferredNamespace,
+        }
+    }
+
     /// Returns the static module request index.
     #[must_use]
     pub const fn request(&self) -> u32 {
@@ -776,7 +787,16 @@ impl ModuleImportName {
     /// Returns whether this is a namespace import.
     #[must_use]
     pub const fn is_namespace(&self) -> bool {
-        matches!(self.kind, ModuleImportNameKind::Namespace)
+        matches!(
+            self.kind,
+            ModuleImportNameKind::Namespace | ModuleImportNameKind::DeferredNamespace
+        )
+    }
+
+    /// Returns whether this is a deferred namespace import.
+    #[must_use]
+    pub const fn is_deferred_namespace(&self) -> bool {
+        matches!(self.kind, ModuleImportNameKind::DeferredNamespace)
     }
 }
 

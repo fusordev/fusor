@@ -206,7 +206,6 @@ pub(super) enum RealmGlobalWriteOutcome {
     Property(PropertyFailure),
 }
 
-#[derive(Clone, Copy)]
 pub(super) enum PropertyFailure {
     ReadNull,
     ReadUndefined,
@@ -226,6 +225,36 @@ pub(super) enum PropertyFailure {
     /// A module namespace export read reached an uninitialized binding
     /// (ECMA-262 10.4.6.2/10.4.6.3, the temporal dead zone).
     Uninitialized,
+    /// A deferred namespace access found the module unable to complete
+    /// synchronously (ECMA-262 `ReadyForSyncExecution` false): a TypeError.
+    DeferredNamespaceTypeError,
+    /// A deferred namespace access triggered module evaluation, and the
+    /// evaluation rejected with this original value.
+    DeferredNamespaceThrown(StoredValue),
+}
+
+impl Clone for PropertyFailure {
+    fn clone(&self) -> Self {
+        match self {
+            Self::DeferredNamespaceThrown(value) => {
+                Self::DeferredNamespaceThrown(value.duplicate())
+            }
+            Self::ReadNull => Self::ReadNull,
+            Self::ReadUndefined => Self::ReadUndefined,
+            Self::WriteNull => Self::WriteNull,
+            Self::WriteUndefined => Self::WriteUndefined,
+            Self::NotObject => Self::NotObject,
+            Self::ReadOnly => Self::ReadOnly,
+            Self::NoSetter => Self::NoSetter,
+            Self::NotConfigurable => Self::NotConfigurable,
+            Self::NonExtensible => Self::NonExtensible,
+            Self::DeleteNull => Self::DeleteNull,
+            Self::DeleteUndefined => Self::DeleteUndefined,
+            Self::NotDeletable => Self::NotDeletable,
+            Self::Uninitialized => Self::Uninitialized,
+            Self::DeferredNamespaceTypeError => Self::DeferredNamespaceTypeError,
+        }
+    }
 }
 
 pub(super) fn static_property_operand(
@@ -874,7 +903,7 @@ pub(super) fn initialize_realm_global(
 }
 
 pub(super) fn read_static_property(
-    runtime: &Runtime,
+    runtime: &mut Runtime,
     realm: RealmId,
     base: &StoredValue,
     key: &PropertyKey,
@@ -893,7 +922,7 @@ pub(super) fn read_static_property(
 /// reference and original receiver needed to continue through observable
 /// `[[Get]]` semantics.
 pub(super) fn read_observable_static_property(
-    runtime: &Runtime,
+    runtime: &mut Runtime,
     realm: RealmId,
     base: &StoredValue,
     key: &PropertyKey,
@@ -934,6 +963,28 @@ pub(super) fn read_observable_static_property(
                 PropertyReadOutcome::Value(StoredValue::Undefined),
                 |property| property_read_outcome(property, receiver),
             )));
+        }
+        if let HeapReference::Object(object) = reference
+            && runtime.module_namespace_is_deferred(object)
+        {
+            // ECMA-262 10.4.6.2 [[Get]] step 2: the exports list triggers
+            // deferred evaluation for string keys (except "then").
+            if let Err(failure) = runtime.ensure_deferred_namespace_evaluation(object, Some(key)) {
+                let failure = match failure {
+                    crate::runtime::modules::DeferredNamespaceEvaluationFailure::NotReady => {
+                        PropertyFailure::DeferredNamespaceTypeError
+                    }
+                    crate::runtime::modules::DeferredNamespaceEvaluationFailure::Thrown(value) => {
+                        PropertyFailure::DeferredNamespaceThrown(value)
+                    }
+                    crate::runtime::modules::DeferredNamespaceEvaluationFailure::Fault(fault) => {
+                        return Err(fault.into());
+                    }
+                };
+                return Ok(ObservablePropertyReadOutcome::Complete(
+                    PropertyReadOutcome::Failed(failure),
+                ));
+            }
         }
         if let HeapReference::Object(object) = reference
             && runtime.module_namespace_export_is_uninitialized(object, key)?
@@ -1073,11 +1124,31 @@ fn property_read_outcome(property: OwnProperty, receiver: StoredValue) -> Proper
 }
 
 pub(super) fn read_heap_property_for_receiver(
-    runtime: &Runtime,
+    runtime: &mut Runtime,
     reference: HeapReference,
     receiver: StoredValue,
     key: &PropertyKey,
 ) -> Result<PropertyReadOutcome, ExecutionError> {
+    if let HeapReference::Object(object) = reference
+        && runtime.module_namespace_is_deferred(object)
+    {
+        // ECMA-262 10.4.6.2 [[Get]] step 2: the exports list triggers
+        // deferred evaluation for string keys (except "then").
+        if let Err(failure) = runtime.ensure_deferred_namespace_evaluation(object, Some(key)) {
+            let failure = match failure {
+                crate::runtime::modules::DeferredNamespaceEvaluationFailure::NotReady => {
+                    PropertyFailure::DeferredNamespaceTypeError
+                }
+                crate::runtime::modules::DeferredNamespaceEvaluationFailure::Thrown(value) => {
+                    PropertyFailure::DeferredNamespaceThrown(value)
+                }
+                crate::runtime::modules::DeferredNamespaceEvaluationFailure::Fault(fault) => {
+                    return Err(fault.into());
+                }
+            };
+            return Ok(PropertyReadOutcome::Failed(failure));
+        }
+    }
     if let HeapReference::Object(object) = reference
         && runtime.module_namespace_export_is_uninitialized(object, key)?
     {
@@ -1263,6 +1334,26 @@ pub(super) fn delete_static_property(
     base: &StoredValue,
     key: &PropertyKey,
 ) -> Result<PropertyDeleteOutcome, ExecutionError> {
+    if let StoredValue::Object(object) = base
+        && runtime.module_namespace_is_deferred(*object)
+    {
+        // ECMA-262 10.4.6.7 [[Delete]] step 2: the exports list triggers
+        // deferred evaluation for string keys (except "then").
+        if let Err(failure) = runtime.ensure_deferred_namespace_evaluation(*object, Some(key)) {
+            let failure = match failure {
+                crate::runtime::modules::DeferredNamespaceEvaluationFailure::NotReady => {
+                    PropertyFailure::DeferredNamespaceTypeError
+                }
+                crate::runtime::modules::DeferredNamespaceEvaluationFailure::Thrown(value) => {
+                    PropertyFailure::DeferredNamespaceThrown(value)
+                }
+                crate::runtime::modules::DeferredNamespaceEvaluationFailure::Fault(fault) => {
+                    return Err(fault.into());
+                }
+            };
+            return Ok(PropertyDeleteOutcome::Failed(failure));
+        }
+    }
     let reference = match base {
         StoredValue::Null => {
             return Ok(PropertyDeleteOutcome::Failed(PropertyFailure::DeleteNull));
@@ -2430,6 +2521,27 @@ pub(super) fn define_own_property(
     definition: &PropertyDefinition,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<PropertyDefinitionOutcome, ExecutionError> {
+    if let StoredValue::Object(object) = base
+        && runtime.module_namespace_is_deferred(*object)
+    {
+        // `OrdinarySetWithOwnDescriptor` reaches the receiver's
+        // [[GetOwnProperty]] (and hence the exports list) when a write lands
+        // on a deferred namespace as the receiver (ECMA-262 10.4.6.3).
+        if let Err(failure) = runtime.ensure_deferred_namespace_evaluation(*object, Some(&key)) {
+            let failure = match failure {
+                crate::runtime::modules::DeferredNamespaceEvaluationFailure::NotReady => {
+                    PropertyFailure::DeferredNamespaceTypeError
+                }
+                crate::runtime::modules::DeferredNamespaceEvaluationFailure::Thrown(value) => {
+                    PropertyFailure::DeferredNamespaceThrown(value)
+                }
+                crate::runtime::modules::DeferredNamespaceEvaluationFailure::Fault(fault) => {
+                    return Err(fault.into());
+                }
+            };
+            return Ok(PropertyDefinitionOutcome::Failed(failure));
+        }
+    }
     let reference = match base {
         StoredValue::Function(function) => HeapReference::Function(*function),
         StoredValue::Object(object) => HeapReference::Object(*object),

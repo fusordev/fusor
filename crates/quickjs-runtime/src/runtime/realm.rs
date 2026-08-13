@@ -551,6 +551,7 @@ impl Runtime {
             atomics_agent_id,
             atomics_timer: None,
             pending_dynamic_imports: VecDeque::new(),
+            deferred_import_waiters: HashMap::new(),
             finalization_jobs: VecDeque::new(),
             kept_alive: Vec::new(),
             generator_states: HashMap::new(),

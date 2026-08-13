@@ -2225,6 +2225,41 @@ pub(super) fn begin_promise_job(
                 }
                 Ok(NativeDispatch::Immediate(StoredValue::Undefined))
             }
+            PromiseReactionTarget::ImportDeferDeps { promise, module } => {
+                // SafePerformPromiseAll element reaction: a rejection settles
+                // the import immediately; fulfillments count down and the last
+                // one fulfills with the module's deferred namespace.
+                match reaction.kind {
+                    PromiseReactionKind::Reject => {
+                        runtime.deferred_import_waiters.remove(&promise);
+                        reject_promise(runtime, promise, argument)?;
+                    }
+                    PromiseReactionKind::Fulfill => {
+                        let remaining = runtime
+                            .deferred_import_waiters
+                            .get_mut(&promise)
+                            .and_then(|count| {
+                                *count = count.saturating_sub(1);
+                                (*count == 0).then_some(())
+                            });
+                        if remaining.is_some() {
+                            runtime.deferred_import_waiters.remove(&promise);
+                            let namespace =
+                                crate::runtime::modules::get_or_create_namespace_phase(
+                                    runtime,
+                                    module,
+                                    true,
+                                )
+                                .map_err(|_| EngineFault::RuntimeInvariant {
+                                    message:
+                                        "deferred namespace creation failed after async deps",
+                                })?;
+                            fulfill_promise(runtime, promise, StoredValue::Object(namespace))?;
+                        }
+                    }
+                }
+                Ok(NativeDispatch::Immediate(StoredValue::Undefined))
+            }
         },
         PromiseJob::Thenable {
             promise,

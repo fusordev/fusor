@@ -2055,6 +2055,20 @@ pub(super) fn own_property_keys(
         KeyListing::EnumerableOnly | KeyListing::AllStringKeys => KeyPhases::STRING_KEYS,
         KeyListing::AllSymbolKeys => KeyPhases::SYMBOL_KEYS,
     };
+    if let HeapReference::Object(object) = reference
+        && runtime.module_namespace_is_deferred(object)
+    {
+        // ECMA-262 10.4.6.6 [[OwnPropertyKeys]] step 1: the exports list
+        // triggers deferred evaluation for every key listing.
+        match runtime.ensure_deferred_namespace_evaluation(object, None) {
+            Ok(()) => {}
+            Err(failure) => {
+                return Err(crate::vm::proxy::deferred_namespace_evaluation_abrupt(
+                    realm, origin, failure,
+                )?);
+            }
+        }
+    }
     let (snapshot, work) = runtime.try_own_key_snapshot(reference, 0, phases)?;
     execution_budget.charge_instructions(work)?;
     // `EnumerableOwnPropertyNames` (Object.keys) performs `[[GetOwnProperty]]`

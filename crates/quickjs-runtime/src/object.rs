@@ -3309,6 +3309,12 @@ pub(crate) enum PromiseReactionTarget {
         promise: ObjectId,
         module: crate::ids::ModuleRecordId,
     },
+    /// One of the async-dependency capability promises of an `import.defer()`
+    /// (SafePerformPromiseAll element reaction).
+    ImportDeferDeps {
+        promise: ObjectId,
+        module: crate::ids::ModuleRecordId,
+    },
 }
 
 pub(crate) enum PromiseState {
@@ -4478,6 +4484,15 @@ impl HeapObject {
         &self,
     ) -> Option<&crate::runtime::modules::ModuleNamespaceState> {
         match &self.kind {
+            HeapObjectKind::ModuleNamespace(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn module_namespace_state_mut(
+        &mut self,
+    ) -> Option<&mut crate::runtime::modules::ModuleNamespaceState> {
+        match &mut self.kind {
             HeapObjectKind::ModuleNamespace(state) => Some(state),
             _ => None,
         }

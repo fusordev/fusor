@@ -27,13 +27,14 @@ mod namespace;
 
 pub use host::{ImportMetaHook, ModuleLoader, ModuleResolveError, default_import_meta_resolve};
 pub use linking::{ModuleLinkError, link_module};
-pub(crate) use linking::get_or_create_namespace;
+pub(crate) use linking::{get_or_create_namespace, get_or_create_namespace_phase};
 pub use evaluation::{ModuleEvaluationError, evaluate_module};
 pub(crate) use evaluation::{
     async_module_execution_fulfilled, async_module_execution_rejected,
-    module_is_evaluating_async, module_top_level_capability,
+    gather_async_transitive_dependencies, module_is_evaluating_async,
+    module_top_level_capability,
 };
-pub(crate) use namespace::ModuleNamespaceState;
+pub(crate) use namespace::{DeferredNamespaceEvaluationFailure, ModuleNamespaceState};
 pub(crate) use import_meta::get_or_create_import_meta;
 
 use std::fmt;
@@ -300,6 +301,9 @@ pub(crate) struct SourceTextModuleRecord {
     pub(crate) environment: Vec<BindingCellId>,
     /// Lazily materialized namespace object.
     pub(crate) namespace_object: Option<ObjectId>,
+    /// Lazily materialized deferred namespace object (ECMA-262
+    /// [[DeferredNamespace]], cached separately from [[Namespace]]).
+    pub(crate) deferred_namespace: Option<ObjectId>,
     /// Lazily materialized `import.meta` object.
     pub(crate) meta_object: Option<ObjectId>,
     /// Installed code and root function for execution (set during linking).
@@ -331,6 +335,7 @@ impl SourceTextModuleRecord {
             top_level_capability: None,
             environment: Vec::new(),
             namespace_object: None,
+            deferred_namespace: None,
             meta_object: None,
             installed_code: None,
             root_function: None,

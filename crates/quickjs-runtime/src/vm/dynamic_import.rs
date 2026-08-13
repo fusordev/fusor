@@ -32,6 +32,9 @@ pub(super) struct DynamicImportContinuation {
     realm: RealmId,
     origin: JsStackFrame,
     referrer: Option<crate::ids::ModuleRecordId>,
+    /// `import.defer()` phase: the import settles with a deferred namespace
+    /// and defers evaluation of the loaded graph.
+    deferred: bool,
 }
 
 impl DynamicImportContinuation {
@@ -54,6 +57,7 @@ pub(super) fn begin_dynamic_import(
     origin: JsStackFrame,
     referrer: Option<crate::ids::ModuleRecordId>,
     execution_budget: &mut ExecutionBudget,
+    deferred: bool,
 ) -> Result<NativeDispatch, NativeFailure> {
     let promise = runtime.allocate_intrinsic_promise(realm)?;
     let state = DynamicImportContinuation {
@@ -64,6 +68,7 @@ pub(super) fn begin_dynamic_import(
         realm,
         origin: origin.clone(),
         referrer,
+        deferred,
     };
     begin_operator_primitive_conversion(
         runtime,
@@ -296,7 +301,14 @@ fn park_dynamic_import_load(
             message: "dynamic import parking lost its specifier",
         })?;
     runtime
-        .park_dynamic_import(state.realm, referrer, specifier, attributes, state.promise)
+        .park_dynamic_import(
+            state.realm,
+            referrer,
+            specifier,
+            attributes,
+            state.promise,
+            state.deferred,
+        )
         .map_err(NativeFailure::Execution)?;
     Ok(NativeDispatch::Immediate(StoredValue::Object(
         state.promise,
@@ -381,6 +393,7 @@ pub(crate) fn complete_dynamic_import_load(
     let record = import.record;
     let realm = record.realm;
     let promise = record.promise;
+    let deferred = record.deferred;
     let Some(module) = runtime.registered_module(realm, root) else {
         let message = format!("module '{root}' is not registered");
         return reject_parked_import(runtime, realm, promise, ExceptionKind::TypeError, &message);
@@ -393,6 +406,59 @@ pub(crate) fn complete_dynamic_import_load(
             ExceptionKind::SyntaxError,
             error.message(),
         );
+    }
+    // ECMA-262 ContinueDynamicImport phase ~defer~: link, then evaluate only
+    // the asynchronous transitive dependencies (SafePerformPromiseAll over
+    // their Evaluate() promises), and fulfill with the module's deferred
+    // namespace object. The module itself stays unevaluated until its
+    // namespace is first accessed.
+    if deferred {
+        let mut async_deps: Vec<crate::ids::ModuleRecordId> = Vec::new();
+        let mut async_seen = Vec::new();
+        crate::runtime::modules::gather_async_transitive_dependencies(
+            runtime,
+            module,
+            &mut async_seen,
+            &mut async_deps,
+        );
+        let mut capabilities = Vec::new();
+        for dep in async_deps {
+            match crate::runtime::modules::evaluate_module(runtime, realm, dep, limits, compiler) {
+                Ok(()) => {
+                    let capability = crate::runtime::modules::module_top_level_capability(
+                        runtime, dep,
+                    )
+                    .ok_or(EngineFault::RuntimeInvariant {
+                        message: "deferred import async dep lacks its top-level capability",
+                    })?;
+                    capabilities.push(capability);
+                }
+                Err(error) => {
+                    let reason = module_error_rejection_value(runtime, realm, &error)?;
+                    return settle_parked_import(runtime, promise, reason, true);
+                }
+            }
+        }
+        if capabilities.is_empty() {
+            let namespace =
+                crate::runtime::modules::get_or_create_namespace_phase(runtime, module, true)
+                    .map_err(|_| EngineFault::RuntimeInvariant {
+                        message: "deferred namespace creation failed after load",
+                    })?;
+            return settle_parked_import(runtime, promise, StoredValue::Object(namespace), false);
+        }
+        runtime
+            .deferred_import_waiters
+            .insert(promise, capabilities.len() as u32);
+        for capability in capabilities {
+            perform_targeted_promise_reactions(
+                runtime,
+                capability,
+                crate::object::PromiseReactionTarget::ImportDeferDeps { promise, module },
+            )
+            .map_err(native_failure_to_execution)?;
+        }
+        return Ok(());
     }
     if let Err(error) =
         crate::runtime::modules::evaluate_module(runtime, realm, module, limits, compiler)

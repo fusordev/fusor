@@ -346,6 +346,28 @@ pub(super) fn property_exception_at(
     name: Option<&JsString>,
     failure: PropertyFailure,
 ) -> Result<PendingException, ExecutionError> {
+    // Deferred-namespace failures are complete abrupt completions rather than
+    // message-shaped property failures.
+    match &failure {
+        PropertyFailure::DeferredNamespaceTypeError => {
+            return Ok(PendingException {
+                realm,
+                payload: PendingExceptionPayload::EngineError {
+                    kind: ExceptionKind::TypeError,
+                    message: JsString::from_utf8("module cannot be evaluated synchronously")?,
+                },
+                origin,
+            });
+        }
+        PropertyFailure::DeferredNamespaceThrown(value) => {
+            return Ok(PendingException {
+                realm,
+                payload: PendingExceptionPayload::ThrownValue(value.duplicate()),
+                origin,
+            });
+        }
+        _ => {}
+    }
     let message = match failure {
         PropertyFailure::ReadNull => match name {
             Some(name) => named_property_message("cannot read property '", name, "' of null")?,
@@ -381,6 +403,8 @@ pub(super) fn property_exception_at(
         }
         PropertyFailure::NotDeletable => JsString::from_utf8("could not delete property")?,
         PropertyFailure::Uninitialized => JsString::from_utf8("binding is not initialized")?,
+        PropertyFailure::DeferredNamespaceTypeError
+        | PropertyFailure::DeferredNamespaceThrown(_) => unreachable!("handled above"),
     };
     let kind = if matches!(failure, PropertyFailure::Uninitialized) {
         ExceptionKind::ReferenceError

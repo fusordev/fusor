@@ -25,6 +25,8 @@ pub(crate) struct PendingDynamicImportRecord {
     pub(crate) specifier: JsString,
     pub(crate) attributes: Vec<(JsString, JsString)>,
     pub(crate) promise: ObjectId,
+    /// `import.defer()` phase (ECMA-262 DynamicImportState [[Phase]] ~defer~).
+    pub(crate) deferred: bool,
 }
 
 /// A parked dynamic `import()` awaiting host load completion.
@@ -70,6 +72,12 @@ impl PendingDynamicImport {
             })
             .collect()
     }
+
+    /// Returns whether this import used the `import.defer()` phase.
+    #[must_use]
+    pub const fn is_deferred(&self) -> bool {
+        self.record.deferred
+    }
 }
 
 impl std::fmt::Debug for PendingDynamicImport {
@@ -92,6 +100,7 @@ impl Runtime {
         specifier: JsString,
         attributes: Vec<(JsString, JsString)>,
         promise: ObjectId,
+        deferred: bool,
     ) -> Result<(), ExecutionError> {
         check_execution_limit(
             RuntimeResource::DynamicImportLoads,
@@ -111,6 +120,7 @@ impl Runtime {
                 specifier,
                 attributes,
                 promise,
+                deferred,
             });
         self.collection_pending = true;
         Ok(())

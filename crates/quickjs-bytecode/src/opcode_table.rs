@@ -81,6 +81,7 @@ define_opcode_tables! {
         RegExp => ("regexp", 1, 2, 1, None),
         GetSuper => ("get_super", 1, 1, 1, None),
         Import => ("import", 1, 2, 1, None),
+        ImportDefer => ("import_defer", 1, 2, 1, None),
         GetVarUndef => ("get_var_undef", 3, 0, 1, VarRef),
         GetVar => ("get_var", 3, 0, 1, VarRef),
         PutVar => ("put_var", 3, 1, 0, VarRef),

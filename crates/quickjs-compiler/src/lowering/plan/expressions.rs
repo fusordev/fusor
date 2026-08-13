@@ -813,8 +813,13 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                             // EvaluateImportCall evaluates the specifier before the optional
                             // options expression. The opcode owns every subsequent observable
                             // operation, beginning with NewPromiseCapability and ToString.
+                            // `import.defer(...)` selects the deferred-phase variant.
+                            let opcode = match import_expression.phase {
+                                Some(oxc_ast::ast::ImportPhase::Defer) => FinalOpcode::ImportDefer,
+                                _ => FinalOpcode::Import,
+                            };
                             work.push(ExpressionWork::Emit(PlannedInstruction::new(
-                                FinalOpcode::Import,
+                                opcode,
                                 Operands::None,
                                 import_expression.span,
                             )));

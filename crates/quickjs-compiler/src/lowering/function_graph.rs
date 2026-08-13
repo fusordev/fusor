@@ -968,6 +968,9 @@ impl CompilationContext<'_, '_, '_> {
             quickjs_frontend::ModuleImportName::Namespace => {
                 quickjs_bytecode::ModuleImportName::namespace(request)
             }
+            quickjs_frontend::ModuleImportName::DeferredNamespace => {
+                quickjs_bytecode::ModuleImportName::deferred_namespace(request)
+            }
             quickjs_frontend::ModuleImportName::Default(_) => {
                 quickjs_bytecode::ModuleImportName::default(request)
             }

@@ -878,6 +878,14 @@ impl Runtime {
                                 &mut work,
                             );
                         }
+                        PromiseReactionTarget::ImportDeferDeps { promise, .. } => {
+                            mark_heap_reference(
+                                HeapReference::Object(*promise),
+                                &mut marked_functions,
+                                &mut marked_objects,
+                                &mut work,
+                            );
+                        }
                     }
                     mark_stored_value(
                         argument,
@@ -1573,6 +1581,17 @@ impl Runtime {
                                                     ..
                                                 } => {}
                                                 PromiseReactionTarget::FinishDynamicImport {
+                                                    promise,
+                                                    ..
+                                                } => {
+                                                    mark_heap_reference(
+                                                        HeapReference::Object(*promise),
+                                                        &mut marked_functions,
+                                                        &mut marked_objects,
+                                                        &mut work,
+                                                    );
+                                                }
+                                                PromiseReactionTarget::ImportDeferDeps {
                                                     promise,
                                                     ..
                                                 } => {

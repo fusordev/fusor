@@ -1,9 +1,9 @@
 //! Module namespace exotic objects.
 
-use super::ModuleRecordId;
+use super::{ModuleRecordId, ModuleStatus};
 use crate::object::OwnProperty;
 use crate::runtime::{BindingCell, ObjectId, Runtime, SlotValue, StoredValue};
-use crate::{AtomKind, PropertyKey, PropertyLayout};
+use crate::{AtomKind, PredefinedAtom, PropertyKey, PropertyLayout};
 
 /// Runtime state for a module namespace exotic object.
 #[derive(Debug)]
@@ -12,6 +12,20 @@ pub(crate) struct ModuleNamespaceState {
     pub(crate) module: ModuleRecordId,
     /// Sorted export names (UTF-8) → resolved target (module + cell).
     pub(crate) exports: Vec<(Box<[u8]>, NamespaceExport)>,
+    /// Whether this is a deferred namespace (ECMA-262 `[[Deferred]]`): string
+    /// property access triggers synchronous evaluation of the module.
+    pub(crate) deferred: bool,
+}
+
+/// The JavaScript-observable failure of an ECMA-262 `EvaluateModuleSync`
+/// performed for a deferred namespace property access.
+pub(crate) enum DeferredNamespaceEvaluationFailure {
+    /// `ReadyForSyncExecution` was false: the caller throws a TypeError.
+    NotReady,
+    /// The module's evaluation rejected: the caller throws this value.
+    Thrown(StoredValue),
+    /// Heap-level failure.
+    Fault(crate::EngineFault),
 }
 
 /// A namespace export entry (ECMA-262 ResolvedBinding shape).
@@ -53,6 +67,95 @@ impl Runtime {
                 index: object.index(),
                 generation: object.generation(),
             })
+    }
+
+    /// Whether `object` is a module namespace exotic object still awaiting
+    /// deferred evaluation (ECMA-262 `[[Deferred]]` true).
+    pub(crate) fn module_namespace_is_deferred(&self, object: ObjectId) -> bool {
+        self.objects
+            .get(object)
+            .is_some_and(|object| object.module_namespace_state().is_some_and(|s| s.deferred))
+    }
+
+    /// Performs the ECMA-262 `EvaluateModuleSync` trigger for a deferred
+    /// namespace property access (10.4.6 `GetModuleExportsList`).
+    ///
+    /// Symbol keys and the `"then"` string never trigger evaluation
+    /// (`IsSymbolLikeNamespaceKey`); every other string key does. A module
+    /// that cannot complete synchronously raises a TypeError; an evaluation
+    /// rejection surfaces as the original rejection value. Success clears
+    /// `[[Deferred]]` so later accesses are ordinary.
+    pub(crate) fn ensure_deferred_namespace_evaluation(
+        &mut self,
+        object: ObjectId,
+        key: Option<&PropertyKey>,
+    ) -> Result<(), DeferredNamespaceEvaluationFailure> {
+        let Some(state) = self
+            .objects
+            .get(object)
+            .ok_or(DeferredNamespaceEvaluationFailure::Fault(
+                crate::EngineFault::StaleHeapEdge {
+                    edge: "object",
+                    index: object.index(),
+                    generation: object.generation(),
+                },
+            ))?
+            .module_namespace_state()
+        else {
+            return Ok(());
+        };
+        if !state.deferred {
+            return Ok(());
+        }
+        // `[[OwnPropertyKeys]]` triggers unconditionally; keyed accesses only
+        // trigger for string keys other than "then".
+        if let Some(key) = key
+            && is_symbol_like_namespace_key(key)
+        {
+            return Ok(());
+        }
+        let module = state.module;
+        let Some(record) = self.modules.get(module) else {
+            return Ok(());
+        };
+        // A member of a strongly connected component whose cycle root has not
+        // finished counts as unevaluated (ECMA-262 GetModuleExportsList +
+        // EvaluateModuleSync), even when its own status is ~evaluated~.
+        if record.status != ModuleStatus::Evaluated
+            || !super::evaluation::is_module_scc_evaluated(self, module)
+        {
+            let mut seen = Vec::new();
+            if !super::evaluation::ready_for_sync_execution(self, module, &mut seen) {
+                return Err(DeferredNamespaceEvaluationFailure::NotReady);
+            }
+            let realm = record.realm;
+            if let Err(error) = super::evaluation::evaluate_module(
+                self,
+                realm,
+                module,
+                crate::runtime::ExecutionLimits::default(),
+                None,
+            ) {
+                let value = crate::vm::module_error_rejection_value(self, realm, &error)
+                    .map_err(|_execution| {
+                        DeferredNamespaceEvaluationFailure::Fault(
+                            crate::EngineFault::RuntimeInvariant {
+                                message: "deferred evaluation rejection value failed",
+                            },
+                        )
+                    })?;
+                return Err(DeferredNamespaceEvaluationFailure::Thrown(value));
+            }
+        }
+        // [[Deferred]] := false: this namespace's evaluation is now final.
+        if let Some(state) = self
+            .objects
+            .get_mut(object)
+            .and_then(|object| object.module_namespace_state_mut())
+        {
+            state.deferred = false;
+        }
+        Ok(())
     }
 
     /// Implements the export branch of the namespace `[[GetOwnProperty]]`
@@ -252,4 +355,23 @@ fn namespace_key_bytes(key: &PropertyKey) -> Option<Vec<u8>> {
     }
     let description = atom.description()?;
     description.to_utf8_lossy().ok().map(String::into_bytes)
+}
+
+/// ECMA-262 `IsSymbolLikeNamespaceKey`: symbols never trigger deferred
+/// evaluation, and neither does the `"then"` string while the namespace is
+/// still deferred (a deferred namespace whose module exports a `then` binding
+/// must stay safe to use as a promise thenable).
+fn is_symbol_like_namespace_key(key: &PropertyKey) -> bool {
+    if key.as_index().is_none() {
+        let Some(atom) = key.as_atom() else {
+            return true;
+        };
+        if atom.kind() != AtomKind::String {
+            return true;
+        }
+        if atom.predefined_atom() == Some(PredefinedAtom::Then) {
+            return true;
+        }
+    }
+    false
 }

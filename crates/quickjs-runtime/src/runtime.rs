@@ -5523,6 +5523,9 @@ pub struct Runtime {
     pub(crate) atomics_timer: Option<atomics_waiters::AtomicsTimerDriver>,
     pub(crate) pending_dynamic_imports:
         VecDeque<dynamic_imports::PendingDynamicImportRecord>,
+    /// Remaining async-dependency count per in-flight `import.defer()` promise
+    /// (SafePerformPromiseAll bookkeeping).
+    pub(crate) deferred_import_waiters: HashMap<ObjectId, u32>,
     pub(crate) finalization_jobs: VecDeque<ObjectId>,
     pub(crate) kept_alive: Vec<StoredValue>,
     pub(crate) generator_states: HashMap<ObjectId, crate::vm::GeneratorRecord>,
@@ -5860,6 +5863,7 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::Eval
             | FinalOpcode::ApplyEval
             | FinalOpcode::Import
+            | FinalOpcode::ImportDefer
             | FinalOpcode::ImportMeta
             | FinalOpcode::CheckCtorReturn
             | FinalOpcode::CheckCtor

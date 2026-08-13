@@ -11,6 +11,7 @@ use super::{ModuleError, ModuleRecordId, ModuleStatus};
 use crate::OrdinaryDynamicFunctionCompiler;
 use crate::runtime::{ExecutionLimits, RealmId, Runtime, StoredValue};
 use quickjs_bytecode::FunctionKind;
+use std::collections::HashSet;
 use std::fmt;
 use std::sync::Arc;
 
@@ -42,7 +43,13 @@ impl std::error::Error for ModuleEvaluationError {}
 
 enum EvalWorkItem {
     Enter(ModuleRecordId),
-    Execute(ModuleRecordId),
+    /// Carries the evaluation list captured at enter time: by the time this
+    /// module executes, gathered dependencies have left the `Linked` status
+    /// and would be dropped by a recomputed list.
+    Execute {
+        module: ModuleRecordId,
+        evaluation_list: Vec<ModuleRecordId>,
+    },
 }
 
 /// Evaluates a module graph starting from `root` (ECMA-262 `Evaluate()`).
@@ -106,23 +113,35 @@ pub fn evaluate_module(
                 }
                 index += 1;
                 stack.push(module);
-                work.push(EvalWorkItem::Execute(module));
-
-                let deps = super::linking::module_dependencies(runtime, module);
-                for dep in deps.into_iter().rev() {
+                // ECMA-262 InnerModuleEvaluation step 8 recurses over the
+                // evaluation list: eager-phase requests contribute the
+                // requested module, defer-phase requests contribute only the
+                // module's asynchronous transitive dependencies.
+                let evaluation_list = module_evaluation_list(runtime, module);
+                work.push(EvalWorkItem::Execute {
+                    module,
+                    evaluation_list: evaluation_list.clone(),
+                });
+                for dep in evaluation_list.into_iter().rev() {
                     if module_status(runtime, dep) == ModuleStatus::Linked {
                         work.push(EvalWorkItem::Enter(dep));
                     }
                 }
             }
-            EvalWorkItem::Execute(module) => {
+            EvalWorkItem::Execute {
+                module,
+                evaluation_list,
+            } => {
                 // Dependency bookkeeping in source order (ECMA-262 16.6.1.4
-                // step 11.c): a dependency still on the DFS stack tightens
-                // this module's ancestor index; a completed dependency
-                // contributes its cycle root. Either way, an async dependency
-                // becomes a pending async dependency of this module.
-                let deps = super::linking::module_dependencies(runtime, module);
-                for dep in deps {
+                // step 11.c): the bookkeeping iterates the evaluation list —
+                // defer-phase dependencies are excluded (their evaluation is
+                // deferred; their failures surface only through the deferred
+                // namespace access). A dependency still on the DFS stack
+                // tightens this module's ancestor index; a completed
+                // dependency contributes its cycle root. Either way, an async
+                // dependency becomes a pending async dependency of this
+                // module.
+                for dep in evaluation_list {
                     let async_dependency = if module_status(runtime, dep)
                         == ModuleStatus::Evaluating
                     {
@@ -534,6 +553,127 @@ pub(crate) fn module_top_level_capability(
         .modules
         .get(module)
         .and_then(|r| r.top_level_capability)
+}
+
+/// Builds ECMA-262 InnerModuleEvaluation's `evaluationList` for `module`:
+/// eager-phase requests contribute the requested module itself; defer-phase
+/// requests contribute the module's asynchronous transitive dependencies
+/// (GatherAsynchronousTransitiveDependencies) instead, leaving the deferred
+/// module and its synchronous subtree unevaluated.
+pub(crate) fn module_evaluation_list(
+    runtime: &Runtime,
+    module: ModuleRecordId,
+) -> Vec<ModuleRecordId> {
+    let mut list = Vec::new();
+    let mut seen = HashSet::new();
+    let Some(record) = runtime.modules.get(module) else {
+        return list;
+    };
+    let syntax = record.syntax_record.clone();
+    for (index, request) in syntax.requests().iter().enumerate() {
+        let Ok(dep) = super::linking::resolve_request(runtime, module, index as u32) else {
+            continue;
+        };
+        if request.is_deferred() {
+            let mut gathered = Vec::new();
+            let mut gather_seen = Vec::new();
+            gather_async_transitive_dependencies(runtime, dep, &mut gather_seen, &mut gathered);
+            for additional in gathered {
+                if seen.insert(additional) {
+                    list.push(additional);
+                }
+            }
+        } else if seen.insert(dep) {
+            list.push(dep);
+        }
+    }
+    list
+}
+
+/// ECMA-262 `IsModuleSCCEvaluated`: a module whose strongly connected
+/// component has a cycle root counts as evaluated only once that root has
+/// reached ~evaluated~ — a member of an in-flight async cycle does not.
+pub(crate) fn is_module_scc_evaluated(runtime: &Runtime, module: ModuleRecordId) -> bool {
+    let Some(record) = runtime.modules.get(module) else {
+        return false;
+    };
+    if let Some(cycle_root) = record.cycle_root {
+        return runtime
+            .modules
+            .get(cycle_root)
+            .is_some_and(|root| root.status == ModuleStatus::Evaluated);
+    }
+    record.status == ModuleStatus::Evaluated
+}
+
+/// ECMA-262 `GatherAsynchronousTransitiveDependencies`: the post-order list of
+/// unevaluated modules with top-level await reachable from `module` without
+/// crossing an already-evaluated (or evaluating) branch, where "evaluated" is
+/// the cycle-root-aware `IsModuleSCCEvaluated` predicate. The walk covers both
+/// phases of static requests.
+pub(crate) fn gather_async_transitive_dependencies(
+    runtime: &Runtime,
+    module: ModuleRecordId,
+    seen: &mut Vec<ModuleRecordId>,
+    out: &mut Vec<ModuleRecordId>,
+) {
+    if seen.contains(&module) {
+        return;
+    }
+    seen.push(module);
+    let Some(record) = runtime.modules.get(module) else {
+        return;
+    };
+    if record.status == ModuleStatus::Evaluating
+        || record.status == ModuleStatus::Errored
+        || is_module_scc_evaluated(runtime, module)
+    {
+        return;
+    }
+    if module_has_tla(runtime, module) {
+        out.push(module);
+        return;
+    }
+    for dep in super::linking::module_dependencies(runtime, module) {
+        gather_async_transitive_dependencies(runtime, dep, seen, out);
+    }
+}
+
+/// ECMA-262 `ReadyForSyncExecution`: whether `module` can be evaluated to
+/// completion synchronously right now — itself, and every module reachable
+/// through its static requests, must not be evaluating, evaluating
+/// asynchronously, or carry top-level await, and must not belong to an
+/// unevaluated strongly connected component. Already-evaluated (or errored,
+/// whose stored error rethrows) modules are ready.
+pub(crate) fn ready_for_sync_execution(
+    runtime: &Runtime,
+    module: ModuleRecordId,
+    seen: &mut Vec<ModuleRecordId>,
+) -> bool {
+    if seen.contains(&module) {
+        return true;
+    }
+    seen.push(module);
+    let Some(record) = runtime.modules.get(module) else {
+        return false;
+    };
+    if is_module_scc_evaluated(runtime, module) || record.status == ModuleStatus::Errored {
+        return true;
+    }
+    match record.status {
+        ModuleStatus::Evaluating | ModuleStatus::EvaluatingAsync => return false,
+        ModuleStatus::Linked | ModuleStatus::Evaluated => {}
+        _ => return false,
+    }
+    if module_has_tla(runtime, module) {
+        return false;
+    }
+    for dep in super::linking::module_dependencies(runtime, module) {
+        if !ready_for_sync_execution(runtime, dep, seen) {
+            return false;
+        }
+    }
+    true
 }
 
 fn execute_module_body(

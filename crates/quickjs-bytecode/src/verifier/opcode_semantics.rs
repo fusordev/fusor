@@ -167,6 +167,7 @@ pub(super) const fn opcode_semantics(opcode: FinalOpcode) -> OpcodeSemantics {
         | FinalOpcode::RegExp
         | FinalOpcode::GetSuper
         | FinalOpcode::Import
+        | FinalOpcode::ImportDefer
         | FinalOpcode::ImportMeta
         | FinalOpcode::GetVarUndef
         | FinalOpcode::GetVar
