@@ -1888,7 +1888,17 @@ impl Runtime {
                 self.object_properties = self
                     .object_properties
                     .saturating_sub(usize_to_u64(function.object.property_count()));
-                if let FunctionImplementation::Bytecode(bytecode) = function.implementation
+                if let FunctionImplementation::Native(crate::runtime::NativeFunction {
+                    kind: crate::runtime::NativeFunctionKind::Host(host_id),
+                    ..
+                }) = &function.implementation
+                    && let Some(slot) = self.host_functions.get_mut(host_id.index())
+                {
+                    // The collected function was the last owner of this host
+                    // callback slot; release the Rust closure it retained.
+                    *slot = None;
+                }
+                if let FunctionImplementation::Bytecode(bytecode) = &function.implementation
                     && let Some(code) = self.code.get_mut(bytecode.code)
                 {
                     debug_assert!(code.live_functions > 0);

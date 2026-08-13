@@ -50,11 +50,11 @@
 
 ### 错误契约(§4.6)
 
-- [ ] `call_function`、`set_global`、host 回调返回值三处补 `validate_owner`
-- [ ] `Runtime::create_realm` 的 `.expect` 改为错误返回
-- [ ] host 驱动安装操作纳入对象属性资源上限计量(测试:limit 触发路径)
-- [ ] `host_functions` 槽位释放:GC 收集 host Function 时清槽(泄漏回归测试:反复创建/丢弃)
-- [ ] host 函数自我重入:定义行为并文档化,不再以 `EngineFault` 暴露(测试:直接与间接重入)
+- [x] `call_function`、`set_global`、host 回调返回值三处补 `validate_owner`
+- [x] `Runtime::create_realm` 的 `.expect` 改为错误返回
+- [x] host 驱动安装操作纳入对象属性资源上限计量(测试:limit 触发路径)
+- [x] `host_functions` 槽位释放:GC 收集 host Function 时清槽(泄漏回归测试:反复创建/丢弃)
+- [x] host 函数自我重入:定义行为并文档化,不再以 `EngineFault` 暴露(测试:直接与间接重入)
 
 ### 模块契约
 

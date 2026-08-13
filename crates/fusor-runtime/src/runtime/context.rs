@@ -1136,8 +1136,20 @@ impl Context<'_> {
         arguments: Vec<JsValue>,
         limits: ExecutionLimits,
     ) -> Result<JsValue, crate::CallError> {
+        let function_owner = function
+            .owner()
+            .map_err(|error| crate::CallError::Execution(error.into()))?;
+        self.runtime
+            .validate_owner(&function_owner, HandleKind::Function)
+            .map_err(|error| crate::CallError::Execution(error.into()))?;
         let function_id = function
             .id()
+            .map_err(|error| crate::CallError::Execution(error.into()))?;
+        let receiver_owner = receiver
+            .owner()
+            .map_err(|error| crate::CallError::Execution(error.into()))?;
+        self.runtime
+            .validate_owner(&receiver_owner, HandleKind::Value)
             .map_err(|error| crate::CallError::Execution(error.into()))?;
         let receiver = receiver
             .stored()
@@ -1145,6 +1157,12 @@ impl Context<'_> {
             .duplicate();
         let mut stored_arguments = Vec::with_capacity(arguments.len());
         for argument in &arguments {
+            let owner = argument
+                .owner()
+                .map_err(|error| crate::CallError::Execution(error.into()))?;
+            self.runtime
+                .validate_owner(&owner, HandleKind::Value)
+                .map_err(|error| crate::CallError::Execution(error.into()))?;
             let value = argument
                 .stored()
                 .map_err(|error| crate::CallError::Execution(error.into()))?
@@ -1208,6 +1226,13 @@ impl Context<'_> {
         let prototype_key = self.runtime.predefined_property_key(PredefinedAtom::Prototype);
         let constructor_key = self.runtime.predefined_property_key(PredefinedAtom::Constructor);
         let function_name = JsString::from_utf8(name).map_err(crate::ExecutionError::from)?;
+        // The installation commits four property slots: name, length, the
+        // `prototype` property, and the prototype object's `constructor`.
+        super::check_execution_limit(
+            RuntimeResource::ObjectProperties,
+            self.runtime.limits.max_object_properties,
+            self.runtime.object_properties.saturating_add(4),
+        )?;
         let mut record = ObjectRecord::empty(Some(HeapReference::Function(prototype)));
         record
             .try_reserve_data(3)

@@ -578,9 +578,9 @@ impl Runtime {
     pub fn create_realm(&mut self) -> Result<Realm, RuntimeError> {
         self.drain_releases();
         let intrinsic_schema = RealmIntrinsicSchema::try_new()?;
-        intrinsic_schema
-            .validate()
-            .expect("the immutable complete Realm schema is valid");
+        intrinsic_schema.validate().map_err(|error| {
+            RuntimeError::SchemaValidation(format!("realm intrinsic schema: {error:?}"))
+        })?;
         let atom_plan = RealmAtomPlan::try_new(&intrinsic_schema)?;
         let reservation = RealmReservationPlan::try_new(&atom_plan, &intrinsic_schema)?;
         reservation.preflight_and_reserve(self)?;

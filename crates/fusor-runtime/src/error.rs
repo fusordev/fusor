@@ -237,6 +237,9 @@ pub enum RuntimeError {
         /// Additional elements requested.
         additional: usize,
     },
+    /// The pinned realm intrinsic schema failed its own validation. This
+    /// names an engine configuration invariant, never a host error.
+    SchemaValidation(String),
 }
 
 impl fmt::Display for RuntimeError {
@@ -258,6 +261,7 @@ impl fmt::Display for RuntimeError {
                 formatter,
                 "failed to reserve {additional} additional entries for {resource}"
             ),
+            Self::SchemaValidation(message) => formatter.write_str(message),
         }
     }
 }
@@ -266,7 +270,9 @@ impl Error for RuntimeError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Atom(source) => Some(source),
-            Self::LimitExceeded { .. } | Self::AllocationFailed { .. } => None,
+            Self::LimitExceeded { .. }
+            | Self::AllocationFailed { .. }
+            | Self::SchemaValidation(_) => None,
         }
     }
 }

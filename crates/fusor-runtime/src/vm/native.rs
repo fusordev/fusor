@@ -2681,21 +2681,48 @@ fn call_host_callback(
     new_target: Option<Function>,
     origin: JsStackFrame,
 ) -> Result<JsValue, NativeFailure> {
-    let callback = runtime
+    // The slot is taken for the duration of the callback so the `&mut Runtime`
+    // can be handed over as a `Context`. The slot is therefore empty only
+    // while this very callback is executing: re-entering a host callback —
+    // directly, or through JavaScript that calls it back — is defined to fail
+    // closed with a `TypeError` instead of an engine fault.
+    let Some(callback) = runtime
         .host_functions
         .get_mut(id.index())
         .and_then(Option::take)
-        .ok_or(EngineFault::RuntimeInvariant {
-            message: "host function callback slot is empty",
-        })?;
+    else {
+        return Err(NativeFailure::Abrupt(PendingException {
+            realm,
+            payload: PendingExceptionPayload::EngineError {
+                kind: ExceptionKind::TypeError,
+                message: JsString::from_utf8("host callback re-entered itself")?,
+            },
+            origin,
+        }));
+    };
 
     let mut context = crate::Context { runtime, realm };
     let result = callback(&mut context, crate::HostCall::new(this, arguments, new_target));
     context.runtime.host_functions[id.index()] = Some(callback);
 
+    // A host callback must not smuggle a value from another runtime (or a
+    // stale root) back into this one; reject it before it touches the heap.
+    let validate = |value: &JsValue| -> Result<(), NativeFailure> {
+        let owner = value
+            .owner()
+            .map_err(|error| NativeFailure::Execution(error.into()))?;
+        context
+            .runtime
+            .validate_owner(&owner, HandleKind::Value)
+            .map_err(|error| NativeFailure::Execution(error.into()))
+    };
     match result {
-        Ok(value) => Ok(value),
+        Ok(value) => {
+            validate(&value)?;
+            Ok(value)
+        }
         Err(thrown) => {
+            validate(&thrown)?;
             let stored = thrown
                 .stored()
                 .map_err(|error| NativeFailure::Execution(error.into()))?;

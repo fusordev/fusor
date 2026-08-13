@@ -4484,6 +4484,10 @@ fn runtime_collection_execution_error(error: RuntimeError) -> ExecutionError {
             additional,
         },
         RuntimeError::Atom(source) => ExecutionError::Atom(source),
+        RuntimeError::SchemaValidation(_) => EngineFault::RuntimeInvariant {
+            message: "cycle collection returned a realm-schema construction error",
+        }
+        .into(),
     }
 }
 

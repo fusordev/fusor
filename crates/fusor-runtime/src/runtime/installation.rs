@@ -429,10 +429,12 @@ impl Runtime {
                 resource,
                 additional,
             },
-            RuntimeError::Atom(_) => crate::EngineFault::RuntimeInvariant {
-                message: "cycle collection returned an atom-table construction error",
+            RuntimeError::Atom(_) | RuntimeError::SchemaValidation(_) => {
+                crate::EngineFault::RuntimeInvariant {
+                    message: "cycle collection returned a construction error",
+                }
+                .into()
             }
-            .into(),
         })
     }
 
@@ -455,6 +457,9 @@ impl Runtime {
                 additional,
             },
             RuntimeError::Atom(source) => InstallError::Atom(source),
+            RuntimeError::SchemaValidation(_) => InstallError::AuthorityInvariant {
+                message: "realm intrinsic schema validation failed",
+            },
         })
     }
 

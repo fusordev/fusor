@@ -7519,3 +7519,38 @@ fn assert_native_type_error(error: NativeFailure, expected: &str) {
     assert_eq!(kind, ExceptionKind::TypeError);
     assert_eq!(message.to_utf8_lossy().expect("UTF-8"), expected);
 }
+
+#[test]
+fn collected_host_functions_release_their_callback_slots() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    {
+        let mut context = runtime.context(&realm).expect("context");
+        for _ in 0..32 {
+            let function = context
+                .create_host_function("transient", |ctx, _call| {
+                    Ok(ctx.number(JsNumber::from_i32(0)))
+                })
+                .expect("host function");
+            drop(function);
+        }
+        assert_eq!(runtime.host_functions.len(), 32);
+        assert!(
+            runtime
+                .host_functions
+                .iter()
+                .all(|slot| slot.is_some()),
+            "live host functions retain their slots"
+        );
+    }
+    runtime.collect_cycles().expect("collect");
+    // Every transient function is unreachable; its callback slot must be
+    // released so the Rust closure does not leak.
+    assert!(
+        runtime
+            .host_functions
+            .iter()
+            .all(|slot| slot.is_none()),
+        "collected host functions must release their callback slots"
+    );
+}
