@@ -6900,7 +6900,7 @@ fn compile_test_function(source: &str, name: &str) -> Arc<fusor_bytecode::Verifi
 }
 
 #[test]
-fn dynamic_import_returns_a_fresh_rejected_promise_when_loading_is_unavailable() {
+fn dynamic_import_parks_each_load_until_the_host_settles_it() {
     let authority = compile_test_function(
         "function load(specifier){return import(specifier);}",
         "load",
@@ -6939,6 +6939,31 @@ fn dynamic_import_returns_a_fresh_rejected_promise_when_loading_is_unavailable()
         first_id, second_id,
         "every import call creates a new Promise"
     );
+    for promise in [first_id, second_id] {
+        assert!(matches!(
+            runtime
+                .objects
+                .get(promise)
+                .and_then(crate::object::HeapObject::promise_state),
+            Some(crate::object::PromiseState::Pending { .. })
+        ));
+    }
+    assert_eq!(runtime.pending_dynamic_import_count(), 2);
+
+    // The host settles each parked load; the rejection queues as a job.
+    let first_import = runtime
+        .take_pending_dynamic_import()
+        .expect("first parked import");
+    assert_eq!(first_import.specifier(), "./missing.js");
+    reject_dynamic_import_load(&mut runtime, first_import, "host could not load the module")
+        .expect("reject first");
+    let second_import = runtime
+        .take_pending_dynamic_import()
+        .expect("second parked import");
+    reject_dynamic_import_load(&mut runtime, second_import, "host could not load the module")
+        .expect("reject second");
+    drain_host_jobs_with_limits(&mut runtime, None, ExecutionLimits::default())
+        .expect("drain rejection jobs");
     for promise in [first_id, second_id] {
         assert!(matches!(
             runtime
