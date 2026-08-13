@@ -12,5 +12,6 @@ fusor-ops = { path = "../fusor-ops" }
 serde = { workspace = true }
 
 [dev-dependencies]
+fusor-bytecode = { path = "../fusor-bytecode" }
 fusor-compiler = { path = "../fusor-compiler" }
 fusor-frontend = { path = "../fusor-frontend" }

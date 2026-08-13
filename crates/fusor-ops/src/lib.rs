@@ -80,6 +80,90 @@ pub fn op(attribute: TokenStream, item: TokenStream) -> TokenStream {
         &format!("__fusor_op_declaration_{function_name}"),
         function_name.span(),
     );
+    let call_name = syn::Ident::new(
+        &format!("__fusor_op_call_{function_name}"),
+        function_name.span(),
+    );
+
+    // Parameter names and types for the generated calling glue.
+    let parameters: Vec<(&syn::Ident, &syn::Type)> = function
+        .sig
+        .inputs
+        .iter()
+        .filter_map(|argument| match argument {
+            syn::FnArg::Typed(typed) => match &*typed.pat {
+                syn::Pat::Ident(identifier) => Some((&identifier.ident, &*typed.ty)),
+                _ => None,
+            },
+            syn::FnArg::Receiver(_) => None,
+        })
+        .collect();
+    let parameter_names: Vec<&syn::Ident> = parameters.iter().map(|(name, _)| *name).collect();
+    let parameter_declarations: Vec<&syn::Type> = parameters.iter().map(|(_, ty)| *ty).collect();
+
+    // The generated glue deserializes each argument through the serde bridge,
+    // invokes the op function, and serializes the result back; `OpError`s
+    // become thrown JavaScript errors of their class (§5.3).
+    let glue = if options.is_async {
+        quote! {}
+    } else {
+        quote! {
+            #[doc(hidden)]
+            #[allow(non_snake_case)]
+            #visibility fn #call_name(
+                ctx: &mut ::fusor_runtime::Context<'_>,
+                call: ::fusor_runtime::HostCall,
+            ) -> ::std::result::Result<::fusor_runtime::JsValue, ::fusor_runtime::JsValue> {
+                let mut arguments = call.arguments().iter();
+                let mut argument_index: usize = 0;
+                #(
+                    let #parameter_names: #parameter_declarations = {
+                        let index = argument_index;
+                        argument_index = argument_index.saturating_add(1);
+                        match arguments.next() {
+                            ::std::option::Option::Some(value) => {
+                                match ::serde::Deserialize::deserialize(
+                                    ::fusor_host::ops::JsValueDeserializer::new(ctx, value, index),
+                                ) {
+                                    ::std::result::Result::Ok(value) => value,
+                                    ::std::result::Result::Err(error) => {
+                                        return ::std::result::Result::Err(
+                                            ::fusor_host::ops::op_error_value(
+                                                ctx,
+                                                ::fusor_host::ops::OpError::type_error(
+                                                    error.parameter,
+                                                    error.message,
+                                                ),
+                                            ),
+                                        );
+                                    }
+                                }
+                            }
+                            ::std::option::Option::None => {
+                                return ::std::result::Result::Err(
+                                    ::fusor_host::ops::op_error_value(
+                                        ctx,
+                                        ::fusor_host::ops::OpError::type_error(
+                                            index,
+                                            "missing argument",
+                                        ),
+                                    ),
+                                );
+                            }
+                        }
+                    };
+                )*
+                match #function_name(#(#parameter_names),*) {
+                    ::std::result::Result::Ok(value) => {
+                        ::fusor_host::ops::serialize_value(ctx, &value)
+                    }
+                    ::std::result::Result::Err(error) => {
+                        ::std::result::Result::Err(::fusor_host::ops::op_error_value(ctx, error))
+                    }
+                }
+            }
+        }
+    };
 
     let expanded = quote! {
         #function
@@ -93,6 +177,8 @@ pub fn op(attribute: TokenStream, item: TokenStream) -> TokenStream {
                 is_async: #is_async,
             }
         }
+
+        #glue
     };
     expanded.into()
 }

@@ -5,6 +5,7 @@ mod serde;
 
 pub use serde::{DeserializationError, JsValueDeserializer, JsValueSerializer, SerializationError};
 
+use fusor_runtime::{Context, JsValue};
 use std::collections::HashMap;
 
 /// Static declaration metadata for one `#[op]` function.
@@ -159,3 +160,133 @@ impl std::fmt::Display for OpDeclarationConflict {
 }
 
 impl std::error::Error for OpDeclarationConflict {}
+
+/// Serializes one op result through the serde bridge (§5.2).
+///
+/// A serialization failure becomes a thrown `InternalError`: the op already
+/// produced a value the bridge cannot represent, which is a host bug, not a
+/// JavaScript misuse.
+pub fn serialize_value<T: ::serde::Serialize>(
+    context: &mut Context<'_>,
+    value: &T,
+) -> Result<JsValue, JsValue> {
+    ::serde::Serialize::serialize(value, JsValueSerializer::new(context))
+        .map_err(|error| op_error_value(context, OpError::of_class("InternalError", error.to_string())))
+}
+
+/// Converts an op error into the JavaScript error value it throws (§5.3):
+/// the class names the intrinsic Error family (`Error` by default) and the
+/// message is preserved exactly.
+pub fn op_error_value(context: &mut Context<'_>, error: OpError) -> JsValue {
+    let kind = match error.class {
+        None | Some("Error") => fusor_runtime::ErrorObjectKind::Error,
+        Some("TypeError") => fusor_runtime::ErrorObjectKind::TypeError,
+        Some("RangeError") => fusor_runtime::ErrorObjectKind::RangeError,
+        Some("SyntaxError") => fusor_runtime::ErrorObjectKind::SyntaxError,
+        Some("ReferenceError") => fusor_runtime::ErrorObjectKind::ReferenceError,
+        Some("UriError") | Some("URIError") => fusor_runtime::ErrorObjectKind::UriError,
+        Some("InternalError") => fusor_runtime::ErrorObjectKind::InternalError,
+        // Unknown classes fall back to plain Error (fail closed, §5.3).
+        Some(_) => fusor_runtime::ErrorObjectKind::Error,
+    };
+    context
+        .error(kind, &error.message)
+        .unwrap_or_else(|_| context.undefined())
+}
+
+/// Installs the `Fusor` namespace object and its `Fusor.ops` sub-object on
+/// the realm global (§5.4).
+///
+/// Both objects are installed as non-writable, non-enumerable,
+/// non-configurable data properties, exactly once per realm.
+///
+/// # Errors
+///
+/// Returns an [`ExecutionError`] when the global refuses the definitions
+/// (for example a frozen global) or allocation fails.
+pub fn install_namespace(context: &mut Context<'_>) -> Result<(), fusor_runtime::ExecutionError> {
+    let global = context.global_object()?.into_object()?;
+    let fusor_key = context.property_key("Fusor")?;
+    let ops_key = context.property_key("ops")?;
+    // Repeated installation is idempotent: the non-configurable namespace
+    // property cannot be redefined, so an existing namespace is reused as-is.
+    if global.has(context, fusor_key.clone())? {
+        return Ok(());
+    }
+    let fusor = context.new_object()?;
+    let ops = context.new_object()?;
+    let descriptor = |value: JsValue| {
+        let fields = fusor_runtime::DescriptorFields::<JsValue> {
+            value: Some(value),
+            writable: Some(false),
+            enumerable: Some(false),
+            configurable: Some(false),
+            ..fusor_runtime::DescriptorFields::new()
+        };
+        fields
+            .into_descriptor()
+            .map_err(|_| fusor_runtime::EngineFault::RuntimeInvariant {
+                message: "namespace descriptor is data-only by construction",
+            })
+            .map_err(fusor_runtime::ExecutionError::from)
+    };
+    if !global.define_own_property(context, fusor_key, descriptor(fusor.clone())?)? {
+        return Err(fusor_runtime::EngineFault::RuntimeInvariant {
+            message: "the global refused the Fusor namespace definition",
+        }
+        .into());
+    }
+    let fusor_object = fusor.into_object()?;
+    if !fusor_object.define_own_property(context, ops_key, descriptor(ops.clone())?)? {
+        return Err(fusor_runtime::EngineFault::RuntimeInvariant {
+            message: "the Fusor namespace refused its ops sub-object",
+        }
+        .into());
+    }
+    Ok(())
+}
+
+/// Installs one op as `Fusor.ops.<name>` using its generated calling glue
+/// (§5.4, §5.7).
+///
+/// The glue function has the shape
+/// `Fn(&mut Context, HostCall) -> Result<JsValue, JsValue>`.
+///
+/// # Errors
+///
+/// Returns an [`ExecutionError`] when the host function cannot be created
+/// or the ops object refuses the property.
+pub fn install_op<F>(
+    context: &mut Context<'_>,
+    declaration: OpDeclaration,
+    glue: F,
+) -> Result<(), fusor_runtime::ExecutionError>
+where
+    F: fusor_runtime::HostCallback + 'static,
+{
+    let function = context.create_host_function(declaration.name, glue)?;
+    let global = context.global_object()?.into_object()?;
+    let fusor_key = context.property_key("Fusor")?;
+    let ops_key = context.property_key("ops")?;
+    let fusor = global.get(context, fusor_key)?.into_object()?;
+    let ops = fusor.get(context, ops_key)?.into_object()?;
+    let op_key = context.property_key(declaration.name)?;
+    let descriptor = fusor_runtime::DescriptorFields::<JsValue> {
+        value: Some(function.as_value()),
+        writable: Some(true),
+        enumerable: Some(true),
+        configurable: Some(true),
+        ..fusor_runtime::DescriptorFields::new()
+    }
+    .into_descriptor()
+    .map_err(|_| fusor_runtime::EngineFault::RuntimeInvariant {
+        message: "op descriptor is data-only by construction",
+    })?;
+    if !ops.define_own_property(context, op_key, descriptor)? {
+        return Err(fusor_runtime::EngineFault::RuntimeInvariant {
+            message: "the Fusor.ops object refused an op definition",
+        }
+        .into());
+    }
+    Ok(())
+}
