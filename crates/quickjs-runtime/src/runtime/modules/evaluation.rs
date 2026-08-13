@@ -67,8 +67,20 @@ pub fn evaluate_module(
     compiler: Option<&Arc<dyn OrdinaryDynamicFunctionCompiler>>,
 ) -> Result<(), ModuleError> {
     match module_status(runtime, root) {
-        ModuleStatus::Evaluated => return Ok(()),
+        ModuleStatus::Evaluated => {
+            // ECMA-262 Evaluate step 1: an evaluated (or evaluating-async)
+            // module redirects to its cycle root, whose recorded evaluation
+            // error — if any — rethrows even though this member itself
+            // finished cleanly.
+            if let Some(error) = cycle_root_evaluation_error(runtime, root) {
+                return Err(error);
+            }
+            return Ok(());
+        }
         ModuleStatus::EvaluatingAsync => {
+            if let Some(error) = cycle_root_evaluation_error(runtime, root) {
+                return Err(error);
+            }
             return ensure_top_level_capability(runtime, realm, root);
         }
         ModuleStatus::Errored => return Err(module_evaluation_error(runtime, root)),
@@ -731,6 +743,18 @@ fn module_evaluation_error(runtime: &Runtime, module: ModuleRecordId) -> ModuleE
         .get(module)
         .and_then(|r| r.evaluation_error.clone())
         .unwrap_or_else(|| ModuleError::evaluate("module was in errored state"))
+}
+
+/// Returns the evaluation error recorded on `module`'s strongly connected
+/// component root, if any (ECMA-262 Evaluate's cycle-root redirection for an
+/// evaluated member of an errored cycle).
+fn cycle_root_evaluation_error(runtime: &Runtime, module: ModuleRecordId) -> Option<ModuleError> {
+    let record = runtime.modules.get(module)?;
+    let root = record.cycle_root.unwrap_or(module);
+    runtime
+        .modules
+        .get(root)
+        .and_then(|root| root.evaluation_error.clone())
 }
 
 fn module_status(runtime: &Runtime, module: ModuleRecordId) -> ModuleStatus {
