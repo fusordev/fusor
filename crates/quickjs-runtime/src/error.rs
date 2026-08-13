@@ -1133,6 +1133,35 @@ impl From<ExecutionError> for GlobalScriptError {
     }
 }
 
+/// The failure of a host-initiated JavaScript function call
+/// ([`crate::Context::call_function`]).
+#[derive(Debug)]
+pub enum CallError {
+    /// The called function threw; the rooted thrown value is retained.
+    Thrown(crate::JsValue),
+    /// An engine or host failure during the call (limits, allocation, an
+    /// engine fault), or a thrown exception that could not be re-rooted.
+    Execution(ExecutionError),
+}
+
+impl fmt::Display for CallError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Thrown(_) => formatter.write_str("called function threw an exception"),
+            Self::Execution(source) => source.fmt(formatter),
+        }
+    }
+}
+
+impl Error for CallError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Thrown(_) => None,
+            Self::Execution(source) => Some(source),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{error::Error, fmt, sync::Arc};

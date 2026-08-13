@@ -1613,6 +1613,23 @@ pub(crate) enum NativeFunctionKind {
     /// `import.meta.resolve`, resolving against the receiver meta object's
     /// `url` own property.
     ImportMetaResolve,
+    /// A host-installed JavaScript function backed by a Rust callback
+    /// ([`crate::Context::create_host_function`]).
+    Host(HostFunctionId),
+}
+
+/// Index into [`Runtime::host_functions`] naming one host-installed callback.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct HostFunctionId(u32);
+
+impl HostFunctionId {
+    pub(crate) const fn new(index: usize) -> Self {
+        Self(index as u32)
+    }
+
+    pub(crate) const fn index(self) -> usize {
+        self.0 as usize
+    }
 }
 
 /// Operations exposed by the `%Atomics%` namespace.
@@ -4791,6 +4808,7 @@ impl NativeFunctionKind {
                 | Self::WeakRefConstructor
                 | Self::FinalizationRegistryConstructor
                 | Self::ProxyConstructor
+                | Self::Host(_)
         )
     }
 }
@@ -5526,6 +5544,10 @@ pub struct Runtime {
     /// Remaining async-dependency count per in-flight `import.defer()` promise
     /// (SafePerformPromiseAll bookkeeping).
     pub(crate) deferred_import_waiters: HashMap<ObjectId, u32>,
+    /// Host-installed callbacks backing `FunctionImplementation::Native`
+    /// `Host` functions; a slot is reserved on registration and the closure is
+    /// stored by `HostFunctionId` index.
+    pub(crate) host_functions: Vec<Option<Box<dyn crate::HostCallback>>>,
     pub(crate) finalization_jobs: VecDeque<ObjectId>,
     pub(crate) kept_alive: Vec<StoredValue>,
     pub(crate) generator_states: HashMap<ObjectId, crate::vm::GeneratorRecord>,

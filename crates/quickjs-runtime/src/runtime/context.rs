@@ -1034,6 +1034,149 @@ impl Context<'_> {
         JsValue::primitive(&self.runtime.mailbox, PrimitiveValue::Undefined)
     }
 
+    /// Invokes an installed JavaScript function with a receiver and argument
+    /// list, returning the rooted completion value (ECMA-262 `[[Call]]`).
+    ///
+    /// The receiver and arguments must be rooted handles belonging to this
+    /// context's runtime. The returned value is a fresh public root; the
+    /// caller drops it to release the root.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CallError::Thrown`] with the rooted exception when the call
+    /// throws, and [`CallError::Execution`] for engine faults.
+    pub fn call_function(
+        &mut self,
+        function: &Function,
+        receiver: JsValue,
+        arguments: Vec<JsValue>,
+        limits: ExecutionLimits,
+    ) -> Result<JsValue, crate::CallError> {
+        let function_id = function
+            .id()
+            .map_err(|error| crate::CallError::Execution(error.into()))?;
+        let receiver = receiver
+            .stored()
+            .map_err(|error| crate::CallError::Execution(error.into()))?
+            .duplicate();
+        let mut stored_arguments = Vec::with_capacity(arguments.len());
+        for argument in &arguments {
+            let value = argument
+                .stored()
+                .map_err(|error| crate::CallError::Execution(error.into()))?
+                .duplicate();
+            stored_arguments.push(value);
+        }
+        let result = crate::vm::call_function_internal(
+            self.runtime,
+            function_id,
+            receiver,
+            stored_arguments,
+            limits,
+            None,
+        );
+        match result {
+            Ok(value) => self
+                .runtime
+                .public_value(value)
+                .map_err(crate::CallError::Execution),
+            Err(error) => Err(call_error_from_execution(self.runtime, self.realm, error)),
+        }
+    }
+
+    /// Installs a Rust closure as a JavaScript function.
+    ///
+    /// The callback is `Fn(&mut Context, HostCall) -> Result<JsValue, JsValue>`:
+    /// return `Ok` with the result, or `Err` with the value to throw. Host
+    /// functions are constructable; a construct call has
+    /// [`HostCall::new_target`] set.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`ExecutionError`] for a resource limit or engine fault.
+    pub fn create_host_function<F>(
+        &mut self,
+        name: &str,
+        callback: F,
+    ) -> Result<Function, crate::ExecutionError>
+    where
+        F: crate::HostCallback + 'static,
+    {
+        let index = self.runtime.host_functions.len();
+        self.runtime
+            .host_functions
+            .push(Some(Box::new(callback)));
+        let id = super::HostFunctionId::new(index);
+
+        let prototype = self.runtime.realm_function_prototype(self.realm)?;
+        let name_key = self
+            .runtime
+            .predefined_property_key(PredefinedAtom::Name);
+        let length_key = self
+            .runtime
+            .predefined_property_key(PredefinedAtom::Length);
+        let function_name = JsString::from_utf8(name).map_err(crate::ExecutionError::from)?;
+        let mut record = ObjectRecord::empty(Some(HeapReference::Function(prototype)));
+        record
+            .try_reserve_data(2)
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::ObjectProperties,
+                additional: 2,
+            })?;
+        record
+            .append_data(
+                length_key,
+                PropertyLayout::data(false, false, true),
+                StoredValue::Number(JsNumber::from_i32(0)),
+            )
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::ObjectProperties,
+                additional: 1,
+            })?;
+        record
+            .append_data(
+                name_key,
+                PropertyLayout::data(false, false, true),
+                StoredValue::String(function_name),
+            )
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::ObjectProperties,
+                additional: 1,
+            })?;
+
+        super::check_execution_limit(
+            RuntimeResource::HeapFunctions,
+            self.runtime.limits.max_heap_functions,
+            usize_to_u64(self.runtime.functions.len()).saturating_add(1),
+        )?;
+        self.runtime
+            .functions
+            .try_reserve(1)
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::HeapFunctions,
+                additional: 1,
+            })?;
+        let function = self
+            .runtime
+            .insert_heap_function(HeapFunction {
+                implementation: FunctionImplementation::Native(super::NativeFunction {
+                    realm: self.realm,
+                    kind: super::NativeFunctionKind::Host(id),
+                }),
+                object: record,
+                public_roots: 0,
+            })
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::HeapFunctions,
+                additional: 1,
+            })?;
+        self.runtime.collection_pending = true;
+        let value = self
+            .runtime
+            .public_value(StoredValue::Function(function))?;
+        Ok(Function::from_root(value))
+    }
+
     /// Registers a module record in this context's realm.
     pub fn register_module(
         &mut self,
@@ -1275,5 +1418,35 @@ impl Context<'_> {
         compiler: Option<&Arc<dyn OrdinaryDynamicFunctionCompiler>>,
     ) -> Result<(), crate::ExecutionError> {
         crate::vm::drain_host_jobs_with_limits(self.runtime, compiler, limits)
+    }
+}
+
+/// Converts a function-call failure into a [`crate::CallError`], re-rooting a
+/// thrown JavaScript exception (or materializing an engine-generated error
+/// object) so the caller can observe it.
+fn call_error_from_execution(
+    runtime: &mut Runtime,
+    realm: super::RealmId,
+    error: crate::ExecutionError,
+) -> crate::CallError {
+    match error {
+        crate::ExecutionError::Exception(exception) => {
+            if let Some(value) = exception.thrown_value() {
+                return crate::CallError::Thrown(value.clone());
+            }
+            if let (Some(kind), Some(message)) = (exception.kind(), exception.message()) {
+                match runtime.materialize_error_object(realm, kind, message.clone(), None) {
+                    Ok(object) => {
+                        return match runtime.public_value(StoredValue::Object(object)) {
+                            Ok(value) => crate::CallError::Thrown(value),
+                            Err(error) => crate::CallError::Execution(error),
+                        };
+                    }
+                    Err(error) => return crate::CallError::Execution(error),
+                }
+            }
+            crate::CallError::Execution(crate::ExecutionError::Exception(exception))
+        }
+        other => crate::CallError::Execution(other),
     }
 }

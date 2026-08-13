@@ -600,3 +600,58 @@ impl Object {
         Ok(self.id()? == other.id()?)
     }
 }
+
+/// The receiver, arguments, and `new.target` exposed to a host-installed
+/// callback ([`crate::Context::create_host_function`]).
+///
+/// Argument and receiver handles are public roots owned by this record; they
+/// stay rooted until the callback returns.
+#[derive(Debug)]
+pub struct HostCall {
+    this: JsValue,
+    arguments: Vec<JsValue>,
+    new_target: Option<Function>,
+}
+
+impl HostCall {
+    pub(crate) fn new(this: JsValue, arguments: Vec<JsValue>, new_target: Option<Function>) -> Self {
+        Self {
+            this,
+            arguments,
+            new_target,
+        }
+    }
+
+    /// The `this` value the function was called with.
+    #[must_use]
+    pub fn this(&self) -> JsValue {
+        self.this.clone()
+    }
+
+    /// The argument list, in source order.
+    #[must_use]
+    pub fn arguments(&self) -> &[JsValue] {
+        &self.arguments
+    }
+
+    /// The `new.target` value for a construct call, or `None` for a plain call.
+    #[must_use]
+    pub fn new_target(&self) -> Option<Function> {
+        self.new_target.clone()
+    }
+}
+
+/// A Rust closure backing a host-installed JavaScript function.
+///
+/// Implemented for every closure of the shape
+/// `Fn(&mut Context, HostCall) -> Result<JsValue, JsValue>`: return `Ok` with
+/// the result value, or `Err` with the value to throw.
+pub trait HostCallback:
+    for<'r> Fn(&mut crate::Context<'r>, HostCall) -> Result<JsValue, JsValue>
+{
+}
+
+impl<T> HostCallback for T where
+    T: for<'r> Fn(&mut crate::Context<'r>, HostCall) -> Result<JsValue, JsValue>
+{
+}

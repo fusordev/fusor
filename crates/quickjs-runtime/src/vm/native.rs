@@ -2533,6 +2533,65 @@ fn legacy_restricted_function_getter_returns_undefined(
     Ok(!header.mode().is_strict() && header.flags().has_prototype())
 }
 
+/// Invokes a host-installed callback (ECMA-262 host function): roots the
+/// receiver, arguments, and `new.target` as public handles, calls the stored
+/// Rust closure with a [`crate::Context`], and re-materializes the result as
+/// an immediate value or a thrown exception.
+fn dispatch_host_function(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    id: crate::HostFunctionId,
+    inputs: CallInputs,
+    origin: JsStackFrame,
+) -> Result<NativeDispatch, NativeFailure> {
+    let this = runtime.public_value(inputs.receiver.duplicate())?;
+    let stored_arguments = inputs.arguments.into_remaining_values();
+    let mut arguments = Vec::with_capacity(stored_arguments.len());
+    for value in stored_arguments {
+        arguments.push(runtime.public_value(value)?);
+    }
+    let new_target = match inputs.new_target {
+        Some(function) => Some(Function::from_root(
+            runtime.public_value(StoredValue::Function(function))?,
+        )),
+        None => None,
+    };
+
+    // Take the closure out of the registry so the `&mut Runtime` can be handed
+    // to the callback as a `Context`; restore it afterwards so repeated calls
+    // (and cycles) reuse the same slot.
+    let callback = runtime
+        .host_functions
+        .get_mut(id.index())
+        .and_then(Option::take)
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "host function callback slot is empty",
+        })?;
+
+    let mut context = crate::Context { runtime, realm };
+    let result = callback(&mut context, crate::HostCall::new(this, arguments, new_target));
+    context.runtime.host_functions[id.index()] = Some(callback);
+
+    match result {
+        Ok(value) => {
+            let stored = value
+                .stored()
+                .map_err(|error| NativeFailure::Execution(error.into()))?;
+            Ok(NativeDispatch::Immediate(stored.duplicate()))
+        }
+        Err(thrown) => {
+            let stored = thrown
+                .stored()
+                .map_err(|error| NativeFailure::Execution(error.into()))?;
+            Err(NativeFailure::Abrupt(PendingException {
+                realm,
+                payload: PendingExceptionPayload::ThrownValue(stored.duplicate()),
+                origin,
+            }))
+        }
+    }
+}
+
 #[allow(
     clippy::too_many_arguments,
     clippy::too_many_lines,
@@ -3174,6 +3233,13 @@ pub(super) fn dispatch_native_call_with_frames(
             native.realm,
             &inputs.receiver,
             inputs.arguments.take_first_or_undefined(),
+            origin.unwrap_or_else(native_function_host_origin),
+        ),
+        NativeFunctionKind::Host(id) => dispatch_host_function(
+            runtime,
+            native.realm,
+            id,
+            inputs,
             origin.unwrap_or_else(native_function_host_origin),
         ),
         NativeFunctionKind::Reflect(method) => begin_reflect_method(
