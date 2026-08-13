@@ -47,7 +47,7 @@ sha1 = "=0.10.6"
 serde_yaml_ng = "=0.10.0"
 sourcemap = { version = "=9.3.2", default-features = false }
 temporal_rs = "=0.2.5"
-tokio = { version = "=1.53.1", default-features = false, features = ["rt", "sync", "time", "net", "io-util"] }
+tokio = { version = "=1.53.1", default-features = false, features = ["rt", "rt-multi-thread", "sync", "time", "net", "io-util"] }
 writeable = "=0.6.3"
 
 [workspace.lints.rust]

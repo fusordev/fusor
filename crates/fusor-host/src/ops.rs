@@ -1,8 +1,10 @@
 //! Op binding layer (§5): declarations, the op error contract, and the
 //! assembly registry.
 
+mod op_runtime;
 mod serde;
 
+pub use op_runtime::{OpRuntime, OpRuntimeError, install_op_runtime, poll_op_completions, spawn_op};
 pub use serde::{DeserializationError, JsValueDeserializer, JsValueSerializer, SerializationError};
 
 use fusor_runtime::{Context, JsValue};

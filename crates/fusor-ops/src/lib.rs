@@ -105,7 +105,81 @@ pub fn op(attribute: TokenStream, item: TokenStream) -> TokenStream {
     // invokes the op function, and serializes the result back; `OpError`s
     // become thrown JavaScript errors of their class (§5.3).
     let glue = if options.is_async {
-        quote! {}
+        quote! {
+            #[doc(hidden)]
+            #[allow(non_snake_case)]
+            #visibility fn #call_name(
+                ctx: &mut ::fusor_runtime::Context<'_>,
+                call: ::fusor_runtime::HostCall,
+            ) -> ::std::result::Result<::fusor_runtime::JsValue, ::fusor_runtime::JsValue> {
+                let mut arguments = call.arguments().iter();
+                let mut argument_index: usize = 0;
+                #(
+                    let #parameter_names: #parameter_declarations = {
+                        let index = argument_index;
+                        argument_index = argument_index.saturating_add(1);
+                        match arguments.next() {
+                            ::std::option::Option::Some(value) => {
+                                match ::serde::Deserialize::deserialize(
+                                    ::fusor_host::ops::JsValueDeserializer::new(ctx, value, index),
+                                ) {
+                                    ::std::result::Result::Ok(value) => value,
+                                    ::std::result::Result::Err(error) => {
+                                        return ::std::result::Result::Err(
+                                            ::fusor_host::ops::op_error_value(
+                                                ctx,
+                                                ::fusor_host::ops::OpError::type_error(
+                                                    error.parameter,
+                                                    error.message,
+                                                ),
+                                            ),
+                                        );
+                                    }
+                                }
+                            }
+                            ::std::option::Option::None => {
+                                return ::std::result::Result::Err(
+                                    ::fusor_host::ops::op_error_value(
+                                        ctx,
+                                        ::fusor_host::ops::OpError::type_error(
+                                            index,
+                                            "missing argument",
+                                        ),
+                                    ),
+                                );
+                            }
+                        }
+                    };
+                )*
+                // ECMA-262 host Promise: settle it when the spawned future
+                // completes and the owner task polls the completion channel.
+                let (promise, resolver) = match ctx.new_promise() {
+                    ::std::result::Result::Ok(pair) => pair,
+                    ::std::result::Result::Err(error) => {
+                        return ::std::result::Result::Err(
+                            ::fusor_host::ops::op_error_value(
+                                ctx,
+                                ::fusor_host::ops::OpError::new(error.to_string()),
+                            ),
+                        );
+                    }
+                };
+                let future = async move { #function_name(#(#parameter_names),*).await };
+                match ::fusor_host::ops::spawn_op(resolver, future) {
+                    ::std::result::Result::Ok(()) => {
+                        ::std::result::Result::Ok(promise.as_value())
+                    }
+                    ::std::result::Result::Err(error) => {
+                        ::std::result::Result::Err(
+                            ::fusor_host::ops::op_error_value(
+                                ctx,
+                                ::fusor_host::ops::OpError::new(error.to_string()),
+                            ),
+                        )
+                    }
+                }
+            }
+        }
     } else {
         quote! {
             #[doc(hidden)]
