@@ -1,8 +1,7 @@
 use crate::storage::{BindingId, ExecutableId, StoragePlacement, StoragePlan};
 
 use super::super::{
-    LeafCompilationError, LocalSlot, UnsupportedLeafFeature, checked_function_entry_count,
-    checked_function_index, unsupported,
+    LeafCompilationError, LocalSlot, checked_function_entry_count, checked_function_index,
 };
 
 #[derive(Clone, Copy)]
@@ -106,15 +105,10 @@ impl FrameLayout {
                     });
                     Some(FrameSlot::Local(slot))
                 }
-                StoragePlacement::GlobalObject | StoragePlacement::GlobalLexical => None,
-                StoragePlacement::ModuleLocal | StoragePlacement::ModuleImport => {
-                    let span = binding
-                        .declaration_spans()
-                        .first()
-                        .copied()
-                        .unwrap_or_default();
-                    return unsupported(UnsupportedLeafFeature::UnsupportedBinding, span);
-                }
+                StoragePlacement::GlobalObject
+                | StoragePlacement::GlobalLexical
+                | StoragePlacement::ModuleLocal
+                | StoragePlacement::ModuleImport => None,
             };
             let Some(slot) = slot else {
                 continue;

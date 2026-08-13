@@ -112,7 +112,8 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 });
             }
             if executable.id().index() == 0
-                && crate::is_supported_script_compilation_goal(self.unit.goal())
+                && (crate::is_supported_script_compilation_goal(self.unit.goal())
+                    || crate::is_supported_module_goal(self.unit.goal()))
             {
                 owner.push(CompiledMetadataAtomCandidate {
                     key: CompiledMetadataAtomKey::ScriptCompletion,
@@ -136,12 +137,17 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                     executable: executable.id(),
                 },
             )? {
+                // Module-owned declaration cells are frame bindings inside the
+                // module root, so root-frame references to them (for example
+                // the SetName atom of an inferred arrow/class name) resolve
+                // against the same function-local atom table.
                 if !matches!(
                     binding.placement(),
                     StoragePlacement::Argument { .. }
                         | StoragePlacement::Local
                         | StoragePlacement::GlobalObject
                         | StoragePlacement::GlobalLexical
+                        | StoragePlacement::ModuleLocal
                 ) {
                     continue;
                 }
@@ -195,6 +201,43 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                     value: compiler_identifier_string(&binding.name, binding.first_span)?,
                     span: binding.first_span,
                 });
+            }
+            for &module_id in tree_layout.module_bindings.imports_for(executable.id())? {
+                let descriptor = tree_layout.module_bindings.binding(module_id).ok_or(
+                    LeafCompilationError::SemanticInvariant {
+                        invariant: "module binding import has a descriptor",
+                        span: Some(executable.span()),
+                    },
+                )?;
+                owner.push(CompiledMetadataAtomCandidate {
+                    key: CompiledMetadataAtomKey::ModuleBinding(module_id),
+                    value: compiler_identifier_string(&descriptor.name, descriptor.first_span)?,
+                    span: descriptor.first_span,
+                });
+            }
+            if executable.id().index() == 0 && crate::is_supported_module_goal(self.unit.goal()) {
+                for (request_index, request) in
+                    self.unit.module_syntax().requests().iter().enumerate()
+                {
+                    let specifier =
+                        String::from_utf16(request.specifier().code_units()).map_err(|_| {
+                            LeafCompilationError::SemanticInvariant {
+                                invariant: "module specifier is valid UTF-16",
+                                span: Some(request.statement_span()),
+                            }
+                        })?;
+                    owner.push(CompiledMetadataAtomCandidate {
+                        key: CompiledMetadataAtomKey::ModuleRequest(
+                            u32::try_from(request_index).map_err(|_| {
+                                LeafCompilationError::CapacityExceeded {
+                                    domain: "module request index",
+                                }
+                            })?,
+                        ),
+                        value: compiler_identifier_string(&specifier, request.statement_span())?,
+                        span: request.statement_span(),
+                    });
+                }
             }
         }
         Ok(())
@@ -411,7 +454,8 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 if (!matches!(nodes.parent_kind(node_id), AstKind::Directive(_))
                     || (owner.index() == 0
                         && crate::is_supported_script_compilation_goal(self.unit.goal())))
-                    && !is_noncomputed_static_property_key_node(self.unit, node_id) =>
+                    && !is_noncomputed_static_property_key_node(self.unit, node_id)
+                    && !is_module_static_string_node(self.unit, node_id) =>
             {
                 let value = decode_compiler_string(
                     literal.value.as_str(),
@@ -837,6 +881,16 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         let declarator = loop {
             match nodes.kind(parent) {
                 AstKind::ParenthesizedExpression(_) => parent = nodes.parent_id(parent),
+                AstKind::ExportDefaultDeclaration(_) => {
+                    // `export default class ...` evaluates with className
+                    // "default"; an anonymous class expression as the
+                    // default-export AssignmentExpression receives the same
+                    // inferred name through SetFunctionName.
+                    return Ok((
+                        compiler_identifier_string("default", class.span)?,
+                        class.span,
+                    ));
+                }
                 AstKind::VariableDeclarator(declarator) => break declarator,
                 AstKind::PropertyDefinition(field) => {
                     return Self::class_property_definition_name(class, field);
@@ -1354,6 +1408,22 @@ fn is_noncomputed_static_property_key_node(unit: &ParsedUnit<'_, '_>, node_id: N
         OxcPropertyKey::BigIntLiteral(literal) => literal.node_id.get() == node_id,
         _ => false,
     }
+}
+
+/// Returns whether `node_id` (a string literal) is a static module name or
+/// specifier — an import/export name or a module request — which must not be
+/// lowered to a runtime string. These strings live in the module declaration
+/// record and its metadata atoms, so recording them as runtime strings would
+/// duplicate their span.
+fn is_module_static_string_node(unit: &ParsedUnit<'_, '_>, node_id: NodeId) -> bool {
+    matches!(
+        unit.semantic().nodes().parent_kind(node_id),
+        AstKind::ImportDeclaration(_)
+            | AstKind::ImportSpecifier(_)
+            | AstKind::ExportNamedDeclaration(_)
+            | AstKind::ExportAllDeclaration(_)
+            | AstKind::ExportSpecifier(_)
+    )
 }
 
 pub(in crate::lowering) struct CompiledConstantPool {

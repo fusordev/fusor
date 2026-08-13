@@ -12,7 +12,8 @@ use super::super::{
 };
 
 use oxc_ast::ast::{
-    BlockStatement, Directive, Expression, ForStatementLeft, Statement, SwitchStatement,
+    BlockStatement, Declaration, Directive, ExportDefaultDeclaration, ExportDefaultDeclarationKind,
+    ExportNamedDeclaration, Expression, ForStatementLeft, Statement, SwitchStatement,
     VariableDeclaration,
 };
 use oxc_semantic::{NodeId, ScopeId};
@@ -545,7 +546,9 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                     statement.span,
                 ))?;
             }
-            Statement::EmptyStatement(_) => {}
+            Statement::EmptyStatement(_)
+            | Statement::ImportDeclaration(_)
+            | Statement::ExportAllDeclaration(_) => {}
             Statement::ReturnStatement(statement) => {
                 let executable = self.planned.plan.executable(layout.executable).ok_or(
                     LeafCompilationError::InvalidExecutable {
@@ -724,11 +727,189 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                     .work
                     .push(StatementWork::Expression(&statement.object));
             }
+            Statement::ExportNamedDeclaration(export) => {
+                self.plan_module_export_named(export, layout, tree_layout, constants, flow, state)?;
+            }
+            Statement::ExportDefaultDeclaration(export) => {
+                self.plan_module_export_default(
+                    export,
+                    layout,
+                    tree_layout,
+                    constants,
+                    flow,
+                    state,
+                )?;
+            }
             _ => {
                 return unsupported(UnsupportedLeafFeature::UnsupportedBody, statement.span());
             }
         }
         Ok(())
+    }
+
+    fn plan_module_export_named(
+        &self,
+        export: &ExportNamedDeclaration<'arena>,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
+        constants: &CompiledConstantPool,
+        flow: &mut PlannedControlFlow,
+        state: &mut StatementPlanningState<'_, 'arena>,
+    ) -> Result<(), LeafCompilationError> {
+        let Some(declaration) = &export.declaration else {
+            // `export { a, b as c }` and `export ... from '...'` emit no code.
+            return Ok(());
+        };
+        match declaration {
+            Declaration::VariableDeclaration(declaration) => {
+                let floor = state.executable_abrupt_marker_floor(declaration.span)?;
+                self.validate_declaration(
+                    declaration,
+                    layout,
+                    tree_layout,
+                    constants,
+                    &state.abrupt_markers[floor..],
+                    flow,
+                )
+            }
+            Declaration::FunctionDeclaration(function) => self.plan_function_declaration(
+                function,
+                layout,
+                tree_layout,
+                constants,
+                state.active_scopes.last().copied(),
+                flow,
+            ),
+            Declaration::ClassDeclaration(class) => ExpressionPlanner::new(self)
+                .plan_base_class_declaration(class, layout, tree_layout, constants, flow),
+            _ => unsupported(UnsupportedLeafFeature::UnsupportedBody, export.span),
+        }
+    }
+
+    fn plan_module_export_default(
+        &self,
+        export: &ExportDefaultDeclaration<'arena>,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
+        constants: &CompiledConstantPool,
+        flow: &mut PlannedControlFlow,
+        state: &mut StatementPlanningState<'_, 'arena>,
+    ) -> Result<(), LeafCompilationError> {
+        let span = export.span;
+        match &export.declaration {
+            ExportDefaultDeclarationKind::FunctionDeclaration(function) => {
+                if function.id.is_some() {
+                    // Named default exports a local declaration; the export
+                    // entry's local name is the binding, not the synthetic cell.
+                    return self.plan_function_declaration(
+                        function,
+                        layout,
+                        tree_layout,
+                        constants,
+                        state.active_scopes.last().copied(),
+                        flow,
+                    );
+                }
+                // Anonymous default function: hoisted through the synthetic
+                // `*default*` cell's function-initializer prefix.
+                return Ok(());
+            }
+            ExportDefaultDeclarationKind::ClassDeclaration(class) => {
+                if class.id.is_some() {
+                    ExpressionPlanner::new(self).plan_base_class_declaration(
+                        class,
+                        layout,
+                        tree_layout,
+                        constants,
+                        flow,
+                    )
+                } else {
+                    // Anonymous default class: evaluate the definition (with
+                    // the inferred "default" name) and store the class value
+                    // into the synthetic `*default*` cell at statement
+                    // position, like an anonymous default function.
+                    let slot = self.module_synthetic_default_slot(layout, tree_layout)?;
+                    ExpressionPlanner::new(self).plan_base_class_expression(
+                        class,
+                        layout,
+                        tree_layout,
+                        constants,
+                        flow,
+                    )?;
+                    flow.emit(PlannedInstruction::new(
+                        FinalOpcode::PutVarRefCheckInit,
+                        Operands::VarRef(slot),
+                        span,
+                    ))
+                }
+            }
+            ExportDefaultDeclarationKind::TSInterfaceDeclaration(_) => {
+                unsupported(UnsupportedLeafFeature::UnsupportedBody, span)
+            }
+            kind => {
+                let slot = self.module_synthetic_default_slot(layout, tree_layout)?;
+                let expression =
+                    kind.as_expression()
+                        .ok_or(LeafCompilationError::SemanticInvariant {
+                            invariant: "export default kind is an expression",
+                            span: Some(span),
+                        })?;
+                ExpressionPlanner::new(self).plan_expression(
+                    expression,
+                    layout,
+                    tree_layout,
+                    constants,
+                    &[],
+                    flow,
+                )?;
+                flow.emit(PlannedInstruction::new(
+                    FinalOpcode::PutVarRefCheckInit,
+                    Operands::VarRef(slot),
+                    span,
+                ))
+            }
+        }
+    }
+
+    fn module_synthetic_default_slot(
+        &self,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
+    ) -> Result<u16, LeafCompilationError> {
+        let synthetic = self
+            .planned
+            .plan
+            .bindings_for(layout.executable)
+            .ok_or(LeafCompilationError::InvalidExecutable {
+                executable: layout.executable,
+            })?
+            .iter()
+            .find(|binding| {
+                binding.name() == "*default*"
+                    && binding.placement() == StoragePlacement::ModuleLocal
+                    && binding.policy().kind() == DeclarationKind::SyntheticDefault
+            })
+            .ok_or(LeafCompilationError::SemanticInvariant {
+                invariant: "export default expression retains a synthetic *default* cell",
+                span: None,
+            })?;
+        let module_id = tree_layout
+            .module_bindings
+            .for_binding(synthetic.id())
+            .ok_or(LeafCompilationError::SemanticInvariant {
+                invariant: "synthetic *default* cell has a module binding descriptor",
+                span: None,
+            })?;
+        let realm_global_count = tree_layout
+            .realm_globals
+            .imports_for(layout.executable)?
+            .len();
+        tree_layout.module_bindings.closure_slot(
+            &self.planned.plan,
+            layout.executable,
+            module_id,
+            realm_global_count,
+        )
     }
 
     fn schedule_block_statement<'statement>(

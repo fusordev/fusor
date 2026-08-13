@@ -3176,6 +3176,8 @@ pub(crate) enum HeapObjectKind {
     WeakRef(WeakRefState),
     /// An ECMAScript `FinalizationRegistry` with strongly held cleanup state.
     FinalizationRegistry(FinalizationRegistryState),
+    /// A module namespace exotic object.
+    ModuleNamespace(crate::runtime::modules::ModuleNamespaceState),
 }
 
 pub(crate) struct ErrorState {
@@ -3300,6 +3302,19 @@ pub(crate) enum PromiseReactionTarget {
     ArrayFromAsync {
         operation: ObjectId,
     },
+    AsyncModule {
+        module: crate::ids::ModuleRecordId,
+    },
+    FinishDynamicImport {
+        promise: ObjectId,
+        module: crate::ids::ModuleRecordId,
+    },
+    /// One of the async-dependency capability promises of an `import.defer()`
+    /// (SafePerformPromiseAll element reaction).
+    ImportDeferDeps {
+        promise: ObjectId,
+        module: crate::ids::ModuleRecordId,
+    },
 }
 
 pub(crate) enum PromiseState {
@@ -3374,7 +3389,8 @@ impl HeapObjectKind {
             | Self::WeakMap(_)
             | Self::WeakSet(_)
             | Self::WeakRef(_)
-            | Self::FinalizationRegistry(_) => None,
+            | Self::FinalizationRegistry(_)
+            | Self::ModuleNamespace(_) => None,
             Self::BoxedPrimitive(value) => Some(value),
         }
     }
@@ -3426,7 +3442,8 @@ impl HeapObjectKind {
             | Self::WeakMap(_)
             | Self::WeakSet(_)
             | Self::WeakRef(_)
-            | Self::FinalizationRegistry(_) => None,
+            | Self::FinalizationRegistry(_)
+            | Self::ModuleNamespace(_) => None,
         }
     }
 
@@ -3477,7 +3494,8 @@ impl HeapObjectKind {
             | Self::WeakMap(_)
             | Self::WeakSet(_)
             | Self::WeakRef(_)
-            | Self::FinalizationRegistry(_) => None,
+            | Self::FinalizationRegistry(_)
+            | Self::ModuleNamespace(_) => None,
         }
     }
 
@@ -3528,7 +3546,8 @@ impl HeapObjectKind {
             | Self::WeakMap(_)
             | Self::WeakSet(_)
             | Self::WeakRef(_)
-            | Self::FinalizationRegistry(_) => None,
+            | Self::FinalizationRegistry(_)
+            | Self::ModuleNamespace(_) => None,
         }
     }
 
@@ -3579,7 +3598,8 @@ impl HeapObjectKind {
             | Self::WeakMap(_)
             | Self::WeakSet(_)
             | Self::WeakRef(_)
-            | Self::FinalizationRegistry(_) => None,
+            | Self::FinalizationRegistry(_)
+            | Self::ModuleNamespace(_) => None,
         }
     }
 
@@ -3630,7 +3650,8 @@ impl HeapObjectKind {
             | Self::WeakMap(_)
             | Self::WeakSet(_)
             | Self::WeakRef(_)
-            | Self::FinalizationRegistry(_) => None,
+            | Self::FinalizationRegistry(_)
+            | Self::ModuleNamespace(_) => None,
         }
     }
 
@@ -3681,7 +3702,8 @@ impl HeapObjectKind {
             | Self::WeakMap(_)
             | Self::WeakSet(_)
             | Self::WeakRef(_)
-            | Self::FinalizationRegistry(_) => None,
+            | Self::FinalizationRegistry(_)
+            | Self::ModuleNamespace(_) => None,
         }
     }
 
@@ -3746,7 +3768,8 @@ impl HeapObjectKind {
             | Self::WeakMap(_)
             | Self::WeakSet(_)
             | Self::WeakRef(_)
-            | Self::FinalizationRegistry(_) => None,
+            | Self::FinalizationRegistry(_)
+            | Self::ModuleNamespace(_) => None,
         }
     }
 
@@ -3797,7 +3820,8 @@ impl HeapObjectKind {
             | Self::WeakMap(_)
             | Self::WeakSet(_)
             | Self::WeakRef(_)
-            | Self::FinalizationRegistry(_) => None,
+            | Self::FinalizationRegistry(_)
+            | Self::ModuleNamespace(_) => None,
         }
     }
 
@@ -4003,6 +4027,18 @@ impl HeapObject {
     pub(crate) const fn array(record: ObjectRecord, state: ArrayState) -> Self {
         Self {
             kind: HeapObjectKind::Array(state),
+            record,
+            public_roots: 0,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn module_namespace(
+        record: ObjectRecord,
+        state: crate::runtime::modules::ModuleNamespaceState,
+    ) -> Self {
+        Self {
+            kind: HeapObjectKind::ModuleNamespace(state),
             record,
             public_roots: 0,
         }
@@ -4437,11 +4473,27 @@ impl HeapObject {
             HeapObjectKind::Proxy(state) => Some(state),
             _ => None,
         }
-    }
-
-    pub(crate) const fn proxy_state_mut(&mut self) -> Option<&mut ProxyState> {
+    }    pub(crate) const fn proxy_state_mut(&mut self) -> Option<&mut ProxyState> {
         match &mut self.kind {
             HeapObjectKind::Proxy(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn module_namespace_state(
+        &self,
+    ) -> Option<&crate::runtime::modules::ModuleNamespaceState> {
+        match &self.kind {
+            HeapObjectKind::ModuleNamespace(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn module_namespace_state_mut(
+        &mut self,
+    ) -> Option<&mut crate::runtime::modules::ModuleNamespaceState> {
+        match &mut self.kind {
+            HeapObjectKind::ModuleNamespace(state) => Some(state),
             _ => None,
         }
     }
@@ -4768,7 +4820,8 @@ impl HeapObject {
             | HeapObjectKind::WeakMap(_)
             | HeapObjectKind::WeakSet(_)
             | HeapObjectKind::WeakRef(_)
-            | HeapObjectKind::FinalizationRegistry(_) => None,
+            | HeapObjectKind::FinalizationRegistry(_)
+            | HeapObjectKind::ModuleNamespace(_) => None,
         }
     }
 
@@ -4819,7 +4872,8 @@ impl HeapObject {
             | HeapObjectKind::WeakMap(_)
             | HeapObjectKind::WeakSet(_)
             | HeapObjectKind::WeakRef(_)
-            | HeapObjectKind::FinalizationRegistry(_) => None,
+            | HeapObjectKind::FinalizationRegistry(_)
+            | HeapObjectKind::ModuleNamespace(_) => None,
         }
         .into_iter()
         .flatten()
@@ -4872,7 +4926,8 @@ impl HeapObject {
             | HeapObjectKind::WeakMap(_)
             | HeapObjectKind::WeakSet(_)
             | HeapObjectKind::WeakRef(_)
-            | HeapObjectKind::FinalizationRegistry(_) => None,
+            | HeapObjectKind::FinalizationRegistry(_)
+            | HeapObjectKind::ModuleNamespace(_) => None,
         }
     }
 

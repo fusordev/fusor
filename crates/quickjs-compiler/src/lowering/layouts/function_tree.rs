@@ -9,7 +9,9 @@ use super::super::{
     CompiledConstantPool, LeafCompilationError, checked_function_entry_count,
     checked_function_index,
 };
-use super::{RealmGlobalLayout, RealmGlobalLayoutInput};
+use super::{
+    ModuleBindingLayout, ModuleBindingLayoutInput, RealmGlobalLayout, RealmGlobalLayoutInput,
+};
 
 #[derive(Clone, Copy)]
 pub(in crate::lowering) struct FunctionTreeLayoutSeedInput<'plan, 'scope> {
@@ -29,6 +31,7 @@ pub(in crate::lowering) struct FunctionTreeLayoutSeed {
     children: Box<[ExecutableId]>,
     variable_references: Box<[Option<u16>]>,
     pub(in crate::lowering) realm_globals: RealmGlobalLayout,
+    pub(in crate::lowering) module_bindings: ModuleBindingLayout,
 }
 
 pub(in crate::lowering) struct FunctionTreeLayout {
@@ -38,6 +41,7 @@ pub(in crate::lowering) struct FunctionTreeLayout {
     variable_references: Box<[Option<u16>]>,
     function_declarations: Box<[Option<ExecutableId>]>,
     pub(in crate::lowering) realm_globals: RealmGlobalLayout,
+    pub(in crate::lowering) module_bindings: ModuleBindingLayout,
 }
 
 struct FunctionChildLayout {
@@ -68,6 +72,10 @@ impl FunctionTreeLayoutSeed {
                 plan,
                 enabled: allow_realm_globals,
                 direct_eval,
+            })?,
+            module_bindings: ModuleBindingLayout::new(ModuleBindingLayoutInput {
+                plan,
+                enabled: matches!(plan.kind(), crate::storage::CompilationUnitKind::Module),
             })?,
         })
     }
@@ -295,6 +303,7 @@ impl FunctionTreeLayout {
             variable_references: seed.variable_references,
             function_declarations,
             realm_globals: seed.realm_globals,
+            module_bindings: seed.module_bindings,
         })
     }
 

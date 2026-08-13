@@ -7,7 +7,7 @@ use quickjs_frontend::{Span, decode_oxc_cooked_string};
 use crate::storage::{BindingId, ExecutableId};
 
 use super::constants::{CompiledConstantCandidate, CompiledStringLocation};
-use super::{LeafCompilationError, RealmGlobalId, checked_function_entry_count};
+use super::{LeafCompilationError, ModuleBindingId, RealmGlobalId, checked_function_entry_count};
 
 pub(in crate::lowering) struct CompiledAtomCandidate {
     pub(in crate::lowering) value: CompilerString,
@@ -141,6 +141,8 @@ pub(in crate::lowering) enum CompiledMetadataAtomKey {
     RawParameter(u32),
     Binding(BindingId),
     RealmGlobal(RealmGlobalId),
+    ModuleBinding(ModuleBindingId),
+    ModuleRequest(u32),
 }
 
 pub(in crate::lowering) struct CompiledMetadataAtomCandidate {

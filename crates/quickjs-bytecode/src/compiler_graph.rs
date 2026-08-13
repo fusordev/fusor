@@ -474,6 +474,16 @@ pub enum CompilerClosureSource {
         /// Exact number of caller and newly-created entries required.
         environment_size: u32,
     },
+    /// A module-environment cell owned by the Module root.
+    ///
+    /// The runtime linker materializes one module environment of cells in
+    /// source-declaration order; imported bindings alias exporter cells and
+    /// the remaining cells back module-local declarations. The `index`
+    /// addresses the cell within that environment.
+    Module {
+        /// Zero-based cell index in the module environment.
+        index: u32,
+    },
 }
 
 impl fmt::Display for CompilerClosureSource {
@@ -500,6 +510,9 @@ impl fmt::Display for CompilerClosureSource {
                 formatter,
                 "direct-eval variable {index} in environment of size {environment_size}"
             ),
+            Self::Module { index } => {
+                write!(formatter, "module cell {index}")
+            }
         }
     }
 }
@@ -1351,6 +1364,12 @@ pub enum FunctionGraphVerificationErrorKind {
         /// Closure-domain slot containing the source.
         closure: u32,
     },
+    /// A non-root function tries to originate a module-environment cell
+    /// instead of forwarding the root-owned module slot.
+    ModuleSourceNotRoot {
+        /// Closure-domain slot containing the source.
+        closure: u32,
+    },
     /// A direct-eval caller-binding source addresses outside its declared
     /// external environment.
     DirectEvalBindingOutOfBounds {
@@ -1575,6 +1594,10 @@ impl fmt::Display for FunctionGraphVerificationErrorKind {
             Self::DirectEvalBindingSourceNotRoot { closure } => write!(
                 formatter,
                 "non-root closure slot {closure} originates a direct-eval caller binding"
+            ),
+            Self::ModuleSourceNotRoot { closure } => write!(
+                formatter,
+                "non-root closure slot {closure} originates a module-environment cell"
             ),
             Self::DirectEvalBindingOutOfBounds {
                 closure,
@@ -2003,6 +2026,11 @@ fn validate_root_closure_sources(
                         closure: usize_to_u32(closure),
                     },
                 ),
+                CompilerClosureSource::Module { .. } => {
+                    Some(FunctionGraphVerificationErrorKind::ModuleSourceNotRoot {
+                        closure: usize_to_u32(closure),
+                    })
+                }
                 CompilerClosureSource::ParentVariableReference(_)
                 | CompilerClosureSource::ParentClosure(_) => None,
             };
@@ -2019,7 +2047,8 @@ fn validate_root_closure_sources(
     let mut direct_environment_size = None;
     for (closure, source) in root_function.closure_sources.iter().enumerate() {
         match *source {
-            CompilerClosureSource::ConstructorRealmGlobal(_) => {}
+            CompilerClosureSource::ConstructorRealmGlobal(_)
+            | CompilerClosureSource::Module { .. } => {}
             CompilerClosureSource::DirectEvalBinding {
                 index,
                 environment_size,
@@ -2359,7 +2388,8 @@ fn validate_closure_edges(
                         continue;
                     }
                     CompilerClosureSource::DirectEvalBinding { .. }
-                    | CompilerClosureSource::DirectEvalVariable { .. } => continue,
+                    | CompilerClosureSource::DirectEvalVariable { .. }
+                    | CompilerClosureSource::Module { .. } => continue,
                 };
                 if source_index >= len {
                     return Err(FunctionGraphVerificationError::at_function(

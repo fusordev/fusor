@@ -32,8 +32,9 @@ use std::{
 
 use quickjs_bytecode::{
     CompilerBindingKind, CompilerBindingPolicy, CompilerCaptureLayout, CompilerCapturedBinding,
-    CompilerClosureBinding, CompilerConstant, CompilerConstantValue, CompilerExecutableKind,
-    FinalOpcode, FunctionTemplateId, Instruction, Operands, VerifiedBytecode,
+    CompilerClosureBinding, CompilerClosureSource, CompilerConstant, CompilerConstantValue,
+    CompilerExecutableKind, FinalOpcode, FunctionTemplateId, Instruction, Operands,
+    VerifiedBytecode,
 };
 
 use crate::promise_rejection::PromiseRejectionState;
@@ -44,7 +45,10 @@ use crate::{
     JsValue, OrdinaryDynamicFunctionCompiler, PredefinedAtom, PropertyKey, PropertyLayout,
     PropertyLayoutKind, RuntimeError, RuntimeResource,
     arena::{Arena, RuntimeIdentity},
-    ids::{BindingCellId, FunctionId, InstalledCodeId, ObjectId, RealmGlobalBindingId, RealmId},
+    ids::{
+        BindingCellId, FunctionId, InstalledCodeId, ObjectId, RealmGlobalBindingId, RealmId,
+        ModuleRecordId,
+    },
     interrupt::InterruptState,
     object::{
         ArrayBufferState, ArrayIterator, ArrayIteratorKind, ArrayState, BoxedPrimitive,
@@ -61,6 +65,7 @@ mod array_buffers;
 mod async_functions;
 mod atomics_waiters;
 mod data_views;
+mod dynamic_imports;
 mod dates;
 mod intls;
 mod iterators;
@@ -91,6 +96,8 @@ struct RealmState {
     /// Realm-local state for the implementation-defined `%Math.random%`
     /// pseudorandom sequence. Xorshift64* requires a non-zero state.
     math_random_state: u64,
+    /// Per-realm module registry: canonical key → module record id.
+    module_registry: HashMap<ModuleKey, ModuleRecordId>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1603,6 +1610,9 @@ pub(crate) enum NativeFunctionKind {
     PromisePrototypeThen,
     PromisePrototypeCatch,
     PromisePrototypeFinally,
+    /// `import.meta.resolve`, resolving against the receiver meta object's
+    /// `url` own property.
+    ImportMetaResolve,
 }
 
 /// Operations exposed by the `%Atomics%` namespace.
@@ -5134,7 +5144,47 @@ impl HeapFunction {
 
 pub(crate) struct BindingCell {
     pub(crate) value: SlotValue,
+    /// When set, this cell aliases another exporter cell. Reads and writes
+    /// resolve the forwarding chain before accessing `.value`. Module linking
+    /// guarantees acyclic forwarding, so the chain length is bounded by the
+    /// module graph depth.
+    pub(crate) forward: Option<BindingCellId>,
 }
+
+impl BindingCell {
+    /// Resolves a forwarding chain to the terminal cell that holds the value.
+    ///
+    /// Returns the original `cell` when no forwarding is set. The hop limit
+    /// guards against a hypothetical cycle; module linking guarantees acyclic
+    /// forwarding, so a well-formed graph never reaches the limit.
+    pub(crate) fn resolve_forward(
+        runtime: &Runtime,
+        cell: BindingCellId,
+    ) -> Result<BindingCellId, crate::EngineFault> {
+        let mut current = cell;
+        for _ in 0..MAX_FORWARD_HOPS {
+            let Some(binding) = runtime.cells.get(current) else {
+                return Err(crate::EngineFault::StaleHeapEdge {
+                    edge: "binding cell",
+                    index: current.index(),
+                    generation: current.generation(),
+                });
+            };
+            match binding.forward {
+                Some(next) => current = next,
+                None => return Ok(current),
+            }
+        }
+        Err(crate::EngineFault::RuntimeInvariant {
+            message: "binding cell forwarding chain exceeded the hop limit",
+        })
+    }
+}
+
+/// Upper bound on forwarding-chain traversal. Module graphs with N modules can
+/// have at most N-1 forwarding hops; this constant is generous relative to any
+/// practical module count and guards against pathological states.
+const MAX_FORWARD_HOPS: u32 = 100_000;
 
 #[derive(Clone)]
 pub(crate) struct EvalVariableBinding {
@@ -5448,6 +5498,7 @@ pub struct Runtime {
     pub(crate) shape_interner: Rc<RefCell<ShapeInterner>>,
     pub(crate) cells: Arena<crate::ids::BindingCellMarker, BindingCell>,
     pub(crate) global_bindings: Arena<crate::ids::RealmGlobalBindingMarker, RealmGlobalBinding>,
+    pub(crate) modules: Arena<crate::ids::ModuleRecordMarker, modules::SourceTextModuleRecord>,
     pub(crate) limits: RuntimeLimits,
     installed_templates: u64,
     installed_atoms: u64,
@@ -5459,6 +5510,7 @@ pub struct Runtime {
     public_roots: u64,
     pub(crate) collection_pending: bool,
     pub(crate) interrupts: InterruptState,
+    pub(crate) import_meta_hook: Option<Arc<dyn ImportMetaHook>>,
     pub(crate) promise_rejections: PromiseRejectionState,
     pub(crate) promise_jobs: VecDeque<PromiseJob>,
     pub(crate) atomics_waiters: HashMap<u64, atomics_waiters::AsyncAtomicsWaiter>,
@@ -5469,10 +5521,17 @@ pub struct Runtime {
         tokio::sync::mpsc::UnboundedReceiver<crate::shared_array_buffer::AtomicsWakeEvent>,
     pub(crate) atomics_agent_id: usize,
     pub(crate) atomics_timer: Option<atomics_waiters::AtomicsTimerDriver>,
+    pub(crate) pending_dynamic_imports:
+        VecDeque<dynamic_imports::PendingDynamicImportRecord>,
+    /// Remaining async-dependency count per in-flight `import.defer()` promise
+    /// (SafePerformPromiseAll bookkeeping).
+    pub(crate) deferred_import_waiters: HashMap<ObjectId, u32>,
     pub(crate) finalization_jobs: VecDeque<ObjectId>,
     pub(crate) kept_alive: Vec<StoredValue>,
     pub(crate) generator_states: HashMap<ObjectId, crate::vm::GeneratorRecord>,
     pub(crate) async_function_states: HashMap<ObjectId, crate::vm::AsyncFunctionRecord>,
+    /// ECMA-262 IncrementModuleAsyncEvaluationCount (global monotonic counter).
+    pub(crate) module_async_evaluation_count: u32,
     pub(crate) async_generator_states: HashMap<ObjectId, crate::vm::AsyncGeneratorRecord>,
     pub(crate) array_from_async_states: HashMap<ObjectId, crate::vm::ArrayFromAsyncRecord>,
     /// Next non-zero seed assigned after a realm transaction commits.
@@ -5502,6 +5561,33 @@ impl Runtime {
     #[must_use]
     pub fn has_interrupt_handler(&self) -> bool {
         self.interrupts.is_installed()
+    }
+
+    /// Installs the host `import.meta` population hook, replacing any previous
+    /// one.
+    ///
+    /// The hook is consulted when a module's `import.meta` object is created
+    /// (`url`) and when `import.meta.resolve` runs. Without a hook, `url` is
+    /// the canonical module key and `resolve` applies
+    /// [`modules::default_import_meta_resolve`].
+    pub fn set_import_meta_hook(&mut self, hook: Arc<dyn ImportMetaHook>) {
+        self.import_meta_hook = Some(hook);
+    }
+
+    /// Removes the installed `import.meta` population hook.
+    pub fn clear_import_meta_hook(&mut self) {
+        self.import_meta_hook = None;
+    }
+
+    /// Returns whether an `import.meta` population hook is installed.
+    #[must_use]
+    pub fn has_import_meta_hook(&self) -> bool {
+        self.import_meta_hook.is_some()
+    }
+
+    /// Returns the installed `import.meta` population hook, if any.
+    pub(crate) fn import_meta_hook(&self) -> Option<Arc<dyn ImportMetaHook>> {
+        self.import_meta_hook.clone()
     }
 
     /// Returns the predefined atom with the given descriptor.
@@ -5544,7 +5630,13 @@ pub use gc::CollectionReport;
 pub(crate) use gc::CollectionRoot;
 mod heap;
 mod installation;
+pub(crate) mod modules;
 mod realm;
+pub use modules::{
+    ImportMetaHook, ModuleError, ModuleErrorPhase, ModuleEvaluationError, ModuleKey,
+    ModuleLinkError, ModuleLoader, ModuleResolveError, default_import_meta_resolve,
+};
+pub use dynamic_imports::PendingDynamicImport;
 #[cfg(test)]
 mod realm_snapshot;
 mod template_objects;
@@ -5670,11 +5762,12 @@ fn require_root_kind(
         | CompilerExecutableKind::AsyncGeneratorMethod => {
             "unsupported executable-kind admission request"
         }
+        CompilerExecutableKind::Module => "module execution is not yet implemented in the runtime",
     };
     Err(InstallError::AuthorityInvariant { message })
 }
 
-fn preflight_opcodes(authority: &VerifiedBytecode) -> Result<(), InstallError> {
+pub(crate) fn preflight_opcodes(authority: &VerifiedBytecode) -> Result<(), InstallError> {
     for (function_index, function) in authority.functions().enumerate() {
         let function_id = FunctionTemplateId::new(u32::try_from(function_index).map_err(|_| {
             InstallError::AuthorityInvariant {
@@ -5770,6 +5863,8 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::Eval
             | FinalOpcode::ApplyEval
             | FinalOpcode::Import
+            | FinalOpcode::ImportDefer
+            | FinalOpcode::ImportMeta
             | FinalOpcode::CheckCtorReturn
             | FinalOpcode::CheckCtor
             | FinalOpcode::InitCtor
@@ -5809,6 +5904,7 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::SetLocCheck
             | FinalOpcode::GetVarRefCheck
             | FinalOpcode::PutVarRefCheck
+            | FinalOpcode::PutVarRefCheckInit
             | FinalOpcode::CloseLoc
             | FinalOpcode::ForInStart
             | FinalOpcode::ForInNext
@@ -5978,7 +6074,7 @@ fn stale_heap_reference(reference: HeapReference) -> crate::EngineFault {
     }
 }
 
-fn check_install_limit(
+pub(crate) fn check_install_limit(
     resource: RuntimeResource,
     limit: u64,
     observed: u64,

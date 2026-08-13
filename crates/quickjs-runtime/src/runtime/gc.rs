@@ -208,6 +208,7 @@ impl Runtime {
             pending_releases: usize_to_u64(self.mailbox.pending_len()),
             pending_promise_jobs: usize_to_u64(self.promise_jobs.len()),
             pending_atomics_waiters: usize_to_u64(self.atomics_waiters.len()),
+            pending_dynamic_imports: usize_to_u64(self.pending_dynamic_imports.len()),
             pending_finalization_jobs: usize_to_u64(self.finalization_jobs.len()),
             kept_alive: usize_to_u64(self.kept_alive.len()),
         }
@@ -297,6 +298,53 @@ impl Runtime {
             if object.public_roots > 0 {
                 mark_heap_reference(
                     HeapReference::Object(id),
+                    &mut marked_functions,
+                    &mut marked_objects,
+                    &mut work,
+                );
+            }
+        }
+        // Module records live for the lifetime of their realm; their
+        // environments, root functions, namespace objects, and import.meta
+        // objects are roots so module bindings remain readable after
+        // evaluation.
+        for (_, module) in self.modules.iter() {
+            for &cell in &module.environment {
+                mark_collection_root(
+                    CollectionRoot::BindingCell(cell),
+                    &mut marked_functions,
+                    &mut marked_objects,
+                    &mut marked_cells,
+                    &mut work,
+                );
+            }
+            if let Some(function) = module.root_function {
+                mark_heap_reference(
+                    HeapReference::Function(function),
+                    &mut marked_functions,
+                    &mut marked_objects,
+                    &mut work,
+                );
+            }
+            if let Some(object) = module.namespace_object {
+                mark_heap_reference(
+                    HeapReference::Object(object),
+                    &mut marked_functions,
+                    &mut marked_objects,
+                    &mut work,
+                );
+            }
+            if let Some(object) = module.meta_object {
+                mark_heap_reference(
+                    HeapReference::Object(object),
+                    &mut marked_functions,
+                    &mut marked_objects,
+                    &mut work,
+                );
+            }
+            if let Some(object) = module.top_level_capability {
+                mark_heap_reference(
+                    HeapReference::Object(object),
                     &mut marked_functions,
                     &mut marked_objects,
                     &mut work,
@@ -821,6 +869,23 @@ impl Runtime {
                                 &mut work,
                             );
                         }
+                        PromiseReactionTarget::AsyncModule { .. } => {}
+                        PromiseReactionTarget::FinishDynamicImport { promise, .. } => {
+                            mark_heap_reference(
+                                HeapReference::Object(*promise),
+                                &mut marked_functions,
+                                &mut marked_objects,
+                                &mut work,
+                            );
+                        }
+                        PromiseReactionTarget::ImportDeferDeps { promise, .. } => {
+                            mark_heap_reference(
+                                HeapReference::Object(*promise),
+                                &mut marked_functions,
+                                &mut marked_objects,
+                                &mut work,
+                            );
+                        }
                     }
                     mark_stored_value(
                         argument,
@@ -859,6 +924,14 @@ impl Runtime {
         for waiter in self.atomics_waiters.values() {
             mark_heap_reference(
                 HeapReference::Object(waiter.promise),
+                &mut marked_functions,
+                &mut marked_objects,
+                &mut work,
+            );
+        }
+        for import in &self.pending_dynamic_imports {
+            mark_heap_reference(
+                HeapReference::Object(import.promise),
                 &mut marked_functions,
                 &mut marked_objects,
                 &mut work,
@@ -1504,6 +1577,31 @@ impl Runtime {
                                                         &mut work,
                                                     );
                                                 }
+                                                PromiseReactionTarget::AsyncModule {
+                                                    ..
+                                                } => {}
+                                                PromiseReactionTarget::FinishDynamicImport {
+                                                    promise,
+                                                    ..
+                                                } => {
+                                                    mark_heap_reference(
+                                                        HeapReference::Object(*promise),
+                                                        &mut marked_functions,
+                                                        &mut marked_objects,
+                                                        &mut work,
+                                                    );
+                                                }
+                                                PromiseReactionTarget::ImportDeferDeps {
+                                                    promise,
+                                                    ..
+                                                } => {
+                                                    mark_heap_reference(
+                                                        HeapReference::Object(*promise),
+                                                        &mut marked_functions,
+                                                        &mut marked_objects,
+                                                        &mut work,
+                                                    );
+                                                }
                                             }
                                         }
                                     }
@@ -1536,14 +1634,20 @@ impl Runtime {
                     }
                     GraphNode::Cell(id) => {
                         if let Some(cell) = self.cells.get(id) {
-                            match &cell.value {
-                                SlotValue::Uninitialized => {}
-                                SlotValue::Value(value) => mark_stored_value(
-                                    value,
-                                    &mut marked_functions,
-                                    &mut marked_objects,
-                                    &mut work,
-                                ),
+                            if let Some(forward) = cell.forward {
+                                if marked_cells.insert(forward) {
+                                    work.push(GraphNode::Cell(forward));
+                                }
+                            } else {
+                                match &cell.value {
+                                    SlotValue::Uninitialized => {}
+                                    SlotValue::Value(value) => mark_stored_value(
+                                        value,
+                                        &mut marked_functions,
+                                        &mut marked_objects,
+                                        &mut work,
+                                    ),
+                                }
                             }
                         }
                     }

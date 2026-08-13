@@ -1773,6 +1773,7 @@ impl Runtime {
         for (index, value) in mapped_values {
             let Ok(cell) = self.cells.try_insert(BindingCell {
                 value: SlotValue::Value(value),
+                forward: None,
             }) else {
                 for cell in rollback_cells {
                     let removed = self.cells.remove(cell);

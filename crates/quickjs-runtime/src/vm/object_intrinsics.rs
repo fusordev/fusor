@@ -2055,8 +2055,42 @@ pub(super) fn own_property_keys(
         KeyListing::EnumerableOnly | KeyListing::AllStringKeys => KeyPhases::STRING_KEYS,
         KeyListing::AllSymbolKeys => KeyPhases::SYMBOL_KEYS,
     };
+    if let HeapReference::Object(object) = reference
+        && runtime.module_namespace_is_deferred(object)
+    {
+        // ECMA-262 10.4.6.6 [[OwnPropertyKeys]] step 1: the exports list
+        // triggers deferred evaluation for every key listing.
+        match runtime.ensure_deferred_namespace_evaluation(object, None) {
+            Ok(()) => {}
+            Err(failure) => {
+                return Err(crate::vm::proxy::deferred_namespace_evaluation_abrupt(
+                    realm, origin, failure,
+                )?);
+            }
+        }
+    }
     let (snapshot, work) = runtime.try_own_key_snapshot(reference, 0, phases)?;
     execution_budget.charge_instructions(work)?;
+    // `EnumerableOwnPropertyNames` (Object.keys) performs `[[GetOwnProperty]]`
+    // per string key, which throws a `ReferenceError` for a module namespace
+    // export still in its temporal dead zone (ECMA-262 10.4.6.3). The snapshot
+    // caches only the key phase, so the uninitialized state is checked here.
+    // `getOwnPropertyNames` (AllStringKeys) reads only `[[OwnPropertyKeys]]` and
+    // does not observe binding state, so it is deliberately excluded.
+    if let HeapReference::Object(object) = reference
+        && matches!(listing, KeyListing::EnumerableOnly)
+    {
+        for index in 0..snapshot.len() {
+            let candidate = snapshot.get(index).ok_or(EngineFault::RuntimeInvariant {
+                message: "own-key snapshot shrank during uninitialized-export check",
+            })?;
+            if runtime.module_namespace_export_is_uninitialized(object, candidate.key())? {
+                return Err(NativeFailure::Abrupt(namespace_uninitialized_exception(
+                    realm, origin,
+                )?));
+            }
+        }
+    }
     let mut elements = Vec::new();
     elements
         .try_reserve_exact(snapshot.len())

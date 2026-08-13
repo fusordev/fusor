@@ -14,11 +14,11 @@ use super::super::{
     PropertyKind, SequenceExpression, SimpleAssignmentTarget, Span, StatementCompletion,
     StatementControlStack, StatementPlanningState, StatementWork, StaticMemberExpression,
     StoragePlacement, UnaryExpression, UnaryOperator, UnsupportedLeafFeature, UpdateExpression,
-    UpdateOperator, compiled_static_property_key, plan_external_put, plan_external_read,
-    plan_put_slot, unsupported,
+    UpdateOperator, WritePolicy, compiled_static_property_key, plan_external_put,
+    plan_external_read, plan_put_slot, unsupported,
 };
 use super::abrupt::{AbruptMarker, AbruptMarkerKind, AbruptMarkerTag};
-use super::bindings::WithObjectSource;
+use super::bindings::{WithObjectSource, plan_external_put_init};
 use super::calls::MemberCallee;
 use oxc_ast::ast::{SpreadElement, StaticBlock};
 use quickjs_bytecode::CompilerBindingKind;
@@ -813,8 +813,13 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                             // EvaluateImportCall evaluates the specifier before the optional
                             // options expression. The opcode owns every subsequent observable
                             // operation, beginning with NewPromiseCapability and ToString.
+                            // `import.defer(...)` selects the deferred-phase variant.
+                            let opcode = match import_expression.phase {
+                                Some(oxc_ast::ast::ImportPhase::Defer) => FinalOpcode::ImportDefer,
+                                _ => FinalOpcode::Import,
+                            };
                             work.push(ExpressionWork::Emit(PlannedInstruction::new(
-                                FinalOpcode::Import,
+                                opcode,
                                 Operands::None,
                                 import_expression.span,
                             )));
@@ -831,6 +836,15 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                         }
                         Expression::ThisExpression(this) => {
                             flow.emit(self.plan_this_expression(this.span, layout)?)?;
+                        }
+                        Expression::ImportMeta(import_meta) => {
+                            // GetImportMeta materializes (once per module) and
+                            // pushes the module's import.meta object.
+                            flow.emit(PlannedInstruction::new(
+                                FinalOpcode::ImportMeta,
+                                Operands::None,
+                                import_meta.span,
+                            ))?;
                         }
                         Expression::NewTarget(new_target) => {
                             let (opcode, operands) = if self
@@ -3277,9 +3291,50 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 self.validate_class_declaration_storage(binding, slot, identifier.span)?;
                 flow.emit(plan_put_slot(slot, identifier.span))
             }
+            StoragePlacement::ModuleLocal => {
+                // Module top-level class declarations store into the module
+                // environment through the captured-cell machinery, exactly like
+                // module-local `let`/`const` declaration initializers.
+                let valid = storage.policy().kind() == DeclarationKind::Class
+                    && storage.policy().initialization() == InitializationPolicy::AtDeclaration
+                    && storage.policy().writes() == WritePolicy::Mutable
+                    && storage.policy().has_temporal_dead_zone();
+                if !valid {
+                    return unsupported(
+                        UnsupportedLeafFeature::UnsupportedBinding,
+                        identifier.span,
+                    );
+                }
+                let module_id = tree_layout.module_bindings.for_binding(binding).ok_or(
+                    LeafCompilationError::SemanticInvariant {
+                        invariant: "module class declaration has a module binding descriptor",
+                        span: Some(identifier.span),
+                    },
+                )?;
+                let descriptor = tree_layout.module_bindings.binding(module_id).ok_or(
+                    LeafCompilationError::SemanticInvariant {
+                        invariant: "module class declaration descriptor exists",
+                        span: Some(identifier.span),
+                    },
+                )?;
+                let realm_global_count = tree_layout
+                    .realm_globals
+                    .imports_for(layout.executable)?
+                    .len();
+                let slot = tree_layout.module_bindings.closure_slot(
+                    &self.planned.plan,
+                    layout.executable,
+                    module_id,
+                    realm_global_count,
+                )?;
+                flow.emit(plan_external_put_init(
+                    CompilerClosureBinding::Captured(descriptor.policy),
+                    slot,
+                    identifier.span,
+                ))
+            }
             StoragePlacement::Argument { .. }
             | StoragePlacement::GlobalObject
-            | StoragePlacement::ModuleLocal
             | StoragePlacement::ModuleImport => {
                 unsupported(UnsupportedLeafFeature::UnsupportedBinding, identifier.span)
             }
@@ -5123,7 +5178,8 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
     ) -> Result<(), LeafCompilationError> {
         let (binding, frame_slot) = match reference {
             LoweredReference::Frame { binding, slot, .. } => (binding, slot),
-            LoweredReference::RealmGlobal { slot, binding, .. } => {
+            LoweredReference::RealmGlobal { slot, binding, .. }
+            | LoweredReference::Module { slot, binding, .. } => {
                 return Self::plan_realm_global_assignment(
                     assignment,
                     identifier,
@@ -6374,6 +6430,9 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             LoweredReference::RealmGlobal { global, .. } => {
                 CompiledMetadataAtomKey::RealmGlobal(global)
             }
+            LoweredReference::Module { module_id, .. } => {
+                CompiledMetadataAtomKey::ModuleBinding(module_id)
+            }
         };
         Ok(Some(PlannedInstruction::new(
             FinalOpcode::SetName,
@@ -6588,7 +6647,8 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
     ) -> Result<(), LeafCompilationError> {
         let (binding, frame_slot) = match reference {
             LoweredReference::Frame { binding, slot, .. } => (binding, slot),
-            LoweredReference::RealmGlobal { slot, binding, .. } => {
+            LoweredReference::RealmGlobal { slot, binding, .. }
+            | LoweredReference::Module { slot, binding, .. } => {
                 work.push(ExpressionWork::Emit(plan_external_put(
                     binding,
                     slot,

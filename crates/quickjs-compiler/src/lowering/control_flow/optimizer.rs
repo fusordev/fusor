@@ -4,7 +4,7 @@ mod metadata;
 mod retention;
 mod rewrite;
 
-use quickjs_bytecode::{CompilerAtom, VerificationLimits, VerifiedControlFlow};
+use quickjs_bytecode::{CompilerAtom, FinalOpcode, VerificationLimits, VerifiedControlFlow};
 
 use super::{LeafCompilationError, ResolvedStackAnchor, SourceInstruction};
 use crate::lowering::CompiledConstant;
@@ -54,6 +54,21 @@ pub(super) fn optimize_control_flow(
     let facts = analysis::analyze_control_flow(control_flow, &inputs, limits)?;
     if !facts.changes_control_flow() {
         return Ok(None);
+    }
+
+    // Dead-code removal cannot drop closure creations: method, accessor, and
+    // class templates must keep their one verified definition site in the
+    // parent body, so a function whose optimization would remove any closure
+    // keeps its unoptimized control flow.
+    for (position, verified) in control_flow.instructions().iter().enumerate() {
+        if !facts.is_retained(position)
+            && matches!(
+                verified.decoded().instruction().opcode(),
+                FinalOpcode::FClosure | FinalOpcode::FClosure8
+            )
+        {
+            return Ok(None);
+        }
     }
 
     rewrite::rebuild_optimized_control_flow(

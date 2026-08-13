@@ -505,6 +505,7 @@ impl<'compiler, 'statement, 'unit, 'arena, 'scope, 'layout>
         script_internal_local_count: usize,
         planning: FunctionPlanningContext<'layout>,
         limits: VerificationLimits,
+        async_module_root: bool,
     ) -> Result<Self, LeafCompilationError> {
         planning.validate_owner()?;
         let program_scope =
@@ -544,7 +545,11 @@ impl<'compiler, 'statement, 'unit, 'arena, 'scope, 'layout>
                 script_finally_completion_limit: script_internal_local_count,
             },
             flow: PlannedControlFlow::new(limits),
-            terminal: FunctionTerminal::Script(completion),
+            terminal: if async_module_root {
+                FunctionTerminal::Async
+            } else {
+                FunctionTerminal::Script(completion)
+            },
         })
     }
 
@@ -612,6 +617,7 @@ impl CompilationContext<'_, '_, '_> {
             ExecutableKind::Script {
                 asynchronous: false,
             } => self.validate_script(executable, tree_layout, limits),
+            ExecutableKind::Module => self.validate_module(executable, tree_layout, limits),
             ExecutableKind::Arrow { .. } => self.validate_arrow(executable, tree_layout, limits),
             ExecutableKind::ClassDefaultConstructor => {
                 self.validate_default_class_constructor(executable, tree_layout, limits)
@@ -656,7 +662,7 @@ impl CompilationContext<'_, '_, '_> {
             constants,
         )?;
         let closure_definitions =
-            self.compiled_closure_definitions(&closure_variables, &realm_globals, constants)?;
+            self.compiled_closure_definitions(&closure_variables, &realm_globals, &[], constants)?;
         let capture_count = checked_function_entry_count(
             closure_variables
                 .len()
@@ -704,6 +710,7 @@ impl CompilationContext<'_, '_, '_> {
             derived_class_constructor,
             argument_count: 0,
             defined_argument_count: 0,
+            has_top_level_await: false,
             local_count: layout.local_count,
             capture_count,
             capture_layout,
@@ -754,7 +761,7 @@ impl CompilationContext<'_, '_, '_> {
             constants,
         )?;
         let closure_definitions =
-            self.compiled_closure_definitions(&closure_variables, &realm_globals, constants)?;
+            self.compiled_closure_definitions(&closure_variables, &realm_globals, &[], constants)?;
         let capture_count = checked_function_entry_count(
             closure_variables
                 .len()
@@ -792,6 +799,7 @@ impl CompilationContext<'_, '_, '_> {
             derived_class_constructor: false,
             argument_count: 0,
             defined_argument_count: 0,
+            has_top_level_await: false,
             local_count: layout.local_count,
             capture_count,
             capture_layout,
@@ -839,7 +847,7 @@ impl CompilationContext<'_, '_, '_> {
             constants,
         )?;
         let closure_definitions =
-            self.compiled_closure_definitions(&closure_variables, &realm_globals, constants)?;
+            self.compiled_closure_definitions(&closure_variables, &realm_globals, &[], constants)?;
         let capture_count = checked_function_entry_count(
             closure_variables
                 .len()
@@ -860,6 +868,7 @@ impl CompilationContext<'_, '_, '_> {
             derived_class_constructor: false,
             argument_count: executable.parameter_count(),
             defined_argument_count: executable.defined_parameter_count(),
+            has_top_level_await: false,
             local_count: layout.local_count,
             capture_count,
             capture_layout,
@@ -987,7 +996,7 @@ impl CompilationContext<'_, '_, '_> {
             constants,
         )?;
         let closure_definitions =
-            self.compiled_closure_definitions(&closure_variables, &realm_globals, constants)?;
+            self.compiled_closure_definitions(&closure_variables, &realm_globals, &[], constants)?;
         let capture_count = checked_function_entry_count(
             closure_variables
                 .len()
@@ -1004,6 +1013,7 @@ impl CompilationContext<'_, '_, '_> {
             derived_class_constructor,
             argument_count: executable.parameter_count(),
             defined_argument_count: executable.defined_parameter_count(),
+            has_top_level_await: false,
             local_count: layout.local_count,
             capture_count,
             capture_layout,
@@ -1074,6 +1084,7 @@ impl CompilationContext<'_, '_, '_> {
             internal_local_count,
             planning,
             limits,
+            false,
         )?
         .lower()?;
         let program_scope =
@@ -1101,7 +1112,7 @@ impl CompilationContext<'_, '_, '_> {
             finally_completion_count,
         )?;
         let closure_definitions =
-            self.compiled_closure_definitions(&closure_variables, &realm_globals, constants)?;
+            self.compiled_closure_definitions(&closure_variables, &realm_globals, &[], constants)?;
         let capture_count =
             checked_function_entry_count(realm_globals.len(), "function closure variables")?;
 
@@ -1111,6 +1122,104 @@ impl CompilationContext<'_, '_, '_> {
             derived_class_constructor: false,
             argument_count: 0,
             defined_argument_count: 0,
+            has_top_level_await: false,
+            local_count: layout.local_count,
+            capture_count,
+            capture_layout,
+            locals: lowered_locals(&layout),
+            constants: Arc::clone(constants.entries()),
+            atoms: Arc::clone(constants.atoms()),
+            closure_variables,
+            realm_globals,
+            function_name: None,
+            variable_definitions,
+            closure_definitions,
+            function_span: source_byte_span(program.span),
+            function_name_span: None,
+            flow,
+        })
+    }
+
+    fn validate_module(
+        &self,
+        executable_id: ExecutableId,
+        tree_layout: &FunctionTreeLayout,
+        limits: VerificationLimits,
+    ) -> Result<ValidatedFunction, LeafCompilationError> {
+        let (executable, program) = self.selected_module(executable_id)?;
+        let has_top_level_await = self.module_top_level_await(executable_id)?.is_some();
+        let finally_completion_count = self.script_finally_completion_count(executable_id)?;
+        let internal_local_count = script_internal_local_count(finally_completion_count)?;
+        let layout = FrameLayout::new(
+            FrameLayoutInput::new(&self.planned.plan, executable_id)
+                .with_internal_locals(internal_local_count),
+        )?;
+        let completion = layout.internal_local(0)?;
+        let constants = tree_layout.constant_pool(executable_id)?;
+        let planning = FunctionPlanningContext {
+            executable: executable_id,
+            layout: &layout,
+            tree_layout,
+            constants,
+        };
+        let flow = FunctionLoweringSession::for_program(
+            self,
+            program,
+            completion,
+            internal_local_count,
+            planning,
+            limits,
+            has_top_level_await,
+        )?
+        .lower()?;
+        let program_scope =
+            self.created_scope(program.scope_id.get(), program.node_id.get(), program.span)?;
+        let capture_layout =
+            self.compiler_capture_layout(executable_id, program_scope, &layout, tree_layout)?;
+        let closure_variables = self.compiled_closure_variables(executable_id, tree_layout)?;
+        if !closure_variables.is_empty() {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "isolated Module root imports no caller closure",
+                span: Some(program.span),
+            });
+        }
+        let realm_globals = self.compiled_realm_globals(executable_id, tree_layout, constants)?;
+        for global in &realm_globals {
+            let declares = tree_layout
+                .realm_globals
+                .binding(global.id())
+                .is_some_and(|binding| binding.declaration.is_some());
+            if declares {
+                return Err(LeafCompilationError::SemanticInvariant {
+                    invariant: "Module root declares no realm-global bindings",
+                    span: Some(program.span),
+                });
+            }
+        }
+        let mut variable_definitions = self.compiled_variable_definitions(
+            executable_id,
+            program_scope,
+            &layout,
+            tree_layout,
+            constants,
+        )?;
+        append_script_internal_variable_definitions(
+            &mut variable_definitions,
+            constants,
+            finally_completion_count,
+        )?;
+        let closure_definitions =
+            self.compiled_closure_definitions(&closure_variables, &realm_globals, &[], constants)?;
+        let capture_count =
+            checked_function_entry_count(realm_globals.len(), "function closure variables")?;
+
+        Ok(ValidatedFunction {
+            executable_kind: CompilerExecutableKind::Module,
+            strict: executable.is_strict(),
+            derived_class_constructor: false,
+            argument_count: 0,
+            defined_argument_count: 0,
+            has_top_level_await,
             local_count: layout.local_count,
             capture_count,
             capture_layout,
@@ -1180,12 +1289,14 @@ impl CompilationContext<'_, '_, '_> {
     }
 }
 
+#[allow(dead_code)]
 struct ValidatedFunction {
     executable_kind: CompilerExecutableKind,
     strict: bool,
     derived_class_constructor: bool,
     argument_count: u32,
     defined_argument_count: u32,
+    has_top_level_await: bool,
     local_count: u32,
     capture_count: u32,
     capture_layout: CompilerCaptureLayout,
@@ -1223,6 +1334,7 @@ const fn direct_eval_header(
     )
 }
 
+#[allow(clippy::too_many_lines)]
 const fn executable_header(
     kind: CompilerExecutableKind,
     strict: bool,
@@ -1231,10 +1343,18 @@ const fn executable_header(
     defined_argument_count: u32,
     variable_reference_count: u32,
     direct_eval_capabilities: Option<quickjs_frontend::DirectEvalCapabilities>,
+    has_top_level_await: bool,
 ) -> UnverifiedFunctionHeader {
     let header = match kind {
         CompilerExecutableKind::GlobalScript | CompilerExecutableKind::IndirectEvalScript => {
             UnverifiedFunctionHeader::global_script(strict, variable_reference_count)
+        }
+        CompilerExecutableKind::Module => {
+            if has_top_level_await {
+                UnverifiedFunctionHeader::async_module(variable_reference_count)
+            } else {
+                UnverifiedFunctionHeader::module(variable_reference_count)
+            }
         }
         CompilerExecutableKind::DirectEvalScript => {
             direct_eval_header(strict, variable_reference_count, direct_eval_capabilities)
@@ -1350,8 +1470,9 @@ impl CompilationContext<'_, '_, '_> {
             derived_class_constructor,
             argument_count,
             defined_argument_count,
+            has_top_level_await,
             local_count,
-            capture_count,
+            capture_count: _,
             capture_layout,
             locals,
             constants,
@@ -1360,11 +1481,30 @@ impl CompilationContext<'_, '_, '_> {
             realm_globals,
             function_name,
             variable_definitions,
-            closure_definitions,
+            closure_definitions: _,
             function_span,
             function_name_span,
             flow,
         } = validated;
+        let constants_pool = tree_layout.constant_pool(executable)?;
+        let module_bindings =
+            self.compiled_module_bindings(executable, tree_layout, constants_pool)?;
+        let closure_definitions = self.compiled_closure_definitions(
+            &closure_variables,
+            &realm_globals,
+            &module_bindings,
+            constants_pool,
+        )?;
+        let capture_count = checked_function_entry_count(
+            closure_variables
+                .len()
+                .checked_add(realm_globals.len())
+                .and_then(|value| value.checked_add(module_bindings.len()))
+                .ok_or(LeafCompilationError::CapacityExceeded {
+                    domain: "function closure variables",
+                })?,
+            "function closure variables",
+        )?;
         let atom_count =
             u32::try_from(atoms.len()).map_err(|_| LeafCompilationError::CapacityExceeded {
                 domain: "atom pool entries",
@@ -1399,6 +1539,7 @@ impl CompilationContext<'_, '_, '_> {
                 CompilationGoal::DirectEval(context) => Some(context.capabilities()),
                 _ => None,
             },
+            has_top_level_await,
         );
         let constant_layout = CompilerConstantLayout::new(
             constants
@@ -1459,6 +1600,7 @@ impl CompilationContext<'_, '_, '_> {
             constants,
             closure_variables: closure_variables.into(),
             realm_globals: realm_globals.into(),
+            module_bindings: module_bindings.into(),
             source_instructions: source_instructions.into(),
             control_flow: Arc::new(control_flow),
             eval_reference_call_instructions,

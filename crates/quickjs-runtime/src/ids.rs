@@ -6,6 +6,7 @@ pub(crate) enum FunctionMarker {}
 pub(crate) enum ObjectMarker {}
 pub(crate) enum BindingCellMarker {}
 pub(crate) enum RealmGlobalBindingMarker {}
+pub(crate) enum ModuleRecordMarker {}
 
 pub(crate) type RealmId = Id<RealmMarker>;
 pub(crate) type InstalledCodeId = Id<InstalledCodeMarker>;
@@ -13,3 +14,4 @@ pub(crate) type FunctionId = Id<FunctionMarker>;
 pub(crate) type ObjectId = Id<ObjectMarker>;
 pub(crate) type BindingCellId = Id<BindingCellMarker>;
 pub(crate) type RealmGlobalBindingId = Id<RealmGlobalBindingMarker>;
+pub(crate) type ModuleRecordId = Id<ModuleRecordMarker>;

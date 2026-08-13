@@ -553,9 +553,9 @@ fn object_function_value_and_method_use_distinct_exact_headers() {
 }
 
 #[test]
-fn module_function_fails_closed_at_the_script_only_boundary() {
+fn module_function_compiles_at_the_leaf_boundary() {
     let source = "export function f(arg) { let local = arg; return local; }";
-    let error = with_parsed_program(
+    let compiled = with_parsed_program(
         source,
         FrontendOptions::for_goal(CompilationGoal::Module),
         |unit| {
@@ -566,19 +566,14 @@ fn module_function_fails_closed_at_the_script_only_boundary() {
                 .expect("module function executable");
             context
                 .compile_leaf(&executable, VerificationLimits::default())
-                .expect_err("the first lowering slice is Script-only")
+                .expect("module lowering slice admits Module goals")
         },
     )
     .expect("front-end acceptance");
-    let LeafCompilationError::Unsupported { feature, span } = error else {
-        panic!("module function must fail as unsupported");
-    };
-
-    assert_eq!(feature, UnsupportedLeafFeature::UnsupportedCompilationUnit);
-    assert_eq!(
-        &source[span.start as usize..span.end as usize],
-        "function f(arg) { let local = arg; return local; }"
-    );
+    let header = compiled.control_flow().function_header();
+    assert!(header.mode().is_strict());
+    assert!(header.flags().has_prototype());
+    assert!(!header.flags().is_eval());
 }
 
 #[test]

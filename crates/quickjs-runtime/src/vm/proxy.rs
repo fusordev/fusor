@@ -14,6 +14,77 @@
 )]
 use super::*;
 
+/// The `ReferenceError` a module namespace exotic object throws when reading
+/// an export whose target binding is still in its temporal dead zone
+/// (ECMA-262 10.4.6.2 `[[Get]]` / 10.4.6.3 `[[GetOwnProperty]]`).
+fn namespace_uninitialized_error(
+    realm: RealmId,
+    origin: JsStackFrame,
+) -> Result<NativeFailure, NativeFailure> {
+    Ok(NativeFailure::Abrupt(PendingException {
+        realm,
+        payload: PendingExceptionPayload::EngineError {
+            kind: ExceptionKind::ReferenceError,
+            message: JsString::from_utf8("binding is not initialized")?,
+        },
+        origin,
+    }))
+}
+
+/// Converts an ECMA-262 `EvaluateModuleSync` failure into the abrupt
+/// completion a deferred namespace property access surfaces: a TypeError when
+/// the module cannot complete synchronously, or the module's original
+/// evaluation rejection value.
+pub(super) fn deferred_namespace_evaluation_abrupt(
+    realm: RealmId,
+    origin: JsStackFrame,
+    failure: crate::runtime::modules::DeferredNamespaceEvaluationFailure,
+) -> Result<NativeFailure, NativeFailure> {
+    use crate::runtime::modules::DeferredNamespaceEvaluationFailure;
+    match failure {
+        DeferredNamespaceEvaluationFailure::NotReady => {
+            Ok(NativeFailure::Abrupt(PendingException {
+                realm,
+                payload: PendingExceptionPayload::EngineError {
+                    kind: ExceptionKind::TypeError,
+                    message: JsString::from_utf8("module cannot be evaluated synchronously")?,
+                },
+                origin,
+            }))
+        }
+        DeferredNamespaceEvaluationFailure::Thrown(value) => {
+            Ok(NativeFailure::Abrupt(PendingException {
+                realm,
+                payload: PendingExceptionPayload::ThrownValue(value),
+                origin,
+            }))
+        }
+        DeferredNamespaceEvaluationFailure::Fault(fault) => {
+            Err(NativeFailure::Execution(fault.into()))
+        }
+    }
+}
+
+/// Runs the deferred-namespace evaluation trigger for one internal-method
+/// access when `object` is a namespace whose `[[Deferred]]` is still true.
+pub(super) fn ensure_deferred_namespace_access(
+    runtime: &mut Runtime,
+    object: ObjectId,
+    key: &PropertyKey,
+    realm: RealmId,
+    origin: JsStackFrame,
+) -> Result<(), NativeFailure> {
+    if !runtime.module_namespace_is_deferred(object) {
+        return Ok(());
+    }
+    match runtime.ensure_deferred_namespace_evaluation(object, Some(key)) {
+        Ok(()) => Ok(()),
+        Err(failure) => Err(deferred_namespace_evaluation_abrupt(
+            realm, origin, failure,
+        )?),
+    }
+}
+
 pub(super) fn proxy_aware_is_array(
     runtime: &Runtime,
     value: StoredValue,
@@ -614,6 +685,22 @@ pub(super) fn begin_internal_get_own_property(
             execution_budget,
         );
     }
+    if let HeapReference::Object(object) = reference
+        && runtime.module_namespace_is_deferred(object)
+    {
+        ensure_deferred_namespace_access(
+            runtime,
+            object,
+            &key,
+            realm,
+            origin.clone(),
+        )?;
+    }
+    if let HeapReference::Object(object) = reference
+        && runtime.module_namespace_export_is_uninitialized(object, &key)?
+    {
+        return Err(namespace_uninitialized_error(realm, origin)?);
+    }
     let Some(own) = heap_own_property(runtime, reference, &key)? else {
         return Ok(NativeDispatch::Immediate(StoredValue::Undefined));
     };
@@ -909,6 +996,42 @@ pub(super) fn begin_internal_define_own_property(
                     );
                 }
             }
+        }
+        if let HeapReference::Object(object) = proxy
+            && runtime.module_namespace_is_deferred(object)
+        {
+            // ECMA-262 10.4.6.4 [[DefineOwnProperty]] resolves the exports
+            // list through [[GetOwnProperty]], triggering deferred evaluation.
+            ensure_deferred_namespace_access(
+                runtime,
+                object,
+                &key,
+                realm,
+                origin.clone(),
+            )?;
+        }
+        if let HeapReference::Object(object) = proxy
+            && let Some(allowed) = runtime.module_namespace_define_export(
+                object,
+                &key,
+                definition.requested_value().is_some(),
+                definition.requested_writable(),
+                definition.requested_enumerable(),
+                definition.requested_configurable(),
+            )?
+        {
+            return match result {
+                DefinePropertyResult::Boolean => {
+                    Ok(NativeDispatch::Immediate(StoredValue::Boolean(allowed)))
+                }
+                DefinePropertyResult::Target => {
+                    if allowed {
+                        Ok(NativeDispatch::Immediate(base))
+                    } else {
+                        proxy_abrupt(realm, origin, "namespace property definition was rejected")
+                    }
+                }
+            };
         }
         if is_array_length_target(runtime, &base, &key)?
             && let Some(value) = definition.requested_value()
@@ -1259,6 +1382,20 @@ pub(super) fn begin_internal_own_keys(
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     let Some(proxy_state) = runtime.proxy_state(proxy)?.copied() else {
+        if let HeapReference::Object(object) = proxy
+            && runtime.module_namespace_is_deferred(object)
+        {
+            // ECMA-262 10.4.6.6 [[OwnPropertyKeys]] step 1: the exports list
+            // triggers deferred evaluation for every key kind.
+            match runtime.ensure_deferred_namespace_evaluation(object, None) {
+                Ok(()) => {}
+                Err(failure) => {
+                    return Err(deferred_namespace_evaluation_abrupt(
+                        realm, origin, failure,
+                    )?);
+                }
+            }
+        }
         let keys = ordinary_own_keys(runtime, proxy, execution_budget)?;
         return Ok(NativeDispatch::Immediate(materialize_key_list(
             runtime, realm, &keys,
@@ -2153,6 +2290,19 @@ pub(super) fn begin_internal_has(
             );
         }
         if let HeapReference::Object(object) = current
+            && runtime.module_namespace_is_deferred(object)
+        {
+            // ECMA-262 10.4.6.5 [[HasProperty]] step 2: the exports list
+            // triggers deferred evaluation for string keys (except "then").
+            ensure_deferred_namespace_access(
+                runtime,
+                object,
+                &key,
+                realm,
+                origin.clone(),
+            )?;
+        }
+        if let HeapReference::Object(object) = current
             && let TypedArrayOwnProperty::IntegerIndexed(property) =
                 runtime.typed_array_own_property(object, &key)?
         {
@@ -2200,6 +2350,19 @@ pub(super) fn begin_internal_delete(
             origin,
             execution_budget,
         );
+    }
+    if let HeapReference::Object(object) = reference
+        && runtime.module_namespace_is_deferred(object)
+    {
+        // ECMA-262 10.4.6.7 [[Delete]] step 2: the exports list triggers
+        // deferred evaluation for string keys (except "then").
+        ensure_deferred_namespace_access(
+            runtime,
+            object,
+            &key,
+            realm,
+            origin.clone(),
+        )?;
     }
     let target = proxy_reference_value(reference);
     let result = match delete_static_property(runtime, &target, &key)? {
@@ -3004,6 +3167,24 @@ pub(super) fn begin_internal_get(
                 origin,
                 execution_budget,
             );
+        }
+        if let HeapReference::Object(object) = current
+            && runtime.module_namespace_is_deferred(object)
+        {
+            // ECMA-262 10.4.6.2 [[Get]] step 2: GetModuleExportsList triggers
+            // deferred evaluation for string keys (except "then").
+            ensure_deferred_namespace_access(
+                runtime,
+                object,
+                &key,
+                realm,
+                origin.clone(),
+            )?;
+        }
+        if let HeapReference::Object(object) = current
+            && runtime.module_namespace_export_is_uninitialized(object, &key)?
+        {
+            return Err(namespace_uninitialized_error(realm, origin)?);
         }
         match heap_own_property(runtime, current, &key)? {
             Some(OwnProperty::Data { value, .. }) => {

@@ -81,6 +81,7 @@ define_opcode_tables! {
         RegExp => ("regexp", 1, 2, 1, None),
         GetSuper => ("get_super", 1, 1, 1, None),
         Import => ("import", 1, 2, 1, None),
+        ImportDefer => ("import_defer", 1, 2, 1, None),
         GetVarUndef => ("get_var_undef", 3, 0, 1, VarRef),
         GetVar => ("get_var", 3, 0, 1, VarRef),
         PutVar => ("put_var", 3, 1, 0, VarRef),
@@ -302,5 +303,8 @@ define_opcode_tables! {
         // a proper tail transfer.
         TailEval => ("tail_eval", 5, 1, 0, NPopU16),
         TailApplyEval => ("tail_apply_eval", 3, 2, 0, U16),
+        // Appended rather than inserted at upstream's `import` adjacency so
+        // every pre-existing opcode encoding keeps its byte value.
+        ImportMeta => ("import_meta", 1, 0, 1, None),
     }
 }

@@ -729,6 +729,10 @@ impl Context<'_> {
                         message: "root function requires an external parent environment",
                     });
                 }
+                quickjs_bytecode::CompilerClosureSource::Module { .. } => {
+                    // Module cells are materialized by the runtime linker; root
+                    // admission of a Module authority is not yet supported.
+                }
             }
         }
 
@@ -794,6 +798,7 @@ impl Context<'_> {
             &authority,
             &templates,
             external_environment,
+            None,
         ) {
             Ok(environment) => environment,
             Err(error) => {
@@ -1019,5 +1024,256 @@ impl Context<'_> {
             false,
             Some(external_environment),
         )
+    }
+
+    // ---- Module API ----
+
+    /// Returns an undefined `JsValue` rooted in this context's release mailbox.
+    #[must_use]
+    pub fn undefined_value(&self) -> JsValue {
+        JsValue::primitive(&self.runtime.mailbox, PrimitiveValue::Undefined)
+    }
+
+    /// Registers a module record in this context's realm.
+    pub fn register_module(
+        &mut self,
+        key: super::ModuleKey,
+        syntax_record: quickjs_frontend::ModuleSyntaxRecord,
+        authority: Arc<VerifiedBytecode>,
+    ) -> Result<(), super::ModuleError> {
+        let record = super::modules::SourceTextModuleRecord::new(
+            self.realm,
+            key.clone(),
+            syntax_record,
+            authority,
+        );
+        let id = self
+            .runtime
+            .modules
+            .try_insert(record)
+            .map_err(|_| super::ModuleError::link("module allocation failed"))?;
+        let realm_state = self
+            .runtime
+            .realms
+            .get_mut(self.realm)
+            .ok_or_else(|| super::ModuleError::link("realm disappeared"))?;
+        realm_state.module_registry.insert(key, id);
+        Ok(())
+    }
+
+    /// Records a host resolution edge from `referrer` to `dependency` for the
+    /// raw import `specifier` text.
+    ///
+    /// This is the host-driven half of ECMA-262 `HostResolveImportedModule`:
+    /// resolution is per (referrer, specifier), not per specifier text, so two
+    /// modules importing the same specifier text may resolve to different
+    /// records, and one record may be the target of many specifier texts.
+    /// Both modules must already be registered through
+    /// [`Self::register_module`]; `specifier` is stored exactly as passed (the
+    /// facade passes the raw specifier text from the syntax record).
+    pub fn register_module_dependency(
+        &mut self,
+        referrer: &super::ModuleKey,
+        specifier: &str,
+        dependency: &super::ModuleKey,
+    ) -> Result<(), super::ModuleError> {
+        let realm_state = self
+            .runtime
+            .realms
+            .get(self.realm)
+            .ok_or_else(|| super::ModuleError::link("realm disappeared"))?;
+        let referrer_id = realm_state
+            .module_registry
+            .get(referrer)
+            .copied()
+            .ok_or_else(|| {
+                super::ModuleError::link(format!("referrer module '{referrer}' is not registered"))
+            })?;
+        let dependency_id = realm_state
+            .module_registry
+            .get(dependency)
+            .copied()
+            .ok_or_else(|| {
+                super::ModuleError::link(format!(
+                    "dependency module '{dependency}' is not registered"
+                ))
+            })?;
+        let record = self
+            .runtime
+            .modules
+            .get_mut(referrer_id)
+            .ok_or_else(|| super::ModuleError::link("referrer record disappeared"))?;
+        record
+            .resolved_dependencies
+            .insert(specifier.to_owned(), dependency_id);
+        Ok(())
+    }
+
+    /// Links a module graph starting from the given root key.
+    pub fn link_module(
+        &mut self,
+        root: &super::ModuleKey,
+    ) -> Result<(), super::ModuleError> {
+        let id = self
+            .runtime
+            .realms
+            .get(self.realm)
+            .and_then(|state| state.module_registry.get(root).copied())
+            .ok_or_else(|| super::ModuleError::link("module is not registered"))?;
+        super::modules::link_module(self.runtime, self.realm, id)
+    }
+
+    /// Evaluates a linked module graph starting from the given root key.
+    pub fn evaluate_module(
+        &mut self,
+        root: &super::ModuleKey,
+        limits: ExecutionLimits,
+    ) -> Result<(), super::ModuleError> {
+        let id = self
+            .runtime
+            .realms
+            .get(self.realm)
+            .and_then(|state| state.module_registry.get(root).copied())
+            .ok_or_else(|| super::ModuleError::link("module is not registered"))?;
+        super::modules::evaluate_module(self.runtime, self.realm, id, limits, None)
+    }
+
+    /// Evaluates a linked module graph with a dynamic-function compiler
+    /// available for `eval`/`Function` created during module execution.
+    pub fn evaluate_module_with_dynamic_function_compiler(
+        &mut self,
+        root: &super::ModuleKey,
+        limits: ExecutionLimits,
+        compiler: &Arc<dyn OrdinaryDynamicFunctionCompiler>,
+    ) -> Result<(), super::ModuleError> {
+        let id = self
+            .runtime
+            .realms
+            .get(self.realm)
+            .and_then(|state| state.module_registry.get(root).copied())
+            .ok_or_else(|| super::ModuleError::link("module is not registered"))?;
+        super::modules::evaluate_module(self.runtime, self.realm, id, limits, Some(compiler))
+    }
+
+    // ---- Dynamic import host-load boundary ----
+
+    /// Removes the oldest parked dynamic `import()` load request, if any.
+    ///
+    /// The host resolves [`PendingDynamicImport::specifier`] (relative to
+    /// [`PendingDynamicImport::referrer`] when present), loads and compiles
+    /// the module graph, registers every record through
+    /// [`Self::register_module`], and then settles the import through
+    /// [`Self::complete_dynamic_import`] or [`Self::reject_dynamic_import`].
+    pub fn take_pending_dynamic_import(&mut self) -> Option<super::PendingDynamicImport> {
+        self.runtime.take_pending_dynamic_import()
+    }
+
+    /// Returns the number of parked dynamic `import()` load requests.
+    #[must_use]
+    pub fn pending_dynamic_import_count(&self) -> usize {
+        self.runtime.pending_dynamic_import_count()
+    }
+
+    /// Returns whether a module record is registered under `key` in this
+    /// context's realm. A registered module must not be registered again;
+    /// completing a dynamic import against it reuses the existing record
+    /// (link and evaluation are idempotent per ECMA-262).
+    #[must_use]
+    pub fn has_module(&self, key: &super::ModuleKey) -> bool {
+        self.runtime.registered_module(self.realm, key).is_some()
+    }
+
+    /// Returns the recorded evaluation error of the module registered under
+    /// `key` in this context's realm, if its evaluation failed (ECMA-262
+    /// [[EvaluationError]]).
+    ///
+    /// For a graph with top-level await the failure settles asynchronously:
+    /// [`Self::evaluate_module`] returns once evaluation *starts*, and the
+    /// rejection continuation records the error while host jobs drain (see
+    /// [`Self::drain_host_jobs`]).
+    #[must_use]
+    pub fn module_evaluation_error(&self, key: &super::ModuleKey) -> Option<super::ModuleError> {
+        let module = self.runtime.registered_module(self.realm, key)?;
+        self.runtime.modules.get(module)?.evaluation_error.clone()
+    }
+
+    /// Completes a parked dynamic `import()` (`FinishDynamicImport`).
+    ///
+    /// The host must have registered the loaded graph under `root`. The graph
+    /// is linked and evaluated synchronously at completion time; the import
+    /// Promise then fulfills with the module namespace exotic object, or
+    /// rejects with the link error (`SyntaxError`) or the evaluation
+    /// exception. Promise reactions queue as ordinary jobs and run at the
+    /// next host-job checkpoint (see [`Self::drain_host_jobs`]).
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`ExecutionError`] only for internal runtime failures;
+    /// spec-level load, link, and evaluation failures settle the Promise.
+    pub fn complete_dynamic_import(
+        &mut self,
+        import: super::PendingDynamicImport,
+        root: &super::ModuleKey,
+        limits: ExecutionLimits,
+        compiler: Option<&Arc<dyn OrdinaryDynamicFunctionCompiler>>,
+    ) -> Result<(), crate::ExecutionError> {
+        crate::vm::complete_dynamic_import_load(self.runtime, import, root, limits, compiler)
+    }
+
+    /// Rejects a parked dynamic `import()` with a `TypeError` carrying the
+    /// host's load or resolution failure message. Use this when the module
+    /// graph could not be produced at all (resolution miss, IO error, parse
+    /// or compile failure); the failure never throws synchronously.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`ExecutionError`] only for internal runtime failures.
+    pub fn reject_dynamic_import(
+        &mut self,
+        import: super::PendingDynamicImport,
+        message: &str,
+    ) -> Result<(), crate::ExecutionError> {
+        crate::vm::reject_dynamic_import_load(self.runtime, import, message)
+    }
+
+    /// Rejects a parked dynamic `import()` whose requested module failed to
+    /// parse or compile with a `SyntaxError` carrying the message (ECMA-262
+    /// `FinishDynamicImport` onRejected for a resolution-phase failure).
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`ExecutionError`] only for internal runtime failures.
+    pub fn reject_dynamic_import_syntax(
+        &mut self,
+        import: super::PendingDynamicImport,
+        message: &str,
+    ) -> Result<(), crate::ExecutionError> {
+        crate::vm::reject_dynamic_import_load_kind(
+            self.runtime,
+            import,
+            crate::ExceptionKind::SyntaxError,
+            message,
+        )
+    }
+
+    /// Drains queued host jobs (Promise reactions, finalization cleanup,
+    /// ready `Atomics.waitAsync` completions) to quiescence.
+    ///
+    /// Host-turn checkpoint for drivers that settle parked dynamic `import()`
+    /// loads outside an interpreter call: run this after
+    /// [`Self::complete_dynamic_import`] / [`Self::reject_dynamic_import`] so
+    /// the queued reactions (which may park further dynamic imports) execute.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`ExecutionError`] when a job fails with an uncatchable
+    /// host/runtime failure; ordinary JavaScript exceptions inside jobs are
+    /// delivered to their Promise reactions and do not surface here.
+    pub fn drain_host_jobs(
+        &mut self,
+        limits: ExecutionLimits,
+        compiler: Option<&Arc<dyn OrdinaryDynamicFunctionCompiler>>,
+    ) -> Result<(), crate::ExecutionError> {
+        crate::vm::drain_host_jobs_with_limits(self.runtime, compiler, limits)
     }
 }

@@ -58,8 +58,9 @@ mod validation;
 
 pub use artifacts::{
     CompiledClosureSource, CompiledClosureVariable, CompiledConstant, CompiledFunction,
-    CompiledFunctionConstant, CompiledFunctionTree, CompiledLeafFunction, CompiledRealmGlobal,
-    CompiledRealmGlobalSource, LocalSlot, LoweredLocal, RealmGlobalId, SourceInstruction,
+    CompiledFunctionConstant, CompiledFunctionTree, CompiledLeafFunction, CompiledModuleBinding,
+    CompiledModuleBindingSource, CompiledRealmGlobal, CompiledRealmGlobalSource, LocalSlot,
+    LoweredLocal, ModuleBindingId, RealmGlobalId, SourceInstruction,
 };
 use atoms::{
     CompiledMetadataAtomKey, compiled_static_property_key, compiler_identifier_string,
@@ -125,19 +126,21 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             &functions,
             graph_limits,
         )?);
+        let mut graph_input = UnverifiedCompilerBytecodeGraph::new(
+            Arc::clone(&function_graph),
+            functions
+                .iter()
+                .map(|function| function.metadata.clone())
+                .collect::<Vec<_>>()
+                .into(),
+        );
+        if let Some(record) =
+            self.build_module_declaration_record(root, &functions, &tree_layout)?
+        {
+            graph_input = graph_input.with_module(Arc::new(record));
+        }
         let verified_bytecode = Arc::new(
-            verify_compiler_bytecode_graph(
-                UnverifiedCompilerBytecodeGraph::new(
-                    Arc::clone(&function_graph),
-                    functions
-                        .iter()
-                        .map(|function| function.metadata.clone())
-                        .collect::<Vec<_>>()
-                        .into(),
-                ),
-                bytecode_limits,
-            )
-            .map_err(|source| {
+            verify_compiler_bytecode_graph(graph_input, bytecode_limits).map_err(|source| {
                 let span = source
                     .function_id()
                     .and_then(|template| usize::try_from(template.get()).ok())
@@ -204,6 +207,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         let seed = FunctionTreeLayoutSeed::new(FunctionTreeLayoutSeedInput {
             plan: &self.planned.plan,
             allow_realm_globals: crate::is_supported_script_root_goal(self.unit.goal())
+                || crate::is_supported_module_goal(self.unit.goal())
                 || direct_eval.is_some(),
             direct_eval,
         })?;
@@ -236,6 +240,27 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 continue;
             }
             let Some(identifier) = &function.id else {
+                let synthetic = self
+                    .planned
+                    .plan
+                    .bindings()
+                    .iter()
+                    .find(|binding| {
+                        binding.policy().kind() == DeclarationKind::SyntheticDefault
+                            && binding.policy().initialization()
+                                == InitializationPolicy::FunctionAtInstantiation
+                    })
+                    .map(|binding| binding.id());
+                if let Some(synthetic) = synthetic {
+                    let target = function_declarations.get_mut(synthetic.index()).ok_or(
+                        LeafCompilationError::SemanticInvariant {
+                            invariant:
+                                "synthetic default function binding indexes instantiation layout",
+                            span: None,
+                        },
+                    )?;
+                    *target = Some(executable.id());
+                }
                 continue;
             };
             let binding =
@@ -307,6 +332,57 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             abrupt_markers,
             flow,
         )
+    }
+
+    fn build_module_declaration_record(
+        &self,
+        root: ExecutableId,
+        functions: &[CompiledFunction],
+        tree_layout: &FunctionTreeLayout,
+    ) -> Result<Option<quickjs_bytecode::UnverifiedModuleDeclarationRecord>, LeafCompilationError>
+    {
+        if !crate::is_supported_module_goal(self.unit.goal()) {
+            return Ok(None);
+        }
+        let root_function = functions
+            .get(root.index())
+            .ok_or(LeafCompilationError::InvalidExecutable { executable: root })?;
+        let constants = tree_layout.constant_pool(root)?;
+        let mut bindings = Vec::with_capacity(root_function.module_bindings.len());
+        for binding in root_function.module_bindings.iter() {
+            let mut descriptor = quickjs_bytecode::UnverifiedModuleBindingDescriptor::new(
+                binding.atom,
+                u32::from(binding.slot),
+                binding.policy,
+                binding.origin,
+            );
+            if let Some(initializer) = binding.function_initializer {
+                descriptor = descriptor.with_initializer(initializer);
+            }
+            if let Some(import) = binding.import.clone() {
+                descriptor = descriptor.with_import(import);
+            }
+            bindings.push(descriptor);
+        }
+        let mut requests = Vec::with_capacity(self.unit.module_syntax().requests().len());
+        for (index, request) in self.unit.module_syntax().requests().iter().enumerate() {
+            let specifier =
+                constants.metadata_atom_index(CompiledMetadataAtomKey::ModuleRequest(
+                    u32::try_from(index).map_err(|_| LeafCompilationError::CapacityExceeded {
+                        domain: "module request index",
+                    })?,
+                ))?;
+            requests.push(quickjs_bytecode::ModuleRequestDescriptor::new(
+                specifier,
+                request.attributes().is_some(),
+            ));
+        }
+        Ok(Some(
+            quickjs_bytecode::UnverifiedModuleDeclarationRecord::new(
+                bindings.into(),
+                requests.into(),
+            ),
+        ))
     }
 }
 

@@ -6,7 +6,12 @@
 
 #![forbid(unsafe_code)]
 
-use std::{error::Error, fmt, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    error::Error,
+    fmt,
+    sync::Arc,
+};
 
 use quickjs_bytecode::{
     BytecodeGraphVerificationLimits, CompilerBindingKind, CompilerBindingPolicy,
@@ -716,6 +721,811 @@ pub fn evaluate_registered_script(
             )
         })
 }
+
+// ---- Module evaluation ----
+
+/// A module source loaded by the host.
+#[derive(Clone, Debug)]
+pub struct LoadedModuleSource {
+    /// Canonical key for this module within the realm.
+    pub key: quickjs_runtime::ModuleKey,
+    /// Module source text.
+    pub source: String,
+    /// Display name for diagnostics.
+    pub display_name: String,
+}
+
+/// How a requested module's source text is interpreted.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ModuleSourceKind {
+    /// A JavaScript Source Text Module.
+    JavaScript,
+    /// A JSON module: the source is JSON text, parsed to a value at evaluation.
+    Json,
+    /// A text module: the source is a plain string.
+    Text,
+}
+
+/// One static module request decoded from a source module.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ModuleRequest {
+    /// Decoded specifier text.
+    pub specifier: String,
+    /// The requested module kind, selected by the `with { type: ... }` clause.
+    pub kind: ModuleSourceKind,
+}
+
+/// A host-side error loading module source.
+#[derive(Debug)]
+pub struct ModuleSourceError {
+    message: String,
+}
+
+impl ModuleSourceError {
+    /// Creates a load error.
+    #[must_use]
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+impl fmt::Display for ModuleSourceError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "module load error: {}", self.message)
+    }
+}
+
+impl Error for ModuleSourceError {}
+
+/// Host loader for module source text and resolution.
+///
+/// The facade calls `load_module` for each unique specifier it encounters while
+/// gathering the module graph. The returned [`LoadedModuleSource`] provides the
+/// canonical key (for deduplication), source text, and display name.
+pub trait ModuleSourceLoader {
+    /// Loads a module by specifier, resolving relative to the referrer.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ModuleSourceError`] when the module cannot be found or loaded.
+    fn load_module(
+        &mut self,
+        specifier: &str,
+        referrer: Option<&str>,
+    ) -> Result<LoadedModuleSource, ModuleSourceError>;
+}
+
+/// A compiled module entry: syntax record + verified bytecode.
+struct CompiledModule {
+    key: quickjs_runtime::ModuleKey,
+    syntax_record: quickjs_frontend::ModuleSyntaxRecord,
+    authority: Arc<VerifiedBytecode>,
+}
+
+/// Failure of the Module host pipeline.
+#[derive(Debug)]
+pub enum ModuleEvaluationError {
+    /// Host loader failed to resolve or load a module.
+    Loader(ModuleSourceError),
+    /// Parsing, compatibility, or early errors in the root module.
+    Frontend(FrontendError),
+    /// Compilation or verification failure in the root module.
+    Compiler(ScriptCompilerError),
+    /// A requested (non-root) module failed to parse or compile during graph
+    /// resolution (ECMA-262 resolution phase).
+    Resolution(ModuleResolutionError),
+    /// Linking or evaluation failure.
+    Runtime(quickjs_runtime::ModuleError),
+    /// Host-job execution failure while settling parked dynamic `import()`
+    /// loads.
+    Execution(ExecutionError),
+}
+
+/// A requested module that was not a valid Source Text Module.
+#[derive(Debug)]
+pub enum ModuleResolutionError {
+    /// Parsing, compatibility, or early errors in the requested module.
+    Frontend(FrontendError),
+    /// Compilation or verification failure in the requested module.
+    Compiler(ScriptCompilerError),
+}
+
+impl fmt::Display for ModuleResolutionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Frontend(error) => error.fmt(formatter),
+            Self::Compiler(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl Error for ModuleResolutionError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Frontend(error) => Some(error),
+            Self::Compiler(error) => Some(error),
+        }
+    }
+}
+
+impl fmt::Display for ModuleEvaluationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Loader(error) => error.fmt(formatter),
+            Self::Frontend(error) => error.fmt(formatter),
+            Self::Compiler(error) => error.fmt(formatter),
+            Self::Resolution(error) => write!(formatter, "module resolution error: {error}"),
+            Self::Runtime(error) => error.fmt(formatter),
+            Self::Execution(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl Error for ModuleEvaluationError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Loader(error) => Some(error),
+            Self::Frontend(error) => Some(error),
+            Self::Compiler(error) => Some(error),
+            Self::Resolution(error) => Some(error),
+            Self::Runtime(error) => Some(error),
+            Self::Execution(error) => Some(error),
+        }
+    }
+}
+
+impl From<ModuleSourceError> for ModuleEvaluationError {
+    fn from(error: ModuleSourceError) -> Self {
+        Self::Loader(error)
+    }
+}
+
+impl From<FrontendError> for ModuleEvaluationError {
+    fn from(error: FrontendError) -> Self {
+        Self::Frontend(error)
+    }
+}
+
+impl From<ScriptCompilerError> for ModuleEvaluationError {
+    fn from(error: ScriptCompilerError) -> Self {
+        Self::Compiler(error)
+    }
+}
+
+impl From<quickjs_runtime::ModuleError> for ModuleEvaluationError {
+    fn from(error: quickjs_runtime::ModuleError) -> Self {
+        Self::Runtime(error)
+    }
+}
+
+impl From<ExecutionError> for ModuleEvaluationError {
+    fn from(error: ExecutionError) -> Self {
+        Self::Execution(error)
+    }
+}
+
+fn compile_module_source(
+    source_text: &str,
+    source_name: &str,
+    limits: ScriptLimits,
+    key: quickjs_runtime::ModuleKey,
+) -> Result<CompiledModule, ModuleEvaluationError> {
+    let source_name: Arc<str> = Arc::from(source_name);
+    let compiled = with_parsed_program(
+        source_text,
+        FrontendOptions::for_goal(CompilationGoal::Module).with_limits(limits.frontend),
+        move |unit| {
+            let syntax_record = unit.module_syntax().clone();
+            let compiler = CompilationContext::new_with_source_name(unit, source_name)
+                .map_err(ScriptCompilerError::Planning)?;
+            let tree = compiler
+                .compile_module_with_all_limits(
+                    limits.bytecode,
+                    limits.function_graph,
+                    limits.final_graph,
+                )
+                .map_err(ScriptCompilerError::Lowering)?;
+            Ok::<_, ScriptCompilerError>((syntax_record, tree))
+        },
+    )
+    .map_err(ModuleEvaluationError::Frontend)?
+    .map_err(ModuleEvaluationError::Compiler)?;
+
+    let (syntax_record, tree) = compiled;
+    let authority = Arc::new(tree.verified_bytecode().clone());
+
+    // Admit `type: "json"` and `type: "text"` attributes (handled by the graph
+    // pipeline as synthetic modules) and empty clauses; reject every other
+    // attribute.
+    for request in syntax_record.requests() {
+        if let Some(attributes) = request.attributes() {
+            for entry in attributes.entries() {
+                let supported = entry.key().equals_utf8("type")
+                    && (entry.value().equals_utf8("json") || entry.value().equals_utf8("text"));
+                if !supported {
+                    return Err(ModuleEvaluationError::Loader(ModuleSourceError::new(format!(
+                        "unsupported import attribute (request '{}')",
+                        decode_request_specifier(request),
+                    ))));
+                }
+            }
+        }
+    }
+
+    Ok(CompiledModule {
+        key,
+        syntax_record,
+        authority,
+    })
+}
+
+/// Decodes a static module request's specifier to a UTF-8 `String`.
+fn decode_request_specifier(request: &quickjs_frontend::StaticModuleRequest) -> String {
+    request
+        .specifier()
+        .code_units()
+        .iter()
+        .copied()
+        .map(u32::from)
+        .filter_map(char::from_u32)
+        .collect()
+}
+
+/// Selects the module kind a request's `with { type: ... }` clause requests.
+///
+/// An absent clause or an unrecognized `type` falls back to JavaScript; the
+/// unrecognized case is rejected later by [`compile_module_source`].
+fn request_module_kind(
+    attributes: Option<&quickjs_frontend::ImportAttributes>,
+) -> ModuleSourceKind {
+    let Some(attributes) = attributes else {
+        return ModuleSourceKind::JavaScript;
+    };
+    for entry in attributes.entries() {
+        if entry.key().equals_utf8("type") {
+            if entry.value().equals_utf8("json") {
+                return ModuleSourceKind::Json;
+            }
+            if entry.value().equals_utf8("text") {
+                return ModuleSourceKind::Text;
+            }
+        }
+    }
+    ModuleSourceKind::JavaScript
+}
+
+/// Selects the module kind a dynamic `import()`'s `options.with` clause
+/// requests.
+fn import_attributes_kind(attributes: &[(String, String)]) -> ModuleSourceKind {
+    for (key, value) in attributes {
+        if key == "type" {
+            if value == "json" {
+                return ModuleSourceKind::Json;
+            }
+            if value == "text" {
+                return ModuleSourceKind::Text;
+            }
+        }
+    }
+    ModuleSourceKind::JavaScript
+}
+
+/// Escapes `value` as the body of a single-quoted JavaScript string literal.
+fn js_single_quoted(value: &str) -> String {
+    let mut out = String::with_capacity(value.len().saturating_add(2));
+    out.push('\'');
+    for character in value.chars() {
+        match character {
+            '\\' => out.push_str("\\\\"),
+            '\'' => out.push_str("\\'"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{2028}' => out.push_str("\\u2028"),
+            '\u{2029}' => out.push_str("\\u2029"),
+            character if (character as u32) < 0x20 => {
+                out.push_str(&format!("\\u{:04x}", character as u32));
+            }
+            character => out.push(character),
+        }
+    }
+    out.push('\'');
+    out
+}
+
+/// Produces the JavaScript source text a non-JavaScript module evaluates as.
+///
+/// A JSON module evaluates as `JSON.parse` of its source (spec-correct JSON
+/// semantics, including plain-object creation and no `__proto__` setter); a
+/// text module evaluates as the raw string. The JSON text is validated here so
+/// an invalid JSON module reports a resolution-phase `SyntaxError` (the JSON is
+/// parsed during instantiation, not evaluation).
+fn synthetic_module_source(
+    kind: ModuleSourceKind,
+    source: &str,
+) -> Result<String, ModuleEvaluationError> {
+    match kind {
+        ModuleSourceKind::JavaScript => Ok(source.to_owned()),
+        ModuleSourceKind::Json => {
+            serde_json::from_str::<serde_json::Value>(source).map_err(|error| {
+                ModuleEvaluationError::Loader(ModuleSourceError::new(format!(
+                    "invalid JSON module: {error}"
+                )))
+            })?;
+            Ok(format!(
+                "export default JSON.parse({});",
+                js_single_quoted(source)
+            ))
+        }
+        ModuleSourceKind::Text => Ok(format!("export default {};", js_single_quoted(source))),
+    }
+}
+
+/// Distinguishes a module's realm key by its source kind.
+///
+/// A file requested both as JavaScript and as JSON/text is two distinct module
+/// records (different kinds), so their keys must not collide. The suffix uses
+/// a NUL byte, which never appears in a canonical path or `node:` builtin key.
+fn kind_key(key: quickjs_runtime::ModuleKey, kind: ModuleSourceKind) -> quickjs_runtime::ModuleKey {
+    match kind {
+        ModuleSourceKind::JavaScript => key,
+        ModuleSourceKind::Json => {
+            quickjs_runtime::ModuleKey::new(Arc::from(format!("{}\0json", key.as_str())))
+        }
+        ModuleSourceKind::Text => {
+            quickjs_runtime::ModuleKey::new(Arc::from(format!("{}\0text", key.as_str())))
+        }
+    }
+}
+
+/// Parses `source` as a Module goal and returns its static import/re-export
+/// requests in source order, each with the module kind its `with { type: ... }`
+/// clause selects.
+///
+/// This is the request-listing half of module compilation: asynchronous hosts
+/// use it to resolve and preload a static graph before handing it to
+/// [`evaluate_preloaded_module_graph`]. Import attributes are not rejected
+/// here; compilation inside the evaluation entry points rejects unsupported
+/// ones, so both the loader-driven and preloaded paths surface the same error.
+///
+/// # Errors
+///
+/// Returns the [`ModuleEvaluationError::Frontend`] parse failure.
+pub fn module_import_requests(
+    source: &str,
+    limits: ScriptLimits,
+) -> Result<Vec<ModuleRequest>, ModuleEvaluationError> {
+    with_parsed_program(
+        source,
+        FrontendOptions::for_goal(CompilationGoal::Module).with_limits(limits.frontend),
+        |unit| {
+            unit.module_syntax()
+                .requests()
+                .iter()
+                .map(|request| ModuleRequest {
+                    specifier: decode_request_specifier(request),
+                    kind: request_module_kind(request.attributes()),
+                })
+                .collect()
+        },
+    )
+    .map_err(ModuleEvaluationError::Frontend)
+}
+
+/// One preloaded static-graph edge: the `specifier` text as requested from
+/// the module registered under `referrer`, plus the loaded resolution target.
+///
+/// Asynchronous hosts gather these (resolving and reading sources off the
+/// engine thread) and pass them to [`evaluate_preloaded_module_graph`], which
+/// reproduces [`evaluate_module`]'s compile/register/link/evaluate pipeline
+/// without a synchronous loader.
+#[derive(Clone, Debug)]
+pub struct PreloadedModuleEdge {
+    /// Canonical key of the referrer module.
+    pub referrer: String,
+    /// Specifier text as written in the referrer.
+    pub specifier: String,
+    /// Loaded resolution target.
+    pub source: LoadedModuleSource,
+}
+
+/// Parses, compiles, links, and evaluates an ECMAScript Module graph.
+///
+/// The root source is compiled as a Module goal. The `loader` provides source
+/// text for each static import/re-export specifier encountered. All modules in
+/// the graph are registered, linked, and evaluated synchronously.
+///
+/// Returns `undefined` (module completion is discarded per spec). To observe
+/// module state, use `context.module_namespace` or evaluate a follow-up Script.
+///
+/// For a graph with top-level await this function returns once evaluation
+/// *starts*: the module's asynchronous execution completes (or rejects) while
+/// [`pump_dynamic_imports`]/[`drain_dynamic_import_jobs`] run its Promise
+/// continuations. Hosts must query [`module_evaluation_error`] after draining
+/// to learn the outcome of the asynchronous evaluation; a rejection recorded
+/// there is the graph's evaluation failure.
+///
+/// # Errors
+///
+/// Returns the exact failing frontend, compiler, loader, linking, or
+/// evaluation stage.
+pub fn evaluate_module(
+    context: &mut Context<'_>,
+    root_source: &str,
+    root_name: &str,
+    loader: &mut dyn ModuleSourceLoader,
+    limits: ScriptLimits,
+) -> Result<JsValue, ModuleEvaluationError> {
+    // Gather the static graph through the synchronous loader, then run the
+    // shared preloaded-graph pipeline so both entry points behave identically.
+    let mut edges: Vec<PreloadedModuleEdge> = Vec::new();
+    let mut queue: Vec<(String, String)> = vec![(root_name.to_owned(), root_source.to_owned())];
+    let mut seen: HashSet<String> = HashSet::new();
+    seen.insert(root_name.to_owned());
+    let mut first = true;
+    while let Some((referrer, source)) = queue.pop() {
+        // A parse failure in the root is a parse-phase error; the same failure
+        // in a requested module is a resolution-phase error.
+        let requests = module_import_requests(&source, limits).map_err(|error| {
+            if first {
+                error
+            } else {
+                resolution_failure(error)
+            }
+        })?;
+        first = false;
+        for request in requests {
+            let loaded = loader.load_module(&request.specifier, Some(&referrer))?;
+            // Only JavaScript sources are parsed for their own further
+            // requests; a JSON/text module is a leaf with no imports.
+            if request.kind == ModuleSourceKind::JavaScript
+                && seen.insert(loaded.key.as_str().to_owned())
+            {
+                queue.push((loaded.key.as_str().to_owned(), loaded.source.clone()));
+            }
+            edges.push(PreloadedModuleEdge {
+                referrer: referrer.clone(),
+                specifier: request.specifier,
+                source: loaded,
+            });
+        }
+    }
+    evaluate_preloaded_module_graph(context, root_source, root_name, edges, limits)
+}
+
+/// Converts a requested module's parse/compile failure into the resolution-phase
+/// error classification, preserving loader/link/evaluation failures unchanged.
+fn resolution_failure(error: ModuleEvaluationError) -> ModuleEvaluationError {
+    match error {
+        ModuleEvaluationError::Frontend(error) => {
+            ModuleEvaluationError::Resolution(ModuleResolutionError::Frontend(error))
+        }
+        ModuleEvaluationError::Compiler(error) => {
+            ModuleEvaluationError::Resolution(ModuleResolutionError::Compiler(error))
+        }
+        other => other,
+    }
+}
+
+/// Compiles, registers, links, and evaluates a preloaded static module graph.
+///
+/// Equivalent to [`evaluate_module`], except dependencies come from `edges`
+/// (one per (referrer, specifier) request occurrence, gathered by the host —
+/// e.g. via [`module_import_requests`]) instead of a synchronous loader. The
+/// compile → register → edge → link → evaluate order is identical.
+///
+/// # Errors
+///
+/// Returns [`ModuleEvaluationError::Loader`] when a request has no matching
+/// preloaded edge, and the same frontend, compiler, linking, and evaluation
+/// errors as [`evaluate_module`].
+pub fn evaluate_preloaded_module_graph(
+    context: &mut Context<'_>,
+    root_source: &str,
+    root_name: &str,
+    edges: Vec<PreloadedModuleEdge>,
+    limits: ScriptLimits,
+) -> Result<JsValue, ModuleEvaluationError> {
+    let edge_map: HashMap<(String, String), LoadedModuleSource> = edges
+        .into_iter()
+        .map(|edge| ((edge.referrer, edge.specifier), edge.source))
+        .collect();
+
+    // Compile root
+    let root_key = quickjs_runtime::ModuleKey::new(Arc::from(root_name));
+    let root_compiled = compile_module_source(root_source, root_name, limits, root_key.clone())?;
+
+    // Register root
+    context.register_module(
+        root_compiled.key.clone(),
+        root_compiled.syntax_record.clone(),
+        root_compiled.authority.clone(),
+    )?;
+
+    // BFS: register every preloaded dependency
+    let mut queue: Vec<(quickjs_runtime::ModuleKey, quickjs_frontend::ModuleSyntaxRecord)> =
+        vec![(root_compiled.key.clone(), root_compiled.syntax_record.clone())];
+    let mut seen: HashSet<String> = HashSet::new();
+    seen.insert(root_compiled.key.as_str().to_owned());
+
+    while let Some((referrer_key, syntax)) = queue.pop() {
+        for request in syntax.requests() {
+            let specifier = decode_request_specifier(request);
+            let loaded = edge_map
+                .get(&(referrer_key.as_str().to_owned(), specifier.clone()))
+                .ok_or_else(|| {
+                    ModuleSourceError::new(format!(
+                        "no preloaded module source for request '{specifier}' from '{}'",
+                        referrer_key.as_str()
+                    ))
+                })?;
+            let kind = request_module_kind(request.attributes());
+            let key = kind_key(loaded.key.clone(), kind);
+            if !seen.insert(key.as_str().to_owned()) {
+                // Cycle/diamond edge to an already-registered record: record
+                // the (referrer, specifier) edge and skip re-registration.
+                context.register_module_dependency(&referrer_key, &specifier, &key)?;
+                continue;
+            }
+            let source = synthetic_module_source(kind, &loaded.source)?;
+            let compiled = compile_module_source(
+                &source,
+                &loaded.display_name,
+                limits,
+                key.clone(),
+            )
+            .map_err(resolution_failure)?;
+            context.register_module(
+                compiled.key.clone(),
+                compiled.syntax_record.clone(),
+                compiled.authority.clone(),
+            )?;
+            // HostResolveImportedModule: record the (referrer, specifier)
+            // edge now that both records are registered.
+            context.register_module_dependency(&referrer_key, &specifier, &key)?;
+            queue.push((compiled.key, compiled.syntax_record));
+        }
+    }
+
+    // Link
+    context.link_module(&root_compiled.key)?;
+
+    // Evaluate (with a dynamic-function compiler so `eval`/`Function` work
+    // inside module code).
+    let dynamic_service: Arc<dyn DynamicFunctionCompiler> = Arc::new(
+        OxcDynamicFunctionCompiler::new(limits.dynamic_function_limits()),
+    );
+    context.evaluate_module_with_dynamic_function_compiler(
+        &root_compiled.key,
+        limits.execution,
+        &dynamic_service,
+    )?;
+
+    Ok(context.undefined_value())
+}
+
+/// Returns the recorded evaluation error (ECMA-262 [[EvaluationError]]) of
+/// the module registered under `root_name` in `context`'s realm, if its
+/// evaluation failed.
+///
+/// Synchronous evaluation failures are returned by [`evaluate_module`]
+/// directly; this accessor exists for graphs with top-level await, whose
+/// asynchronous execution settles while [`pump_dynamic_imports`] or
+/// [`drain_dynamic_import_jobs`] run the module's Promise continuations. A
+/// `Some` result after draining is the graph's evaluation failure, classified
+/// exactly like a synchronous one ([`ModuleEvaluationError::Runtime`]).
+#[must_use]
+pub fn module_evaluation_error(
+    context: &Context<'_>,
+    root_name: &str,
+) -> Option<ModuleEvaluationError> {
+    let key = quickjs_runtime::ModuleKey::new(Arc::from(root_name));
+    context
+        .module_evaluation_error(&key)
+        .map(ModuleEvaluationError::Runtime)
+}
+
+/// Registers and compiles the graph below an already-loaded dynamic `import()`
+/// root, returning the root key.
+///
+/// Modules already registered in the realm (static graph, earlier imports)
+/// are reused rather than re-registered, preserving registry dedup and
+/// single-evaluation semantics.
+fn gather_dynamic_import_graph(
+    context: &mut Context<'_>,
+    loader: &mut dyn ModuleSourceLoader,
+    import: &quickjs_runtime::PendingDynamicImport,
+    root_source: &LoadedModuleSource,
+    limits: ScriptLimits,
+) -> Result<quickjs_runtime::ModuleKey, ModuleEvaluationError> {
+    let specifier = import.specifier();
+    let kind = import_attributes_kind(&import.attributes());
+    let root_key = kind_key(root_source.key.clone(), kind);
+    if context.has_module(&root_key) {
+        // The graph root is already registered; record the referring module's
+        // (referrer, specifier) edge and reuse the existing record.
+        if let Some(referrer_key) = import.referrer() {
+            context.register_module_dependency(referrer_key, &specifier, &root_key)?;
+        }
+        return Ok(root_key);
+    }
+
+    let source = synthetic_module_source(kind, &root_source.source)?;
+    let root_compiled =
+        compile_module_source(&source, &root_source.display_name, limits, root_key.clone())?;
+    context.register_module(
+        root_compiled.key.clone(),
+        root_compiled.syntax_record.clone(),
+        root_compiled.authority.clone(),
+    )?;
+    // A module-level import() records the (referrer, specifier) edge on the
+    // referring module; a script-level import() has no referrer record, so no
+    // edge is needed.
+    if let Some(referrer_key) = import.referrer() {
+        context.register_module_dependency(referrer_key, &specifier, &root_key)?;
+    }
+
+    // BFS: gather all dependencies, as in `evaluate_module`.
+    let mut queue: Vec<(quickjs_runtime::ModuleKey, quickjs_frontend::ModuleSyntaxRecord)> =
+        vec![(root_compiled.key.clone(), root_compiled.syntax_record.clone())];
+    let mut seen: HashSet<String> = HashSet::new();
+    seen.insert(root_compiled.key.as_str().to_owned());
+
+    while let Some((referrer_key, syntax)) = queue.pop() {
+        for request in syntax.requests() {
+            let specifier = decode_request_specifier(request);
+            let loaded = loader.load_module(&specifier, Some(referrer_key.as_str()))?;
+            let kind = request_module_kind(request.attributes());
+            let key = kind_key(loaded.key.clone(), kind);
+            if context.has_module(&key) || !seen.insert(key.as_str().to_owned()) {
+                // Cycle/diamond edge to an already-registered record: record
+                // the (referrer, specifier) edge and skip re-registration.
+                context.register_module_dependency(&referrer_key, &specifier, &key)?;
+                continue;
+            }
+            let source = synthetic_module_source(kind, &loaded.source)?;
+            let compiled = compile_module_source(
+                &source,
+                &loaded.display_name,
+                limits,
+                key.clone(),
+            )
+            .map_err(resolution_failure)?;
+            context.register_module(
+                compiled.key.clone(),
+                compiled.syntax_record.clone(),
+                compiled.authority.clone(),
+            )?;
+            // HostResolveImportedModule: record the (referrer, specifier)
+            // edge now that both records are registered.
+            context.register_module_dependency(&referrer_key, &specifier, &key)?;
+            queue.push((compiled.key, compiled.syntax_record));
+        }
+    }
+    Ok(root_key)
+}
+
+/// Drives parked dynamic `import()` loads to quiescence.
+///
+/// Contract: call this after [`evaluate_script`] or [`evaluate_module`] (and
+/// again whenever a pump round may have parked new loads — the loop already
+/// covers reactions and freshly evaluated modules that call `import()`).
+/// Each round drains queued Promise reaction jobs, takes the oldest parked
+/// load from the runtime queue, resolves and loads its graph through
+/// `loader`, registers the compiled records, and completes the import (link
+/// + evaluate + Promise settlement). Load, resolution, and compile failures
+/// reject the import Promise; they never throw out of this function. The
+/// function returns `Ok` once the queue is empty.
+///
+/// Asynchronous hosts can drive the same state machine one parked load at a
+/// time: drain with [`drain_dynamic_import_jobs`], read each pending root
+/// concurrently, then feed it to [`settle_dynamic_import`].
+///
+/// # Errors
+///
+/// Returns a [`ModuleEvaluationError`] only for internal runtime failures
+/// while settling imports or draining jobs.
+pub fn pump_dynamic_imports(
+    context: &mut Context<'_>,
+    loader: &mut dyn ModuleSourceLoader,
+    limits: ScriptLimits,
+) -> Result<(), ModuleEvaluationError> {
+    loop {
+        drain_dynamic_import_jobs(context, limits)?;
+        let Some(import) = context.take_pending_dynamic_import() else {
+            return Ok(());
+        };
+        let specifier = import.specifier();
+        let referrer = import.referrer().map(|key| key.as_str().to_owned());
+        let root = loader.load_module(&specifier, referrer.as_deref());
+        settle_dynamic_import(context, loader, import, root, limits)?;
+    }
+}
+
+/// Drains queued Promise reaction jobs between dynamic `import()` settlement
+/// rounds.
+///
+/// Hosts driving parked loads through [`settle_dynamic_import`] must run this
+/// before taking the next batch of pending imports, exactly as
+/// [`pump_dynamic_imports`] does each iteration: reactions queued by an
+/// earlier settlement (or by a rejection that never parked, such as
+/// unsupported attributes) run first and may themselves park new imports.
+///
+/// # Errors
+///
+/// Returns a [`ModuleEvaluationError`] only for internal runtime failures
+/// while executing jobs.
+pub fn drain_dynamic_import_jobs(
+    context: &mut Context<'_>,
+    limits: ScriptLimits,
+) -> Result<(), ModuleEvaluationError> {
+    let dynamic_service: Arc<dyn DynamicFunctionCompiler> = Arc::new(
+        OxcDynamicFunctionCompiler::new(limits.dynamic_function_limits()),
+    );
+    context.drain_host_jobs(limits.execution, Some(&dynamic_service))?;
+    Ok(())
+}
+
+/// Settles one parked dynamic `import()` whose root source the host has
+/// already loaded (for example read concurrently on an async runtime).
+///
+/// This is the per-import step of [`pump_dynamic_imports`] with the root load
+/// factored out: transitive dependencies of the root are still gathered
+/// synchronously through `loader`, and registry dedup, linking, evaluation,
+/// and Promise settlement match the pump exactly. A failed root load rejects
+/// the import Promise with the load error message.
+///
+/// # Errors
+///
+/// Returns a [`ModuleEvaluationError`] only for internal runtime failures
+/// while settling the import; load, resolution, and compile failures reject
+/// the import Promise instead.
+pub fn settle_dynamic_import(
+    context: &mut Context<'_>,
+    loader: &mut dyn ModuleSourceLoader,
+    import: quickjs_runtime::PendingDynamicImport,
+    root: Result<LoadedModuleSource, ModuleSourceError>,
+    limits: ScriptLimits,
+) -> Result<(), ModuleEvaluationError> {
+    let dynamic_service: Arc<dyn DynamicFunctionCompiler> = Arc::new(
+        OxcDynamicFunctionCompiler::new(limits.dynamic_function_limits()),
+    );
+    let root = match root {
+        Ok(root_source) => gather_dynamic_import_graph(context, loader, &import, &root_source, limits),
+        Err(error) => Err(error.into()),
+    };
+    match root {
+        Ok(root_key) => context.complete_dynamic_import(
+            import,
+            &root_key,
+            limits.execution,
+            Some(&dynamic_service),
+        )?,
+        // A requested module that failed to parse or compile rejects with a
+        // `SyntaxError` (resolution phase); a host load or resolution miss
+        // rejects with a `TypeError` (ECMA-262 FinishDynamicImport onRejected).
+        Err(error) if is_syntax_resolution_failure(&error) => {
+            context.reject_dynamic_import_syntax(import, &error.to_string())?
+        }
+        Err(error) => context.reject_dynamic_import(import, &error.to_string())?,
+    }
+    Ok(())
+}
+
+/// Whether a dynamic-import graph gather failure is a parse/compile failure in
+/// a requested module (SyntaxError-class) rather than a host load failure.
+fn is_syntax_resolution_failure(error: &ModuleEvaluationError) -> bool {
+    matches!(
+        error,
+        ModuleEvaluationError::Frontend(_)
+            | ModuleEvaluationError::Compiler(_)
+            | ModuleEvaluationError::Resolution(_)
+    )
+}
+
+// ---- Dynamic function support continues ----
 
 /// Resource limits applied across every supported dynamic-function stage.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

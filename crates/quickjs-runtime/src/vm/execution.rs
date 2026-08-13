@@ -830,6 +830,7 @@ pub(super) fn create_frame(
                 .cells
                 .try_insert(BindingCell {
                     value: SlotValue::Uninitialized,
+                    forward: None,
                 })
                 .map_err(|_| ExecutionError::AllocationFailed {
                     resource: RuntimeResource::BindingCells,
@@ -854,6 +855,7 @@ pub(super) fn create_frame(
             CompilerExecutableKind::IndirectEvalScript
             | CompilerExecutableKind::DirectEvalScript
             | CompilerExecutableKind::DynamicFunctionScript
+            | CompilerExecutableKind::Module
             | CompilerExecutableKind::OrdinaryFunction
             | CompilerExecutableKind::OrdinaryArrow
             | CompilerExecutableKind::AsyncArrow
@@ -1620,7 +1622,7 @@ pub(super) fn execute_one(
             )?;
             push(frame, StoredValue::Object(object));
         }
-        FinalOpcode::Import => {
+        FinalOpcode::Import | FinalOpcode::ImportDefer => {
             let options = pop(frame)?;
             let specifier = pop(frame)?;
             let realm = code(runtime, frame.code)?.realm;
@@ -1632,6 +1634,13 @@ pub(super) fn execute_one(
                     },
                 )?);
             let origin = instruction_location(runtime, frame, source_pc)?;
+            // As for ImportMeta, the importing module is found by its
+            // installed code id; a plain Script has no referrer module.
+            let referrer = runtime
+                .modules
+                .iter()
+                .find(|(_, record)| record.installed_code == Some(frame.code))
+                .map(|(id, _)| id);
             return native_step(
                 begin_dynamic_import(
                     runtime,
@@ -1640,10 +1649,27 @@ pub(super) fn execute_one(
                     realm,
                     Some(return_to),
                     origin,
+                    referrer,
                     execution_budget,
+                    opcode == FinalOpcode::ImportDefer,
                 ),
                 return_to,
             );
+        }
+        FinalOpcode::ImportMeta => {
+            // Every function defined by a module — root or nested closure —
+            // executes with the module's installed code id, so the owning
+            // module record is found by that id.
+            let module = runtime
+                .modules
+                .iter()
+                .find(|(_, record)| record.installed_code == Some(frame.code))
+                .map(|(id, _)| id)
+                .ok_or(EngineFault::RuntimeInvariant {
+                    message: "import_meta executed outside an installed module",
+                })?;
+            let meta = crate::runtime::modules::get_or_create_import_meta(runtime, module)?;
+            push(frame, StoredValue::Object(meta));
         }
         FinalOpcode::ArrayFrom => {
             let Operands::NPop { argument_count } = operands else {
@@ -3832,6 +3858,19 @@ pub(super) fn execute_one(
                     write_environment(runtime, frame, index, SlotValue::Value(value))?;
                 }
             }
+        }
+        FinalOpcode::PutVarRefCheckInit => {
+            let index = closure_index(opcode, operands)?;
+            if !environment_is_uninitialized(runtime, frame, index)? {
+                return Ok(Step::Abrupt(lexical_reinitialization_exception(
+                    runtime,
+                    frame,
+                    BindingName::Closure(index),
+                    source_pc,
+                )?));
+            }
+            let value = pop(frame)?;
+            write_environment(runtime, frame, index, SlotValue::Value(value))?;
         }
         FinalOpcode::CloseLoc => {
             let index = local_index(opcode, operands)?;

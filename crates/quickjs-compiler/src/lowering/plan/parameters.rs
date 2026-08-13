@@ -110,6 +110,12 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 planning.constants,
                 flow,
             )?;
+            self.emit_module_function_initializers(
+                executable,
+                planning.tree_layout,
+                planning.constants,
+                flow,
+            )?;
             for entry in entries
                 .iter()
                 .rev()
@@ -514,6 +520,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         Ok(())
     }
 
+    #[allow(clippy::too_many_lines)]
     fn scope_entry_initializations(
         &self,
         executable: ExecutableId,
@@ -528,6 +535,13 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             .bindings_for(executable)
             .ok_or(LeafCompilationError::InvalidExecutable { executable })?;
         for storage in bindings {
+            if matches!(
+                storage.placement(),
+                StoragePlacement::ModuleLocal | StoragePlacement::ModuleImport
+            ) {
+                // Module bindings are linked by the runtime, not frame-scoped.
+                continue;
+            }
             if self.scope_for_binding(storage.id())? != scope {
                 continue;
             }
@@ -653,10 +667,12 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                         ) | (DeclarationKind::Const, WritePolicy::Immutable)
                     )
             }
-            StoragePlacement::Argument { .. }
-            | StoragePlacement::Local
-            | StoragePlacement::ModuleLocal
-            | StoragePlacement::ModuleImport => return Ok(false),
+            StoragePlacement::ModuleLocal | StoragePlacement::ModuleImport => {
+                // Module bindings are materialized and linked by the runtime
+                // linker; they never receive scope-entry frame initialization.
+                return Ok(true);
+            }
+            StoragePlacement::Argument { .. } | StoragePlacement::Local => return Ok(false),
         };
         if !supported {
             return unsupported(UnsupportedLeafFeature::UnsupportedDeclaration, span);
@@ -749,6 +765,79 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         Ok(())
     }
 
+    fn emit_module_function_initializers(
+        &self,
+        executable: ExecutableId,
+        tree_layout: &FunctionTreeLayout,
+        constants: &CompiledConstantPool,
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        if !crate::is_supported_module_goal(self.unit.goal()) || executable.index() != 0 {
+            return Ok(());
+        }
+        let root = self
+            .planned
+            .plan
+            .executable(executable)
+            .ok_or(LeafCompilationError::InvalidExecutable { executable })?;
+        if root.parent().is_some() || !matches!(root.kind(), ExecutableKind::Module) {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "module function initializers belong to the Module root",
+                span: Some(root.span()),
+            });
+        }
+        let realm_global_count = tree_layout.realm_globals.imports_for(executable)?.len();
+        for &id in tree_layout.module_bindings.imports_for(executable)? {
+            let descriptor = tree_layout.module_bindings.binding(id).ok_or(
+                LeafCompilationError::SemanticInvariant {
+                    invariant: "root module initializer has a binding descriptor",
+                    span: Some(root.span()),
+                },
+            )?;
+            if descriptor.origin != quickjs_bytecode::ModuleBindingOrigin::Local
+                || descriptor.policy.kind() != quickjs_bytecode::CompilerBindingKind::Function
+            {
+                continue;
+            }
+            let declaration = descriptor.declaration.ok_or(
+                LeafCompilationError::SemanticInvariant {
+                    invariant: "module function initializer retains its declared binding identity",
+                    span: Some(descriptor.first_span),
+                },
+            )?;
+            let child = tree_layout.function_declaration(declaration).ok_or(
+                LeafCompilationError::SemanticInvariant {
+                    invariant: "module function declaration selects its initializer",
+                    span: Some(descriptor.first_span),
+                },
+            )?;
+            let child_span = self
+                .planned
+                .plan
+                .executable(child)
+                .map_or(descriptor.first_span, Executable::span);
+            flow.emit(ExpressionPlanner::new(self).plan_child_function_closure(
+                child,
+                executable,
+                child_span,
+                tree_layout,
+                constants,
+            )?)?;
+            let slot = tree_layout.module_bindings.closure_slot(
+                &self.planned.plan,
+                executable,
+                id,
+                realm_global_count,
+            )?;
+            flow.emit(PlannedInstruction::new(
+                FinalOpcode::PutVarRef,
+                Operands::VarRef(slot),
+                descriptor.first_span,
+            ))?;
+        }
+        Ok(())
+    }
+
     fn emit_scope_entry_initialization(
         &self,
         executable: ExecutableId,
@@ -795,6 +884,13 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             .bindings_for(executable)
             .ok_or(LeafCompilationError::InvalidExecutable { executable })?;
         for storage in bindings {
+            if matches!(
+                storage.placement(),
+                StoragePlacement::ModuleLocal | StoragePlacement::ModuleImport
+            ) {
+                // Module bindings are linked by the runtime, not frame-scoped.
+                continue;
+            }
             if self.scope_for_binding(storage.id())? != scope {
                 continue;
             }

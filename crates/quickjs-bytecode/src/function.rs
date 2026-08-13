@@ -558,6 +558,38 @@ impl UnverifiedFunctionHeader {
         )
     }
 
+    /// Creates an ECMAScript Module root header.
+    ///
+    /// A Module root has no call arguments, is always strict, and uses the
+    /// same non-eval Script flag family as a Global Script. Its top-level
+    /// bindings are module-environment cells, not realm global bindings.
+    #[must_use]
+    pub const fn module(variable_reference_count: u32) -> Self {
+        Self::new(
+            Self::DYNAMIC_FUNCTION_SCRIPT_FLAGS,
+            1,
+            0,
+            variable_reference_count,
+        )
+    }
+
+    /// Creates an ECMAScript Module root header for a module whose own top
+    /// level contains `await`.
+    ///
+    /// The root keeps the non-eval Script flag family and strict mode of a
+    /// synchronous Module root, with the async function-kind bits set so its
+    /// frame suspends at each top-level `await` and settles through its
+    /// activation promise.
+    #[must_use]
+    pub const fn async_module(variable_reference_count: u32) -> Self {
+        Self::new(
+            Self::DYNAMIC_FUNCTION_SCRIPT_FLAGS | (2 << 4),
+            1,
+            0,
+            variable_reference_count,
+        )
+    }
+
     /// Creates a direct-eval Script header carrying only the grammar
     /// capabilities inherited from its verified caller frame.
     #[must_use]

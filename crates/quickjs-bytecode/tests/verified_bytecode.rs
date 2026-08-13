@@ -1099,6 +1099,7 @@ fn execution_requirement_capacity_matches_the_exhaustive_sorted_family_set() {
         ExecutionRequirement::AbruptCompletions,
         ExecutionRequirement::LexicalBindings,
         ExecutionRequirement::RealmGlobalBindings,
+        ExecutionRequirement::ModuleBindings,
         ExecutionRequirement::ObjectOperators,
         ExecutionRequirement::DynamicOperators,
     ];
@@ -6204,8 +6205,9 @@ fn define_method_input_with_counts(
         CompilerExecutableKind::GlobalScript
         | CompilerExecutableKind::IndirectEvalScript
         | CompilerExecutableKind::DirectEvalScript
-        | CompilerExecutableKind::DynamicFunctionScript => {
-            panic!("a define_method child cannot be a Script")
+        | CompilerExecutableKind::DynamicFunctionScript
+        | CompilerExecutableKind::Module => {
+            panic!("a define_method child cannot be a Script or Module")
         }
         CompilerExecutableKind::GeneratorFunction | CompilerExecutableKind::GeneratorMethod => {
             panic!("this ordinary-method fixture cannot create a generator child")

@@ -25,7 +25,8 @@ fn verify_supported_opcodes(
             | CompilerExecutableKind::AsyncMethod
             | CompilerExecutableKind::AsyncGeneratorFunction
             | CompilerExecutableKind::AsyncGeneratorMethod
-    );
+    ) || (executable_kind == CompilerExecutableKind::Module
+        && flow.function_header().kind() == FunctionKind::Async);
     let async_generator = matches!(
         executable_kind,
         CompilerExecutableKind::AsyncGeneratorFunction
@@ -418,6 +419,8 @@ const fn supported_compiler_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::Eval
             | FinalOpcode::ApplyEval
             | FinalOpcode::Import
+            | FinalOpcode::ImportDefer
+            | FinalOpcode::ImportMeta
             | FinalOpcode::WithGetVar
             | FinalOpcode::WithDeleteVar
             | FinalOpcode::WithMakeRef
@@ -472,6 +475,7 @@ const fn supported_compiler_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::SetLocCheck
             | FinalOpcode::GetVarRefCheck
             | FinalOpcode::PutVarRefCheck
+            | FinalOpcode::PutVarRefCheckInit
             | FinalOpcode::CloseLoc
             | FinalOpcode::PrivateSymbol
             | FinalOpcode::GetField

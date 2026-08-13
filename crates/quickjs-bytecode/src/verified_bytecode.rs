@@ -29,6 +29,7 @@ include!("verified_bytecode/model.rs");
 include!("verified_bytecode/error.rs");
 include!("verified_bytecode/graph_verifier.rs");
 include!("verified_bytecode/initializer_verifier.rs");
+include!("verified_bytecode/module_verifier.rs");
 include!("verified_bytecode/source_verifier.rs");
 include!("verified_bytecode/class_field_verifier.rs");
 include!("verified_bytecode/function_name_verifier.rs");

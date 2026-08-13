@@ -17,9 +17,9 @@ const _: () = assert!(SHORT_OPCODES_ENABLED);
 #[test]
 fn compatibility_target_preserves_the_pinned_prefix_before_extensions() {
     assert_eq!(QUICKJS_COMPATIBILITY_RELEASE, "2026-06-04");
-    assert_eq!(FINAL_OPCODE_COUNT, 247);
+    assert_eq!(FINAL_OPCODE_COUNT, 248);
     assert_eq!(NON_SHORT_FINAL_OPCODE_COUNT, 178);
-    assert_eq!(SHORT_FINAL_OPCODE_COUNT, 69);
+    assert_eq!(SHORT_FINAL_OPCODE_COUNT, 70);
     assert_eq!(TEMPORARY_OPCODE_COUNT, 19);
 
     assert_eq!(FinalOpcode::Invalid.encoded_byte(), 0);
@@ -29,6 +29,7 @@ fn compatibility_target_preserves_the_pinned_prefix_before_extensions() {
     assert_eq!(FinalOpcode::TailApply.encoded_byte(), 244);
     assert_eq!(FinalOpcode::TailEval.encoded_byte(), 245);
     assert_eq!(FinalOpcode::TailApplyEval.encoded_byte(), 246);
+    assert_eq!(FinalOpcode::ImportMeta.encoded_byte(), 247);
 
     assert_eq!(TEMPORARY_OPCODE_START, 178);
     assert_eq!(TEMPORARY_OPCODE_END_EXCLUSIVE, 197);
@@ -147,12 +148,12 @@ fn checked_final_decoding_rejects_the_sentinel_and_unknown_bytes() {
         "opcode byte 0x00 is the reserved invalid opcode"
     );
 
-    for byte in 1..=246 {
+    for byte in 1..=247 {
         let opcode = FinalOpcode::decode(byte).expect("known final opcode");
         assert_eq!(opcode.encoded_byte(), byte);
     }
 
-    for byte in 247..=u8::MAX {
+    for byte in 248..=u8::MAX {
         let error = FinalOpcode::decode(byte).expect_err("unknown opcode");
         assert_eq!(error, FinalOpcodeDecodeError::Unknown { byte });
         assert_eq!(error.byte(), byte);
@@ -306,9 +307,9 @@ fn assert_temp_adjacent(left: TemporaryOpcode, right: TemporaryOpcode) {
 fn table_fingerprint() -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325;
 
-    // The three Fusor-only terminal opcodes are appended after the pinned
-    // QuickJS table, so the compatibility fingerprint remains the exact
-    // upstream prefix rather than silently changing its meaning.
+    // The Fusor-only terminal opcodes and `import_meta` are appended after
+    // the pinned QuickJS table, so the compatibility fingerprint remains the
+    // exact upstream prefix rather than silently changing its meaning.
     for (&opcode, &metadata) in ALL_FINAL_OPCODES
         .iter()
         .zip(FINAL_OPCODE_METADATA)

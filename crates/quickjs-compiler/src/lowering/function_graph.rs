@@ -19,9 +19,10 @@ use quickjs_bytecode::{
 use super::layouts::RealmGlobalRootSource;
 use super::{
     CompilationContext, CompiledClosureSource, CompiledClosureVariable, CompiledConstant,
-    CompiledConstantPool, CompiledFunction, CompiledMetadataAtomKey, CompiledRealmGlobal,
-    CompiledRealmGlobalSource, FrameLayout, FrameSlot, FunctionTreeLayout, LeafCompilationError,
-    LogicalCompilerScope, checked_function_index,
+    CompiledConstantPool, CompiledFunction, CompiledMetadataAtomKey, CompiledModuleBinding,
+    CompiledModuleBindingSource, CompiledRealmGlobal, CompiledRealmGlobalSource, FrameLayout,
+    FrameSlot, FunctionTreeLayout, LeafCompilationError, LogicalCompilerScope,
+    checked_function_index,
 };
 
 fn verified_binding_policy(
@@ -531,13 +532,16 @@ impl CompilationContext<'_, '_, '_> {
         &self,
         closures: &[CompiledClosureVariable],
         realm_globals: &[CompiledRealmGlobal],
+        module_bindings: &[CompiledModuleBinding],
         constants: &CompiledConstantPool,
     ) -> Result<Vec<VerifiedClosureVariableDefinition>, LeafCompilationError> {
-        let capacity = closures.len().checked_add(realm_globals.len()).ok_or(
-            LeafCompilationError::CapacityExceeded {
+        let capacity = closures
+            .len()
+            .checked_add(realm_globals.len())
+            .and_then(|value| value.checked_add(module_bindings.len()))
+            .ok_or(LeafCompilationError::CapacityExceeded {
                 domain: "closure metadata definitions",
-            },
-        )?;
+            })?;
         let mut definitions = Vec::with_capacity(capacity);
         for closure in closures {
             let binding = self.planned.plan.binding(closure.binding).ok_or(
@@ -582,6 +586,22 @@ impl CompilationContext<'_, '_, '_> {
                 definition = definition.with_function_initializer(initializer);
             }
             definition = definition.with_deletable_eval_variable(global.deletable_eval_variable);
+            definitions.push(definition);
+        }
+        for binding in module_bindings {
+            let source = match binding.source {
+                CompiledModuleBindingSource::Module { index } => {
+                    quickjs_bytecode::CompilerClosureSource::Module { index }
+                }
+                CompiledModuleBindingSource::ParentClosure(slot) => {
+                    quickjs_bytecode::CompilerClosureSource::ParentClosure(u32::from(slot))
+                }
+            };
+            let mut definition =
+                VerifiedClosureVariableDefinition::new(Some(binding.atom), binding.policy, source);
+            if let Some(initializer) = binding.function_initializer {
+                definition = definition.with_function_initializer(initializer);
+            }
             definitions.push(definition);
         }
         Ok(definitions)
@@ -730,7 +750,8 @@ impl CompilationContext<'_, '_, '_> {
                 }
                 match binding.root_source {
                     RealmGlobalRootSource::ConstructorRealm
-                        if crate::is_supported_script_compilation_goal(self.unit.goal()) =>
+                        if crate::is_supported_script_compilation_goal(self.unit.goal())
+                            || crate::is_supported_module_goal(self.unit.goal()) =>
                     {
                         CompiledRealmGlobalSource::ConstructorRealm
                     }
@@ -818,8 +839,160 @@ impl CompilationContext<'_, '_, '_> {
                     .and_then(|storage| storage.declaration_spans().first().copied()),
             })
     }
+
+    pub(in crate::lowering) fn compiled_module_bindings(
+        &self,
+        executable: ExecutableId,
+        tree_layout: &FunctionTreeLayout,
+        constants: &CompiledConstantPool,
+    ) -> Result<Vec<CompiledModuleBinding>, LeafCompilationError> {
+        let metadata = self
+            .planned
+            .plan
+            .executable(executable)
+            .ok_or(LeafCompilationError::InvalidExecutable { executable })?;
+        let imports = tree_layout.module_bindings.imports_for(executable)?;
+        let realm_global_count = tree_layout.realm_globals.imports_for(executable)?.len();
+        let mut bindings = Vec::with_capacity(imports.len());
+        for &id in imports {
+            let descriptor = tree_layout.module_bindings.binding(id).ok_or(
+                LeafCompilationError::SemanticInvariant {
+                    invariant: "module binding import has a descriptor",
+                    span: Some(metadata.span()),
+                },
+            )?;
+            let (source, function_initializer) = if let Some(parent) = metadata.parent() {
+                let parent_slot = tree_layout.module_bindings.closure_slot(
+                    &self.planned.plan,
+                    parent,
+                    id,
+                    tree_layout.realm_globals.imports_for(parent)?.len(),
+                )?;
+                (
+                    CompiledModuleBindingSource::ParentClosure(parent_slot),
+                    None,
+                )
+            } else {
+                if executable.index() != 0 {
+                    return Err(LeafCompilationError::SemanticInvariant {
+                        invariant: "only a Module root originates module cells",
+                        span: Some(metadata.span()),
+                    });
+                }
+                let initializer = if descriptor.origin
+                    == quickjs_bytecode::ModuleBindingOrigin::Local
+                    && descriptor.policy.kind() == quickjs_bytecode::CompilerBindingKind::Function
+                {
+                    let declaration =
+                        descriptor
+                            .declaration
+                            .ok_or(LeafCompilationError::SemanticInvariant {
+                                invariant: "module function retains its declared binding identity",
+                                span: Some(descriptor.first_span),
+                            })?;
+                    let child = tree_layout.function_declaration(declaration).ok_or(
+                        LeafCompilationError::SemanticInvariant {
+                            invariant: "module function declaration selects its initializer",
+                            span: Some(descriptor.first_span),
+                        },
+                    )?;
+                    Some(constants.function_index(child)?)
+                } else {
+                    None
+                };
+                (
+                    CompiledModuleBindingSource::Module {
+                        index: u32::try_from(id.index()).map_err(|_| {
+                            LeafCompilationError::CapacityExceeded {
+                                domain: "module binding names",
+                            }
+                        })?,
+                    },
+                    initializer,
+                )
+            };
+            let atom = constants.metadata_atom_index(CompiledMetadataAtomKey::ModuleBinding(id))?;
+            bindings.push(CompiledModuleBinding {
+                id,
+                name: Arc::clone(&descriptor.name),
+                atom,
+                slot: tree_layout.module_bindings.closure_slot(
+                    &self.planned.plan,
+                    executable,
+                    id,
+                    realm_global_count,
+                )?,
+                source,
+                policy: descriptor.policy,
+                origin: descriptor.origin,
+                import: self.module_import_descriptor(descriptor, source, atom)?,
+                function_initializer,
+            });
+        }
+        Ok(bindings)
+    }
+
+    fn module_import_descriptor(
+        &self,
+        descriptor: &super::layouts::ModuleBindingDescriptor,
+        source: CompiledModuleBindingSource,
+        atom: quickjs_bytecode::AtomPoolIndex,
+    ) -> Result<Option<quickjs_bytecode::ModuleImportName>, LeafCompilationError> {
+        if !matches!(
+            descriptor.origin,
+            quickjs_bytecode::ModuleBindingOrigin::Import
+                | quickjs_bytecode::ModuleBindingOrigin::Namespace
+        ) {
+            return Ok(None);
+        }
+        if !matches!(source, CompiledModuleBindingSource::Module { .. }) {
+            // Descendants forward the cell; the import linkage is root-only.
+            return Ok(None);
+        }
+        let entry = self
+            .unit
+            .module_syntax()
+            .import_entries()
+            .iter()
+            .find(|entry| entry.local_name().equals_utf8(&descriptor.name))
+            .ok_or(LeafCompilationError::SemanticInvariant {
+                invariant: "module import binding has a frontend import entry",
+                span: Some(descriptor.first_span),
+            })?;
+        let request = u32::try_from(entry.request().as_usize()).map_err(|_| {
+            LeafCompilationError::CapacityExceeded {
+                domain: "module request index",
+            }
+        })?;
+        let import = match entry.import_name() {
+            quickjs_frontend::ModuleImportName::Namespace => {
+                quickjs_bytecode::ModuleImportName::namespace(request)
+            }
+            quickjs_frontend::ModuleImportName::DeferredNamespace => {
+                quickjs_bytecode::ModuleImportName::deferred_namespace(request)
+            }
+            quickjs_frontend::ModuleImportName::Default(_) => {
+                quickjs_bytecode::ModuleImportName::default(request)
+            }
+            quickjs_frontend::ModuleImportName::Name(_) => {
+                // For a non-aliased named import the imported name equals the
+                // local binding name; the binding-name atom is reused. Aliased
+                // named imports retain the local-name atom here (the request
+                // index and role remain correct for the linker).
+                quickjs_bytecode::ModuleImportName::named(request, atom)
+            }
+            _ => {
+                return Err(LeafCompilationError::SemanticInvariant {
+                    invariant: "module import entry has a supported import name kind",
+                    span: Some(descriptor.first_span),
+                });
+            }
+        };
+        Ok(Some(import))
+    }
 }
 
+#[allow(clippy::too_many_lines)]
 fn build_unverified_graph_records(
     functions: &[CompiledFunction],
     identities: &[(ExecutableId, FunctionTemplateId)],
@@ -862,6 +1035,7 @@ fn build_unverified_graph_records(
             .closure_variables
             .len()
             .checked_add(function.realm_globals.len())
+            .and_then(|value| value.checked_add(function.module_bindings.len()))
             .ok_or(LeafCompilationError::CapacityExceeded {
                 domain: "compiler graph closure sources",
             })?;
@@ -895,6 +1069,34 @@ fn build_unverified_graph_records(
                 });
             }
             closure_sources.push(compiler_graph_realm_global_source(global));
+        }
+        let realm_global_end = function
+            .closure_variables
+            .len()
+            .checked_add(function.realm_globals.len())
+            .ok_or(LeafCompilationError::CapacityExceeded {
+                domain: "compiler graph closure sources",
+            })?;
+        for (offset, binding) in function.module_bindings.iter().enumerate() {
+            let expected = realm_global_end.checked_add(offset).ok_or(
+                LeafCompilationError::CapacityExceeded {
+                    domain: "compiler graph closure sources",
+                },
+            )?;
+            if usize::from(binding.slot()) != expected {
+                return Err(LeafCompilationError::SemanticInvariant {
+                    invariant: "compiled module binding slots follow realm-global slots",
+                    span: None,
+                });
+            }
+            closure_sources.push(match binding.source() {
+                CompiledModuleBindingSource::Module { index } => {
+                    CompilerGraphClosureSource::Module { index }
+                }
+                CompiledModuleBindingSource::ParentClosure(slot) => {
+                    CompilerGraphClosureSource::ParentClosure(u32::from(slot))
+                }
+            });
         }
         records.push(
             UnverifiedCompilerFunction::new(

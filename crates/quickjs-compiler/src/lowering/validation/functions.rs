@@ -62,7 +62,13 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 span: Some(class.span),
             });
         }
-        if self.planned.plan.kind() != CompilationUnitKind::Script {
+        // Mirrors selected_function: scripts and modules both link closures
+        // against root cells, and the strict metadata required above holds for
+        // module units as well (modules are always strict).
+        if !matches!(
+            self.planned.plan.kind(),
+            CompilationUnitKind::Script | CompilationUnitKind::Module
+        ) {
             return unsupported(
                 UnsupportedLeafFeature::UnsupportedCompilationUnit,
                 class.span,
@@ -122,7 +128,13 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 span: Some(class.span),
             });
         }
-        if self.planned.plan.kind() != CompilationUnitKind::Script {
+        // Mirrors selected_function: scripts and modules both link closures
+        // against root cells, and the strict metadata required above holds for
+        // module units as well (modules are always strict).
+        if !matches!(
+            self.planned.plan.kind(),
+            CompilationUnitKind::Script | CompilationUnitKind::Module
+        ) {
             return unsupported(
                 UnsupportedLeafFeature::UnsupportedCompilationUnit,
                 class.span,
@@ -181,13 +193,23 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 span: Some(arrow.span),
             });
         }
-        if self.planned.plan.kind() != CompilationUnitKind::Script {
+        // Mirrors selected_function: scripts and modules both link closures
+        // against root cells. Arrow lowering is unit-kind agnostic: `this` and
+        // `new.target` resolve lexically at runtime (module top-level `this` is
+        // undefined, and new.target at module top level is a SyntaxError caught
+        // by the parser). Module units are strict, which only flows through as
+        // executable.is_strict() metadata below.
+        if !matches!(
+            self.planned.plan.kind(),
+            CompilationUnitKind::Script | CompilationUnitKind::Module
+        ) {
             return unsupported(
                 UnsupportedLeafFeature::UnsupportedCompilationUnit,
                 arrow.span,
             );
         }
         if !crate::is_supported_script_compilation_goal(self.unit.goal())
+            && !crate::is_supported_module_goal(self.unit.goal())
             && let Some(reference) = self
                 .planned
                 .plan
@@ -276,13 +298,17 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 span: Some(function.span),
             });
         }
-        if self.planned.plan.kind() != CompilationUnitKind::Script {
+        if !matches!(
+            self.planned.plan.kind(),
+            CompilationUnitKind::Script | CompilationUnitKind::Module
+        ) {
             return unsupported(
                 UnsupportedLeafFeature::UnsupportedCompilationUnit,
                 function.span,
             );
         }
         if !crate::is_supported_script_compilation_goal(self.unit.goal())
+            && !crate::is_supported_module_goal(self.unit.goal())
             && let Some(reference) = self
                 .planned
                 .plan
@@ -426,6 +452,65 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         {
             return Err(LeafCompilationError::SemanticInvariant {
                 invariant: "Global Script has one synchronous zero-argument Program root",
+                span: Some(program.span),
+            });
+        }
+        Ok((executable, program))
+    }
+
+    pub(in crate::lowering) fn selected_module(
+        &self,
+        executable_id: ExecutableId,
+    ) -> Result<(&Executable, &Program<'arena>), LeafCompilationError> {
+        if !crate::is_supported_module_goal(self.unit.goal()) {
+            return unsupported(
+                UnsupportedLeafFeature::UnsupportedCompilationUnit,
+                self.unit.program().span,
+            );
+        }
+        let executable = self.planned.plan.executable(executable_id).ok_or(
+            LeafCompilationError::InvalidExecutable {
+                executable: executable_id,
+            },
+        )?;
+        let node_id = self
+            .planned
+            .identities
+            .node_by_executable
+            .get(executable_id.index())
+            .copied()
+            .ok_or(LeafCompilationError::SemanticInvariant {
+                invariant: "Module executable has an Oxc node identity",
+                span: Some(executable.span()),
+            })?;
+        if self
+            .planned
+            .identities
+            .executable_by_node
+            .get(node_id.index())
+            .copied()
+            .flatten()
+            != Some(executable_id)
+        {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "Module Oxc node and executable identities are bijective",
+                span: Some(executable.span()),
+            });
+        }
+        let AstKind::Program(program) = self.unit.semantic().nodes().kind(node_id) else {
+            return unsupported(
+                UnsupportedLeafFeature::UnsupportedCompilationUnit,
+                executable.span(),
+            );
+        };
+        if executable_id.index() != 0
+            || executable.parent().is_some()
+            || executable.parameter_count() != 0
+            || !matches!(executable.kind(), ExecutableKind::Module)
+            || self.planned.plan.kind() != CompilationUnitKind::Module
+        {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "Module has one zero-argument Program root",
                 span: Some(program.span),
             });
         }

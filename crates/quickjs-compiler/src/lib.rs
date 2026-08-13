@@ -34,6 +34,10 @@ pub(crate) const fn is_supported_global_script_goal(
     )
 }
 
+pub(crate) const fn is_supported_module_goal(goal: quickjs_frontend::CompilationGoal<'_>) -> bool {
+    matches!(goal, quickjs_frontend::CompilationGoal::Module)
+}
+
 pub(crate) const fn is_supported_indirect_eval_goal(
     goal: quickjs_frontend::CompilationGoal<'_>,
 ) -> bool {

@@ -4,11 +4,15 @@
 //! references. This module copies only the static module-request and
 //! import/export entry data that must outlive Oxc's allocator.
 
-use std::{collections::HashMap, fmt, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt,
+    sync::Arc,
+};
 
 use oxc_ast::ast::{
-    ExportDefaultDeclarationKind, ImportAttributeKey as OxcImportAttributeKey, Program, Statement,
-    StringLiteral, WithClause,
+    ExportDefaultDeclarationKind, ImportAttributeKey as OxcImportAttributeKey, ImportPhase, Program,
+    Statement, StringLiteral, WithClause,
 };
 use oxc_span::Span;
 use oxc_syntax::module_record::{
@@ -300,6 +304,7 @@ pub struct StaticModuleRequest {
     statement_span: Span,
     specifier: ModuleNameSpan,
     attributes: Option<ImportAttributes>,
+    deferred: bool,
 }
 
 impl StaticModuleRequest {
@@ -307,6 +312,13 @@ impl StaticModuleRequest {
     #[must_use]
     pub const fn kind(&self) -> ModuleRequestKind {
         self.kind
+    }
+
+    /// Returns whether the request was introduced by an `import defer`
+    /// declaration (ECMA-262 ModuleRequest [[Phase]] ~defer~).
+    #[must_use]
+    pub const fn is_deferred(&self) -> bool {
+        self.deferred
     }
 
     /// Returns the complete import/export declaration span.
@@ -338,6 +350,8 @@ pub enum ModuleImportName {
     Default(Span),
     /// The requested module namespace object.
     Namespace,
+    /// A deferred namespace object (`import defer * as ns`).
+    DeferredNamespace,
 }
 
 /// One import entry needed during module linking.
@@ -505,10 +519,21 @@ impl ModuleSyntaxRecord {
     ) -> Result<Self, ModuleSyntaxLoweringError> {
         let (requests, request_by_specifier) = lower_requests(program)?;
         let export_statements = export_statements(program);
+        let deferred_spans: HashSet<(u32, u32)> = program
+            .body
+            .iter()
+            .filter_map(|statement| {
+                let Statement::ImportDeclaration(declaration) = statement else {
+                    return None;
+                };
+                (declaration.phase == Some(ImportPhase::Defer))
+                    .then_some((declaration.span.start, declaration.span.end))
+            })
+            .collect();
         let import_entries = module_record
             .import_entries
             .iter()
-            .map(|entry| lower_import_entry(entry, &request_by_specifier))
+            .map(|entry| lower_import_entry(entry, &request_by_specifier, &deferred_spans))
             .collect::<Result<Vec<_>, _>>()?;
 
         let mut export_entries = Vec::with_capacity(
@@ -561,6 +586,43 @@ impl ModuleSyntaxRecord {
                 })
                 .collect::<Result<Vec<_>, _>>()?,
         );
+        // ECMA-262 ParseModule step 10.i.ii: a local export entry whose local
+        // name is an imported binding is really an *indirect* export of the
+        // import's module request and import name (a namespace import maps to
+        // ~all~). Oxc keeps such entries local; rewrite them so linking
+        // resolves through the exporting module, making two re-exports of the
+        // same namespace object or binding unambiguous.
+        for entry in &mut export_entries {
+            if entry.role != ModuleExportEntryRole::Local {
+                continue;
+            }
+            let ModuleExportLocalName::Name(local_name) = &entry.local_name else {
+                continue;
+            };
+            let Some(import) = import_entries.iter().find(|import| {
+                import.local_name.code_units() == local_name.code_units()
+            }) else {
+                continue;
+            };
+            *entry = ModuleExportEntry {
+                role: ModuleExportEntryRole::Indirect,
+                statement_span: entry.statement_span,
+                span: entry.span,
+                request: Some(import.request),
+                import_name: match &import.import_name {
+                    ModuleImportName::Name(name) => ModuleExportImportName::Name(name.clone()),
+                    ModuleImportName::Default(span) => ModuleExportImportName::Default(*span),
+                    ModuleImportName::Namespace => ModuleExportImportName::All,
+                    // A deferred namespace import keeps its local entry: the
+                    // binding cell holds the module's deferred namespace object
+                    // (identity-cached per module), and re-exporting it must
+                    // forward that exact object, not a star-resolution view.
+                    ModuleImportName::DeferredNamespace => continue,
+                },
+                export_name: entry.export_name.clone(),
+                local_name: ModuleExportLocalName::Null,
+            };
+        }
         export_entries.sort_by_key(|entry| {
             (
                 entry.span.start,
@@ -632,6 +694,7 @@ fn lower_requests(
                 statement_span: declaration.span,
                 specifier: ModuleNameSpan::from_literal(&declaration.source)?,
                 attributes: lower_attributes(declaration.with_clause.as_deref())?,
+                deferred: declaration.phase == Some(ImportPhase::Defer),
             }),
             Statement::ExportNamedDeclaration(declaration) => declaration
                 .source
@@ -642,6 +705,7 @@ fn lower_requests(
                         statement_span: declaration.span,
                         specifier: ModuleNameSpan::from_literal(source)?,
                         attributes: lower_attributes(declaration.with_clause.as_deref())?,
+                        deferred: false,
                     })
                 })
                 .transpose()?,
@@ -654,6 +718,7 @@ fn lower_requests(
                 statement_span: declaration.span,
                 specifier: ModuleNameSpan::from_literal(&declaration.source)?,
                 attributes: lower_attributes(declaration.with_clause.as_deref())?,
+                deferred: false,
             }),
             _ => None,
         };
@@ -724,7 +789,9 @@ fn containing_export_statement(
 fn lower_import_entry(
     entry: &OxcImportEntry<'_>,
     request_by_specifier: &RequestBySpecifier,
+    deferred_spans: &HashSet<(u32, u32)>,
 ) -> Result<ModuleImportEntry, ModuleSyntaxLoweringError> {
+    let deferred = deferred_spans.contains(&(entry.statement_span.start, entry.statement_span.end));
     Ok(ModuleImportEntry {
         statement_span: entry.statement_span,
         request: request_index(request_by_specifier, entry.module_request.span)?,
@@ -732,6 +799,7 @@ fn lower_import_entry(
             OxcImportImportName::Name(name) => {
                 ModuleImportName::Name(ModuleNameSpan::from_oxc(name))
             }
+            OxcImportImportName::NamespaceObject if deferred => ModuleImportName::DeferredNamespace,
             OxcImportImportName::NamespaceObject => ModuleImportName::Namespace,
             OxcImportImportName::Default(span) => ModuleImportName::Default(*span),
         },

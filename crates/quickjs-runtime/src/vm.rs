@@ -138,6 +138,7 @@ mod for_in;
 mod from_entries;
 mod generator;
 mod group_by;
+mod import_meta;
 mod instanceof;
 mod intl;
 mod iterators;
@@ -171,7 +172,14 @@ mod with_environment;
 
 pub(crate) use array_from_async::ArrayFromAsyncRecord;
 use async_function::{begin_async_await, suspend_async_function};
-pub(crate) use promise::fulfill_promise_host;
+pub(crate) use dynamic_import::{
+    complete_dynamic_import_load, module_error_rejection_value, reject_dynamic_import_load,
+    reject_dynamic_import_load_kind,
+};
+pub(crate) use promise::{
+    drain_host_jobs_with_limits, fulfill_promise_host, perform_targeted_promise_reactions_host,
+    reject_promise_host,
+};
 
 #[allow(
     clippy::wildcard_imports,
@@ -183,7 +191,8 @@ use {
     array_statics::*, async_from_sync::*, async_generator::*, atomics::*, bigint_intrinsics::*,
     bindings::*, conversions::*, data_view::*, date::*, define_property_intrinsics::*, dynamic::*,
     dynamic_import::*, error_stack::*, errors::*, exceptions::*, execution::*, for_in::*,
-    from_entries::*, generator::*, group_by::*, intl::*, iterators::*, json_parse::*,
+    from_entries::*, generator::*, group_by::*, import_meta::*, intl::*, iterators::*,
+    json_parse::*,
     json_stringify::*, locale_string::*, map::*, math::*, math_sum_precise::*, native::*,
     object_intrinsics::*, promise::*, promise_combinators::*, properties::*, proxy::*, reflect::*,
     regexp::*, set::*, stack::*, string_methods::*, string_raw::*, string_replace::*,
@@ -5361,6 +5370,24 @@ impl Context<'_> {
         complete_host_turn(self.runtime, compiler, &mut execution_budget, completion)
     }
 
+    pub(crate) fn execute_module_frame(
+        &mut self,
+        function: FunctionId,
+        receiver: StoredValue,
+        limits: ExecutionLimits,
+    ) -> Result<StoredValue, ExecutionError> {
+        execute_module_frame_internal(self.runtime, function, receiver, limits, None)
+    }
+
+    pub(crate) fn execute_module_frame_on_runtime(
+        runtime: &mut Runtime,
+        function: FunctionId,
+        receiver: StoredValue,
+        limits: ExecutionLimits,
+    ) -> Result<StoredValue, ExecutionError> {
+        execute_module_frame_internal(runtime, function, receiver, limits, None)
+    }
+
     pub(crate) fn execute_internal_root(
         &mut self,
         root: &mut InstalledRoot,
@@ -5406,6 +5433,27 @@ impl Context<'_> {
         )?;
         execute_frames(self.runtime, frame, limits, compiler, Some(root))
     }
+}
+
+pub(crate) fn execute_module_frame_internal(
+    runtime: &mut Runtime,
+    function: FunctionId,
+    receiver: StoredValue,
+    limits: ExecutionLimits,
+    compiler: Option<&Arc<dyn OrdinaryDynamicFunctionCompiler>>,
+) -> Result<StoredValue, ExecutionError> {
+    let plan = plan_frame(runtime, function, 0, 0, 0, FrameEntryKind::Call)?;
+    let frame = create_frame(
+        runtime,
+        plan,
+        receiver,
+        None,
+        FrameArguments::Owned(CallArguments::empty()),
+        None,
+        None,
+    )?;
+    let mut execution_budget = ExecutionBudget::new(limits);
+    execute_frames_with_budget(runtime, frame, compiler, None, &mut execution_budget)
 }
 
 fn execute_frames(

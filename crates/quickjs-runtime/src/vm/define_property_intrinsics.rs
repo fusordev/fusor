@@ -1153,6 +1153,24 @@ pub(super) fn own_property_descriptor(
             own_property_of(runtime, HeapReference::Function(*function), key)?
         }
         StoredValue::Object(object) => {
+            if runtime.module_namespace_is_deferred(*object) {
+                // ECMA-262 10.4.6.3 [[GetOwnProperty]] step 2: the exports
+                // list triggers deferred evaluation for string keys (except
+                // "then").
+                crate::vm::proxy::ensure_deferred_namespace_access(
+                    runtime,
+                    *object,
+                    key,
+                    realm,
+                    origin.clone(),
+                )?;
+            }
+            if runtime.module_namespace_export_is_uninitialized(*object, key)? {
+                return Err(NativeFailure::Abrupt(namespace_uninitialized_exception(
+                    realm,
+                    origin.clone(),
+                )?));
+            }
             own_property_of(runtime, HeapReference::Object(*object), key)?
         }
         // A primitive string exposes its own index and `length` properties.
@@ -1185,7 +1203,7 @@ pub(super) fn own_property_descriptor(
 /// `propertyIsEnumerable` agree with it on every exotic case, including a
 /// primitive String's index and `length` properties.
 pub(super) fn resolve_own_property(
-    runtime: &Runtime,
+    runtime: &mut Runtime,
     realm: RealmId,
     target: &StoredValue,
     key: &PropertyKey,
@@ -1196,6 +1214,24 @@ pub(super) fn resolve_own_property(
             own_property_of(runtime, HeapReference::Function(*function), key)
         }
         StoredValue::Object(object) => {
+            if runtime.module_namespace_is_deferred(*object) {
+                // ECMA-262 10.4.6.3 [[GetOwnProperty]] step 2: the exports
+                // list triggers deferred evaluation for string keys (except
+                // "then").
+                crate::vm::proxy::ensure_deferred_namespace_access(
+                    runtime,
+                    *object,
+                    key,
+                    realm,
+                    origin.clone(),
+                )?;
+            }
+            if runtime.module_namespace_export_is_uninitialized(*object, key)? {
+                return Err(NativeFailure::Abrupt(namespace_uninitialized_exception(
+                    realm,
+                    origin.clone(),
+                )?));
+            }
             own_property_of(runtime, HeapReference::Object(*object), key)
         }
         StoredValue::String(value) => string_own_property(value, key),

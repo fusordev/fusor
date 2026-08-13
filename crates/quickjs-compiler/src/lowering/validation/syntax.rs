@@ -1,8 +1,10 @@
 use super::super::{
-    BindingId, CompilationContext, DeclarationKind, FrameSlot, InitializationPolicy,
+    BindingId, CompilationContext, DeclarationKind, ExecutableId, FrameSlot, InitializationPolicy,
     LeafCompilationError, Span, StoragePlacement, UnsupportedLeafFeature, VariableDeclarationKind,
     WritePolicy, unsupported,
 };
+use oxc_ast::AstKind;
+use oxc_span::GetSpan;
 
 impl CompilationContext<'_, '_, '_> {
     pub(in crate::lowering) fn validate_realm_global_class_declaration(
@@ -144,5 +146,74 @@ impl CompilationContext<'_, '_, '_> {
             return unsupported(UnsupportedLeafFeature::UnsupportedBinding, span);
         }
         Ok(())
+    }
+
+    /// Returns the span of the first `await` expression or `for await` loop in
+    /// the Module's own top level, if any. Awaits nested inside functions,
+    /// arrows, or classes belong to those executables, not to the Module root.
+    /// Class heritage is evaluated in the scope enclosing the class definition,
+    /// so an `await` in the `extends` expression belongs to the outer
+    /// executable and does not stop the walk.
+    pub(in crate::lowering) fn module_top_level_await(
+        &self,
+        root: ExecutableId,
+    ) -> Result<Option<Span>, LeafCompilationError> {
+        let nodes = self.unit.semantic().nodes();
+        let root_program = self
+            .planned
+            .identities
+            .node_by_executable
+            .get(root.index())
+            .copied()
+            .ok_or(LeafCompilationError::SemanticInvariant {
+                invariant: "Module root executable has an Oxc node identity",
+                span: Some(self.unit.program().span),
+            })?;
+        for (node_id, node) in nodes.iter_enumerated() {
+            let span = node.kind().span();
+            let is_top_level_await_marker = match node.kind() {
+                AstKind::AwaitExpression(_) => true,
+                AstKind::ForOfStatement(statement) => statement.r#await,
+                _ => false,
+            };
+            if !is_top_level_await_marker {
+                continue;
+            }
+            // Walk parents to the nearest enclosing function, arrow, class, or
+            // the Program root. If that boundary is the Module Program, the
+            // node is at module top level.
+            let mut current = nodes.parent_id(node_id);
+            let mut child = node_id;
+            let mut at_top_level = false;
+            loop {
+                match nodes.kind(current) {
+                    AstKind::Program(_) => {
+                        at_top_level = current == root_program;
+                        break;
+                    }
+                    AstKind::Class(class) => {
+                        let in_heritage = class
+                            .super_class
+                            .as_ref()
+                            .is_some_and(|super_class| super_class.span() == nodes.kind(child).span());
+                        if !in_heritage {
+                            break;
+                        }
+                    }
+                    AstKind::Function(_) | AstKind::ArrowFunctionExpression(_) => break,
+                    _ => {}
+                }
+                let parent = nodes.parent_id(current);
+                if parent.index() >= current.index() {
+                    break;
+                }
+                child = current;
+                current = parent;
+            }
+            if at_top_level {
+                return Ok(Some(span));
+            }
+        }
+        Ok(None)
     }
 }

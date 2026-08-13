@@ -167,6 +167,8 @@ pub(super) const fn opcode_semantics(opcode: FinalOpcode) -> OpcodeSemantics {
         | FinalOpcode::RegExp
         | FinalOpcode::GetSuper
         | FinalOpcode::Import
+        | FinalOpcode::ImportDefer
+        | FinalOpcode::ImportMeta
         | FinalOpcode::GetVarUndef
         | FinalOpcode::GetVar
         | FinalOpcode::PutVar
@@ -343,7 +345,7 @@ mod tests {
         }
 
         assert_eq!(invalid, 1);
-        assert_eq!(supported, 221);
+        assert_eq!(supported, 225);
         assert_eq!(unsupported, 22);
         assert_eq!(invalid + supported + unsupported, ALL_FINAL_OPCODES.len());
         assert_eq!(

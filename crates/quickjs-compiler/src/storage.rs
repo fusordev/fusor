@@ -795,9 +795,6 @@ pub enum UnsupportedFeature {
     WithReferenceMutation,
     /// Annex B's paired block-lexical and var-like function binding.
     AnnexBBlockFunction,
-    /// An anonymous `export default class` needs the module execution layer's
-    /// synthetic default binding and class environment.
-    AnonymousDefaultClassExport,
     /// A synthesized `this`, `new.target`, or `super` binding.
     FunctionSyntheticBinding,
 }
@@ -1641,6 +1638,32 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 }
             }
         }
+        for binding in bindings
+            .iter()
+            .filter(|binding| binding.policy.kind == DeclarationKind::SyntheticDefault)
+        {
+            let scope = self
+                .executable_drafts
+                .get(binding.executable.index())
+                .map(|draft| draft.scope_id)
+                .ok_or(CompilerError::SemanticInvariant {
+                    invariant: "synthetic default binding executable has a scope",
+                    span: binding.declaration_spans.first().copied(),
+                })?;
+            let target =
+                scopes
+                    .get_mut(binding.id.index())
+                    .ok_or(CompilerError::SemanticInvariant {
+                        invariant: "synthetic default binding scope index is in range",
+                        span: binding.declaration_spans.first().copied(),
+                    })?;
+            if target.replace(scope).is_some() {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "synthetic default binding has one module scope",
+                    span: binding.declaration_spans.first().copied(),
+                });
+            }
+        }
         for (&node_id, &binding) in class_name_bindings {
             let AstKind::Class(class) = self.unit.semantic().nodes().kind(node_id) else {
                 return Err(CompilerError::SemanticInvariant {
@@ -2420,6 +2443,20 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         function: &oxc_ast::ast::Function<'arena>,
     ) -> Result<(), CompilerError> {
         let parameters = self.validate_parameters(function.params.as_ref())?;
+        // `export default function() {}` (and the parenthesized expression
+        // form) is a NamedEvaluation with the name "default": the anonymous
+        // function receives that name exactly like the class analogue.
+        let anonymous_default = function.id.is_none() && self.is_anonymous_default_export(node_id);
+        let name = function
+            .id
+            .as_ref()
+            .map(|identifier| Arc::<str>::from(identifier.name.as_str()))
+            .or_else(|| anonymous_default.then(|| Arc::<str>::from("default")));
+        let name_span = function
+            .id
+            .as_ref()
+            .map(|identifier| identifier.span)
+            .or_else(|| anonymous_default.then(|| function.span));
         self.inventory_executable(
             node_id,
             ExecutableKind::Function {
@@ -2428,14 +2465,26 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             },
             function.scope_id(),
             function.span,
-            function
-                .id
-                .as_ref()
-                .map(|identifier| Arc::<str>::from(identifier.name.as_str())),
-            function.id.as_ref().map(|identifier| identifier.span),
+            name,
+            name_span,
             parameters,
             true,
         )
+    }
+
+    /// Returns whether `node_id` (a function or class node) is the anonymous
+    /// declaration/expression of an `export default`, walking through
+    /// parenthesized expressions.
+    fn is_anonymous_default_export(&self, node_id: NodeId) -> bool {
+        let nodes = self.unit.semantic().nodes();
+        let mut parent = nodes.parent_id(node_id);
+        loop {
+            match nodes.kind(parent) {
+                AstKind::ParenthesizedExpression(_) => parent = nodes.parent_id(parent),
+                AstKind::ExportDefaultDeclaration(_) => return true,
+                _ => return false,
+            }
+        }
     }
 
     #[allow(
@@ -4827,7 +4876,17 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 })
             }
             ExportDefaultDeclarationKind::ClassDeclaration(class) => {
-                unsupported(UnsupportedFeature::AnonymousDefaultClassExport, class.span)
+                if class.id.is_some() {
+                    return Err(CompilerError::SemanticInvariant {
+                        invariant: "synthetic default class is anonymous",
+                        span: Some(class.span),
+                    });
+                }
+                Ok(self.declaration_policy(
+                    ExecutableId(0),
+                    DeclarationKind::SyntheticDefault,
+                    false,
+                ))
             }
             ExportDefaultDeclarationKind::TSInterfaceDeclaration(interface) => {
                 Err(CompilerError::SemanticInvariant {

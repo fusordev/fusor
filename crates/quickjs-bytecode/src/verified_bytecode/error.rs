@@ -7,6 +7,12 @@ pub enum MetadataAtomField {
     VariableName(u32),
     /// Imported closure name.
     ClosureName(u32),
+    /// Module binding name.
+    ModuleBindingName(u32),
+    /// Module request specifier.
+    ModuleRequestSpecifier(u32),
+    /// Module named import export name.
+    ModuleImportName(u32),
 }
 
 /// Frame slot named by a binding-policy failure.
@@ -161,6 +167,74 @@ pub enum BytecodeVerificationErrorKind {
     /// A dynamic-Function Script record carries function-name metadata or a
     /// named-function self binding.
     DynamicFunctionScriptHasFunctionName,
+    /// A Module root record is not the graph root.
+    ModuleNotRoot,
+    /// A Module root record declares a call-argument domain.
+    ModuleHasArguments {
+        /// Header-defined arguments.
+        defined: u32,
+        /// Frame argument slots.
+        arguments: u32,
+    },
+    /// A Module root record carries function-name metadata or a named function
+    /// self binding.
+    ModuleHasFunctionName,
+    /// A Module declaration record is required for a Module root but absent.
+    ModuleDeclarationRecordMissing,
+    /// A Module declaration record appears on a non-Module root.
+    ModuleDeclarationRecordUnexpected,
+    /// A module binding descriptor's closure slot is outside the root closure
+    /// domain.
+    ModuleBindingSlotOutOfBounds {
+        /// Binding descriptor index.
+        binding: u32,
+        /// Closure slot index.
+        slot: u32,
+        /// Root closure domain size.
+        closures: u32,
+    },
+    /// A module binding descriptor's closure slot does not select a
+    /// module-origin captured cell with a matching policy.
+    ModuleBindingSlotMismatch {
+        /// Binding descriptor index.
+        binding: u32,
+        /// Closure slot index.
+        slot: u32,
+    },
+    /// Module binding descriptor slots are not dense and unique.
+    ModuleBindingSlotOrder {
+        /// Binding descriptor index.
+        binding: u32,
+        /// Closure slot index.
+        slot: u32,
+    },
+    /// A module binding's policy is inconsistent with its declared origin.
+    ModuleBindingPolicyMismatch {
+        /// Binding descriptor index.
+        binding: u32,
+    },
+    /// A module binding's function initializer does not name a function
+    /// constant in the root.
+    ModuleBindingInitializerMismatch {
+        /// Binding descriptor index.
+        binding: u32,
+        /// Constant index, when supplied.
+        constant: Option<u32>,
+    },
+    /// A module import descriptor references an out-of-range request.
+    ModuleImportRequestOutOfBounds {
+        /// Binding descriptor index.
+        binding: u32,
+        /// Request index.
+        request: u32,
+        /// Request count.
+        requests: u32,
+    },
+    /// A module request specifier atom is not named.
+    ModuleRequestSpecifierMissing {
+        /// Request index.
+        request: u32,
+    },
     /// An object method or accessor carries a source name before
     /// `define_method` assigns its property-derived observable name.
     OrdinaryMethodHasFunctionName,
@@ -722,6 +796,60 @@ impl fmt::Display for BytecodeVerificationErrorKind {
             Self::DynamicFunctionScriptHasFunctionName => formatter.write_str(
                 "dynamic-Function Script carries function-name metadata or a self binding",
             ),
+            Self::ModuleNotRoot => formatter.write_str("Module executable is not the graph root"),
+            Self::ModuleHasArguments { defined, arguments } => write!(
+                formatter,
+                "Module root declares {defined} defined arguments and {arguments} frame arguments"
+            ),
+            Self::ModuleHasFunctionName => {
+                formatter.write_str("Module root carries function-name metadata or a self binding")
+            }
+            Self::ModuleDeclarationRecordMissing => {
+                formatter.write_str("Module root is missing its declaration record")
+            }
+            Self::ModuleDeclarationRecordUnexpected => {
+                formatter.write_str("declaration record appears on a non-Module root")
+            }
+            Self::ModuleBindingSlotOutOfBounds {
+                binding,
+                slot,
+                closures,
+            } => write!(
+                formatter,
+                "module binding {binding} slot {slot} is outside root closure count {closures}"
+            ),
+            Self::ModuleBindingSlotMismatch { binding, slot } => write!(
+                formatter,
+                "module binding {binding} slot {slot} does not select a matching module cell"
+            ),
+            Self::ModuleBindingSlotOrder { binding, slot } => write!(
+                formatter,
+                "module binding {binding} slot {slot} is not dense and unique"
+            ),
+            Self::ModuleBindingPolicyMismatch { binding } => write!(
+                formatter,
+                "module binding {binding} policy is inconsistent with its origin"
+            ),
+            Self::ModuleBindingInitializerMismatch { binding, constant } => {
+                write!(formatter, "module binding {binding} initializer")?;
+                if let Some(constant) = constant {
+                    write!(formatter, " constant {constant} is not a function template")?;
+                } else {
+                    formatter.write_str(" is absent for a function declaration")?;
+                }
+                Ok(())
+            }
+            Self::ModuleImportRequestOutOfBounds {
+                binding,
+                request,
+                requests,
+            } => write!(
+                formatter,
+                "module binding {binding} import request {request} is outside request count {requests}"
+            ),
+            Self::ModuleRequestSpecifierMissing { request } => {
+                write!(formatter, "module request {request} has no specifier atom")
+            }
             Self::OrdinaryMethodHasFunctionName => formatter.write_str(
                 "ordinary method carries a source name before define_method initialization",
             ),
