@@ -3,10 +3,7 @@
 #![forbid(unsafe_code)]
 
 mod builtins;
-mod cdp;
-mod format;
 mod imports;
-mod inspector;
 mod loader;
 mod repl;
 mod resolver;
@@ -14,6 +11,7 @@ mod resolver;
 use std::{error::Error, path::Path, process::ExitCode, sync::Arc};
 
 use quickjs::{ScriptLimits, evaluate_preloaded_module_graph, evaluate_script};
+use quickjs_cdp::{self as cdp, format::format_argument};
 use quickjs_runtime::{Runtime, RuntimeLimits};
 
 use crate::resolver::NodeLikeResolver;
@@ -228,11 +226,7 @@ async fn run_file(
     };
 
     let print = match context.create_host_function("print", |ctx, call| {
-        let rendered: Vec<String> = call
-            .arguments()
-            .iter()
-            .map(crate::format::format_argument)
-            .collect();
+        let rendered: Vec<String> = call.arguments().iter().map(format_argument).collect();
         println!("{}", rendered.join(" "));
         Ok(ctx.undefined_value())
     }) {

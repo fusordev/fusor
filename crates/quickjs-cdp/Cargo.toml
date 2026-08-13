@@ -1,0 +1,19 @@
+[package]
+name = "quickjs-cdp"
+version = "0.0.1"
+description = "Chrome DevTools Protocol server for the pure-Rust QuickJS port"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+quickjs = { path = "../quickjs" }
+quickjs-runtime = { path = "../quickjs-runtime" }
+tokio = { workspace = true }
+base64.workspace = true
+serde_json.workspace = true
+sha1.workspace = true
+
+[lints]
+workspace = true

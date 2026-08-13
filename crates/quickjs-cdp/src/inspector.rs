@@ -1,4 +1,5 @@
-//! Engine-side Chrome DevTools Protocol inspection for the `qjs` CLI.
+//! Engine-side Chrome DevTools Protocol inspection: the objectId registry,
+//! intrinsic-function handles, and the `Runtime` domain handlers.
 //!
 //! The `Runtime` domain's inspection methods (property listing, object
 //! previews, function invocation) need live JavaScript values, so they run on
@@ -22,15 +23,15 @@ use serde_json::{Map, Value, json};
 use crate::cdp::{protocol_error, protocol_result, script_compile_error_position, source_position};
 
 /// Engine-side inspection state owned by the runtime task for one session.
-pub(crate) struct InspectState {
-    pub(crate) objects: ObjectRegistry,
+pub struct InspectState {
+    pub objects: ObjectRegistry,
     pub(crate) script_cache: ScriptCache,
     next_exception_id: u64,
     next_vm: u64,
 }
 
 impl InspectState {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             objects: ObjectRegistry::new(),
             script_cache: ScriptCache::new(),
@@ -105,7 +106,7 @@ impl ScriptCache {
 /// Each entry holds a public root, so a registered object stays alive until
 /// its objectId is released or the session ends. Repeated registration of the
 /// same identity reuses the existing objectId.
-pub(crate) struct ObjectRegistry {
+pub struct ObjectRegistry {
     next_id: u64,
     entries: HashMap<u64, RegistryEntry>,
 }
@@ -192,7 +193,7 @@ fn same_identity(left: &JsValue, right: &JsValue) -> bool {
 
 /// Rooted intrinsic functions used to inspect values through the engine's
 /// own builtins.
-pub(crate) struct InspectIntrinsics {
+pub struct InspectIntrinsics {
     get_own_property_names: Function,
     get_own_property_symbols: Function,
     get_own_property_descriptor: Function,
@@ -212,7 +213,7 @@ pub(crate) struct InspectIntrinsics {
 
 /// Failure while collecting the inspection intrinsics.
 #[derive(Debug)]
-pub(crate) enum InspectSetupError {
+pub enum InspectSetupError {
     Evaluate(ScriptEvaluationError),
     NotAFunction(&'static str),
 }
@@ -232,7 +233,7 @@ impl std::fmt::Display for InspectSetupError {
 }
 
 impl InspectIntrinsics {
-    pub(crate) fn new(context: &mut Context<'_>) -> Result<Self, InspectSetupError> {
+    pub fn new(context: &mut Context<'_>) -> Result<Self, InspectSetupError> {
         let intrinsic = |context: &mut Context<'_>, source: &'static str| {
             evaluate_script(context, source, "<cdp-intrinsic>", ScriptLimits::default())
                 .map_err(InspectSetupError::Evaluate)?
@@ -576,7 +577,7 @@ fn object_class(
 
 /// Renders one `Runtime.consoleAPICalled` event for host `print` output, so
 /// printed values also appear in the DevTools console.
-pub(crate) fn console_api_event(
+pub fn console_api_event(
     context: &mut Context<'_>,
     registry: &mut ObjectRegistry,
     intrinsics: &InspectIntrinsics,

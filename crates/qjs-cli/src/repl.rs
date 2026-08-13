@@ -30,7 +30,12 @@ use quickjs::{ScriptLimits, evaluate_preloaded_module_graph, evaluate_script};
 use quickjs_runtime::{Runtime, RuntimeLimits};
 use tokio::sync::mpsc;
 
-use crate::{cdp, format::format_value, inspector, report_error, resolver::NodeLikeResolver};
+use crate::{report_error, resolver::NodeLikeResolver};
+use quickjs_cdp::{
+    self as cdp,
+    format::{format_argument, format_value},
+    inspector,
+};
 
 /// Runs the REPL on stdin/stdout. Returns the process exit code.
 ///
@@ -177,11 +182,7 @@ fn install_print(
         if suppress.as_ref().is_some_and(|flag| flag.get()) {
             return Ok(ctx.undefined_value());
         }
-        let rendered: Vec<String> = call
-            .arguments()
-            .iter()
-            .map(crate::format::format_argument)
-            .collect();
+        let rendered: Vec<String> = call.arguments().iter().map(format_argument).collect();
         println!("{}", rendered.join(" "));
         if let Some(capture) = &capture {
             capture

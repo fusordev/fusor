@@ -1,4 +1,4 @@
-//! Completion-value formatting for the REPL and smoke output.
+//! Completion-value formatting shared by the inspector and the REPL.
 
 use quickjs_runtime::{JsValue, ValueKind};
 
@@ -8,7 +8,7 @@ const MAX_STRING_UNITS: usize = 4096;
 /// Formats a completion value with a simple, deterministic rendering:
 /// numbers, quoted strings, `undefined`/`null`/booleans, and shallow
 /// placeholders for objects, functions, symbols, and bigints.
-pub(crate) fn format_value(value: &JsValue) -> String {
+pub fn format_value(value: &JsValue) -> String {
     let Ok(kind) = value.kind() else {
         return "<released value>".to_owned();
     };
@@ -55,7 +55,7 @@ fn format_number(value: f64) -> String {
 
 /// Formats one `print` argument: strings render raw (Node `console.log`
 /// style), everything else uses the completion-value rendering.
-pub(crate) fn format_argument(value: &JsValue) -> String {
+pub fn format_argument(value: &JsValue) -> String {
     let Ok(kind) = value.kind() else {
         return "<released value>".to_owned();
     };

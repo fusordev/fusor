@@ -1388,13 +1388,12 @@ dependencies = [
 name = "qjs-cli"
 version = "0.0.1"
 dependencies = [
- "base64",
  "miette",
  "quickjs",
+ "quickjs-cdp",
  "quickjs-runtime",
  "rustyline",
  "serde_json",
- "sha1",
  "tokio",
 ]
 
@@ -1413,6 +1412,18 @@ dependencies = [
 [[package]]
 name = "quickjs-bytecode"
 version = "0.0.1"
+
+[[package]]
+name = "quickjs-cdp"
+version = "0.0.1"
+dependencies = [
+ "base64",
+ "quickjs",
+ "quickjs-runtime",
+ "serde_json",
+ "sha1",
+ "tokio",
+]
 
 [[package]]
 name = "quickjs-compiler"

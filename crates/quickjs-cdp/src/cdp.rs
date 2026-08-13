@@ -1,4 +1,5 @@
-//! Chrome DevTools Protocol server for the `qjs` CLI.
+//! Chrome DevTools Protocol transport: loopback HTTP discovery, WebSocket
+//! framing, and the shared debugger session.
 //!
 //! The engine is runtime-local and synchronous. This module consequently keeps
 //! network I/O on OS threads and exchanges JSON-only messages with the owning
@@ -29,13 +30,13 @@ const MAX_HTTP_HEADER_BYTES: usize = 16 * 1024;
 const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 
 /// A protocol request that requires the runtime-owning task.
-pub(crate) struct EngineRequest {
-    pub(crate) message: Value,
-    pub(crate) response: mpsc::Sender<Value>,
+pub struct EngineRequest {
+    pub message: Value,
+    pub response: mpsc::Sender<Value>,
 }
 
 /// Shared state for the CDP transport and the engine debugger hook.
-pub(crate) struct DebugSession {
+pub struct DebugSession {
     engine_sender: Option<tokio_mpsc::UnboundedSender<EngineRequest>>,
     state: Mutex<DebugState>,
     resume: Condvar,
@@ -88,7 +89,7 @@ enum OutboundFrame {
 }
 
 impl DebugSession {
-    pub(crate) fn without_engine() -> Arc<Self> {
+    pub fn without_engine() -> Arc<Self> {
         Arc::new(Self {
             engine_sender: None,
             state: Mutex::new(DebugState {
@@ -112,7 +113,7 @@ impl DebugSession {
     }
 
     #[must_use]
-    pub(crate) fn new(engine_sender: tokio_mpsc::UnboundedSender<EngineRequest>) -> Arc<Self> {
+    pub fn new(engine_sender: tokio_mpsc::UnboundedSender<EngineRequest>) -> Arc<Self> {
         Arc::new(Self {
             engine_sender: Some(engine_sender),
             state: Mutex::new(DebugState {
@@ -135,7 +136,7 @@ impl DebugSession {
         })
     }
 
-    pub(crate) fn request_initial_pause(&self) {
+    pub fn request_initial_pause(&self) {
         self.pause_requested.store(true, Ordering::Release);
     }
 
@@ -263,7 +264,7 @@ impl DebugSession {
     /// this response. `throwOnSideEffect` requests (the frontend's eager
     /// evaluation) additionally raise the caller's print-suppression flag so
     /// host output stays silent during a side-effect probe.
-    pub(crate) fn handle_engine_protocol(
+    pub fn handle_engine_protocol(
         &self,
         context: &mut Context<'_>,
         state: &mut crate::inspector::InspectState,
@@ -436,7 +437,7 @@ impl DebugSession {
     }
 
     /// Queues one protocol event for the attached client, when present.
-    pub(crate) fn emit_event(&self, message: Value) {
+    pub fn emit_event(&self, message: Value) {
         self.emit(message);
     }
 }
@@ -509,7 +510,7 @@ impl DebuggerHook for DebugSession {
 }
 
 /// Starts the loopback-only CDP discovery and WebSocket server.
-pub(crate) fn start(port: u16, session: Arc<DebugSession>) -> io::Result<u16> {
+pub fn start(port: u16, session: Arc<DebugSession>) -> io::Result<u16> {
     let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port))?;
     let port = listener.local_addr()?.port();
     thread::spawn(move || accept_loop(listener, session));
