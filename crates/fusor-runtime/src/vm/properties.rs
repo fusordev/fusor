@@ -2610,7 +2610,7 @@ pub(super) fn define_own_property(
                 && runtime.is_array_object(object)?
                 && key.as_index().is_some()
             {
-                let work = runtime.preview_array_define_data_property_work(object)?;
+                let work = runtime.preview_array_define_data_property_work(object, &key)?;
                 execution_budget.charge_instructions(work)?;
                 let outcome = runtime.define_array_own_property(object, key, property)?;
                 return Ok(array_property_definition_outcome(outcome));
@@ -2636,7 +2636,7 @@ pub(super) fn define_own_property(
                 && runtime.is_array_object(object)?
                 && key.as_index().is_some()
             {
-                let work = runtime.preview_array_define_data_property_work(object)?;
+                let work = runtime.preview_array_define_data_property_work(object, &key)?;
                 execution_budget.charge_instructions(work)?;
                 let outcome = runtime.define_array_own_property(object, key, property)?;
                 return Ok(array_property_definition_outcome(outcome));

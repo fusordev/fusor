@@ -2461,7 +2461,7 @@ impl BoxedPrimitive {
 const MAX_DENSE_ARRAY_GAP: usize = 1_024;
 
 #[derive(Debug)]
-enum ArrayStorage {
+pub(crate) enum ArrayStorage {
     Dense {
         elements: Vec<Option<StoredValue>>,
         present: usize,
@@ -2517,6 +2517,10 @@ impl ArrayState {
         matches!(self.storage, ArrayStorage::Dense { .. })
     }
 
+    pub(crate) const fn is_sparse(&self) -> bool {
+        matches!(self.storage, ArrayStorage::Sparse)
+    }
+
     pub(crate) const fn dense_property_count(&self) -> usize {
         match &self.storage {
             ArrayStorage::Dense { present, .. } => *present,
@@ -2563,6 +2567,32 @@ impl ArrayState {
             return false;
         };
         (index.get() as usize) <= elements.len().saturating_add(MAX_DENSE_ARRAY_GAP)
+    }
+
+    /// Restores dense storage for a Sparse Array receiving its first early
+    /// default-data write.
+    ///
+    /// The caller must verify that the ordinary property record owns no
+    /// indexed shape slots first, so the two storages can never disagree
+    /// about the same index. A fresh `Array(n)` (sparse by construction)
+    /// writes its early indices densely, which keeps sequential `fill`,
+    /// `push`, and loop writes linear.
+    pub(crate) fn try_restore_dense(&mut self, index: ArrayIndex) -> Result<bool, TryReserveError> {
+        if !matches!(self.storage, ArrayStorage::Sparse) {
+            return Ok(false);
+        }
+        let capacity = index.get() as usize + 1;
+        if capacity > MAX_DENSE_ARRAY_GAP {
+            return Ok(false);
+        }
+        let mut elements = Vec::new();
+        elements.try_reserve_exact(capacity)?;
+        elements.resize_with(capacity, || None);
+        self.storage = ArrayStorage::Dense {
+            elements,
+            present: 0,
+        };
+        Ok(true)
     }
 
     /// Returns a conservative upper bound for one default-data write to this
@@ -4950,6 +4980,35 @@ impl HeapObject {
     #[must_use]
     pub(crate) const fn array_state_mut(&mut self) -> Option<&mut ArrayState> {
         self.kind.array_mut()
+    }
+
+    /// Stores one default data value at a dense index, restoring dense
+    /// storage for a fresh Sparse Array first when the caller verified that
+    /// the ordinary record owns no indexed shape slots.
+    pub(crate) fn try_restore_dense_and_store(
+        &mut self,
+        index: ArrayIndex,
+        value: StoredValue,
+    ) -> Result<bool, TryReserveError> {
+        let needs_restore = self
+            .array_state()
+            .is_some_and(|state| !state.can_store_dense(index));
+        if needs_restore {
+            debug_assert!(
+                !self.record.has_indexed_property(),
+                "dense restoration must not shadow indexed shape slots"
+            );
+            let state = self
+                .array_state_mut()
+                .expect("dense array write received an array state");
+            if !state.try_restore_dense(index)? {
+                return Ok(false);
+            }
+        }
+        let state = self
+            .array_state_mut()
+            .expect("dense array write received an array state");
+        state.try_store_dense(index, value)
     }
 
     pub(crate) fn property_count(&self) -> usize {
