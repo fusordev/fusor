@@ -23,6 +23,7 @@ license = "MIT"
 
 [workspace.dependencies]
 base64 = "=0.22.1"
+serde = { version = "=1.0.228", features = ["derive"] }
 emojis = "=0.9.0"
 fixed_decimal = { version = "=0.7.2", features = ["ryu"] }
 icu = { version = "=2.2.0", default-features = false }

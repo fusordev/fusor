@@ -65,7 +65,7 @@
 
 - [x] `fusor-ops` proc-macro crate:`#[op]` / `#[op(async)]` / `#[op(name = "...")]`
 - [x] `OpError { class, message, code }`;反序列化失败 → `TypeError`(注明参数序号)
-- [ ] JsValue `Deserializer`(整值检查、`Option`/null、seq/元组、map/struct)+ `Serializer`(unit/bool/str/seq/map/`Option::None`)
+- [x] JsValue `Deserializer`(整值检查、`Option`/null、seq/元组、map/struct)+ `Serializer`(unit/bool/str/seq/map/`Option::None`)
 - [ ] `Fusor` 命名空间对象(global 上 writable:false/configurable:false)+ `Fusor.ops` 子对象
 - [ ] op 以函数原 snake_case 名安装为 `Fusor.ops` 属性;overlay 间同名冲突组装期报错
 - [ ] 异步 op:`new_promise` + spawn(`Send + 'static` 编译期检查)+ mpsc 完成回主任务 resolve

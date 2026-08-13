@@ -1468,6 +1468,67 @@ impl Context<'_> {
         ))
     }
 
+    /// Reports whether a same-runtime object value is an Array exotic
+    /// object (ECMA-262 10.4.2.2 `IsArray`); every other value reports
+    /// `false`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a handle error for an orphaned or foreign value.
+    pub fn is_array(&self, value: &JsValue) -> Result<bool, crate::ExecutionError> {
+        let owner = value.owner()?;
+        self.runtime.validate_owner(&owner, HandleKind::Value)?;
+        let StoredValue::Object(object) = value.stored()? else {
+            return Ok(false);
+        };
+        self.runtime.is_array_object(*object).map_err(Into::into)
+    }
+
+    /// Creates a fresh realm-owned Array exotic object (ECMA-262 23.1.1.1)
+    /// with the realm's `%Array.prototype%` and the given dense elements.
+    ///
+    /// The returned value has [`crate::ValueKind::Object`]. Element values
+    /// are duplicated into the array's own storage; the source handles stay
+    /// valid.
+    ///
+    /// This function never panics.
+    ///
+    /// # Errors
+    ///
+    /// Returns a handle error for a foreign element or a limit, allocation,
+    /// or engine error when the array cannot be created.
+    pub fn new_array(
+        &mut self,
+        elements: Vec<JsValue>,
+    ) -> Result<JsValue, crate::ExecutionError> {
+        let mut stored = Vec::with_capacity(elements.len());
+        for element in &elements {
+            let owner = element.owner()?;
+            self.runtime.validate_owner(&owner, HandleKind::Value)?;
+            stored.push(element.stored()?.duplicate());
+        }
+        let array = self.runtime.allocate_array(self.realm, stored)?;
+        self.runtime.public_value(StoredValue::Object(array))
+    }
+
+    /// Creates a fresh realm-owned ordinary object with the realm's
+    /// `%Object.prototype%` (ECMA-262 10.1.12, `OrdinaryObjectCreate`).
+    ///
+    /// The returned value has [`crate::ValueKind::Object`]; populate it with
+    /// [`Object::set`]/[`Object::define_own_property`].
+    ///
+    /// This function never panics.
+    ///
+    /// # Errors
+    ///
+    /// Returns a limit, allocation, or engine error when the object cannot
+    /// be created.
+    pub fn new_object(&mut self) -> Result<JsValue, crate::ExecutionError> {
+        let prototype = self.runtime.realm_object_prototype(self.realm)?;
+        let object = self.runtime.allocate_ordinary_object(prototype)?;
+        self.runtime.public_value(StoredValue::Object(object))
+    }
+
     /// Roots this context's realm global object as an ordinary object value    /// (ECMA-262 9.1.1 `GetGlobalObject`).
     ///
     /// The returned value has [`crate::ValueKind::Object`]; convert it with

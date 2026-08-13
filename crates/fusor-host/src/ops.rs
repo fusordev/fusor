@@ -1,6 +1,10 @@
 //! Op binding layer (§5): declarations, the op error contract, and the
 //! assembly registry.
 
+mod serde;
+
+pub use serde::{DeserializationError, JsValueDeserializer, JsValueSerializer, SerializationError};
+
 use std::collections::HashMap;
 
 /// Static declaration metadata for one `#[op]` function.
