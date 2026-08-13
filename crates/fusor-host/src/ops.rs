@@ -2,13 +2,66 @@
 //! assembly registry.
 
 mod op_runtime;
+mod resources;
 mod serde;
 
 pub use op_runtime::{OpRuntime, OpRuntimeError, install_op_runtime, poll_op_completions, spawn_op};
+pub use resources::{
+    Resource, ResourceId, ResourceTable, ResourceTableError,
+};
 pub use serde::{DeserializationError, JsValueDeserializer, JsValueSerializer, SerializationError};
 
 use fusor_runtime::{Context, JsValue};
 use std::collections::HashMap;
+use std::rc::Rc;
+
+thread_local! {
+    static RESOURCE_TABLE: std::cell::RefCell<ResourceTable> =
+        std::cell::RefCell::new(ResourceTable::new());
+}
+
+/// Installs the host-runtime-wide resource table shared by every op (§5.6).
+///
+/// # Errors
+///
+/// Returns the table unchanged when one is already installed.
+pub fn install_resource_table(table: ResourceTable) -> Result<(), ResourceTable> {
+    RESOURCE_TABLE.with(|slot| {
+        if !slot.borrow().is_empty() {
+            return Err(table);
+        }
+        *slot.borrow_mut() = table;
+        Ok(())
+    })
+}
+
+/// Looks up one live resource through the installed table (the
+/// `ResourceId`-parameter specialization of the `#[op]` macro).
+#[must_use]
+pub fn lookup_resource(id: u32) -> Option<Rc<dyn Resource>> {
+    RESOURCE_TABLE.with(|slot| {
+        slot.borrow()
+            .get(ResourceId::from_u32(id))
+            .cloned()
+    })
+}
+
+/// Adds one resource to the installed table (host bootstrap path).
+///
+/// # Errors
+///
+/// Returns the resource unchanged when the id domain is exhausted.
+pub fn add_resource(
+    resource: Rc<dyn Resource>,
+) -> Result<ResourceId, resources::ResourceTableError> {
+    RESOURCE_TABLE.with(|slot| slot.borrow_mut().add(resource))
+}
+
+/// Closes one resource in the installed table (the JS-side close op path).
+#[must_use]
+pub fn close_resource(id: u32) -> bool {
+    RESOURCE_TABLE.with(|slot| slot.borrow_mut().close(ResourceId::from_u32(id)))
+}
 
 /// Static declaration metadata for one `#[op]` function.
 ///

@@ -101,6 +101,98 @@ pub fn op(attribute: TokenStream, item: TokenStream) -> TokenStream {
     let parameter_names: Vec<&syn::Ident> = parameters.iter().map(|(name, _)| *name).collect();
     let parameter_declarations: Vec<&syn::Type> = parameters.iter().map(|(_, ty)| *ty).collect();
 
+    // Per-parameter deserialization: `ResourceId` parameters resolve through
+    // the installed resource table (§5.6, §5.8) and everything else through
+    // the serde bridge.
+    let parameter_bindings: Vec<proc_macro2::TokenStream> = parameters
+        .iter()
+        .enumerate()
+        .map(|(index, (name, ty))| {
+            let index_literal = syn::Index::from(index);
+            let type_text = quote!(#ty).to_string().replace(' ', "");
+            if type_text.ends_with("ResourceId") {
+                quote! {
+                    let #name: #ty = match arguments.next() {
+                        ::std::option::Option::Some(value) => {
+                            let Some(raw) = value.as_u32().ok().flatten() else {
+                                return ::std::result::Result::Err(
+                                    ::fusor_host::ops::op_error_value(
+                                        ctx,
+                                        ::fusor_host::ops::OpError::type_error(
+                                            #index_literal,
+                                            "expected a resource id Number",
+                                        ),
+                                    ),
+                                );
+                            };
+                            match ::fusor_host::ops::lookup_resource(raw) {
+                                ::std::option::Option::Some(_resource) => {
+                                    ::fusor_host::ops::ResourceId::from_u32(raw)
+                                }
+                                ::std::option::Option::None => {
+                                    return ::std::result::Result::Err(
+                                        ::fusor_host::ops::op_error_value(
+                                            ctx,
+                                            ::fusor_host::ops::OpError::type_error(
+                                                #index_literal,
+                                                "resource not found",
+                                            ),
+                                        ),
+                                    );
+                                }
+                            }
+                        }
+                        ::std::option::Option::None => {
+                            return ::std::result::Result::Err(
+                                ::fusor_host::ops::op_error_value(
+                                    ctx,
+                                    ::fusor_host::ops::OpError::type_error(
+                                        #index_literal,
+                                        "missing argument",
+                                    ),
+                                ),
+                            );
+                        }
+                    };
+                }
+            } else {
+                quote! {
+                    let #name: #ty = match arguments.next() {
+                        ::std::option::Option::Some(value) => {
+                            match ::serde::Deserialize::deserialize(
+                                ::fusor_host::ops::JsValueDeserializer::new(ctx, value, #index_literal),
+                            ) {
+                                ::std::result::Result::Ok(value) => value,
+                                ::std::result::Result::Err(error) => {
+                                    return ::std::result::Result::Err(
+                                        ::fusor_host::ops::op_error_value(
+                                            ctx,
+                                            ::fusor_host::ops::OpError::type_error(
+                                                error.parameter,
+                                                error.message,
+                                            ),
+                                        ),
+                                    );
+                                }
+                            }
+                        }
+                        ::std::option::Option::None => {
+                            return ::std::result::Result::Err(
+                                ::fusor_host::ops::op_error_value(
+                                    ctx,
+                                    ::fusor_host::ops::OpError::type_error(
+                                        #index_literal,
+                                        "missing argument",
+                                    ),
+                                ),
+                            );
+                        }
+                    };
+                }
+            }
+        })
+        .collect();
+
     // The generated glue deserializes each argument through the serde bridge,
     // invokes the op function, and serializes the result back; `OpError`s
     // become thrown JavaScript errors of their class (§5.3).
@@ -113,44 +205,7 @@ pub fn op(attribute: TokenStream, item: TokenStream) -> TokenStream {
                 call: ::fusor_runtime::HostCall,
             ) -> ::std::result::Result<::fusor_runtime::JsValue, ::fusor_runtime::JsValue> {
                 let mut arguments = call.arguments().iter();
-                let mut argument_index: usize = 0;
-                #(
-                    let #parameter_names: #parameter_declarations = {
-                        let index = argument_index;
-                        argument_index = argument_index.saturating_add(1);
-                        match arguments.next() {
-                            ::std::option::Option::Some(value) => {
-                                match ::serde::Deserialize::deserialize(
-                                    ::fusor_host::ops::JsValueDeserializer::new(ctx, value, index),
-                                ) {
-                                    ::std::result::Result::Ok(value) => value,
-                                    ::std::result::Result::Err(error) => {
-                                        return ::std::result::Result::Err(
-                                            ::fusor_host::ops::op_error_value(
-                                                ctx,
-                                                ::fusor_host::ops::OpError::type_error(
-                                                    error.parameter,
-                                                    error.message,
-                                                ),
-                                            ),
-                                        );
-                                    }
-                                }
-                            }
-                            ::std::option::Option::None => {
-                                return ::std::result::Result::Err(
-                                    ::fusor_host::ops::op_error_value(
-                                        ctx,
-                                        ::fusor_host::ops::OpError::type_error(
-                                            index,
-                                            "missing argument",
-                                        ),
-                                    ),
-                                );
-                            }
-                        }
-                    };
-                )*
+                #(#parameter_bindings)*
                 // ECMA-262 host Promise: settle it when the spawned future
                 // completes and the owner task polls the completion channel.
                 let (promise, resolver) = match ctx.new_promise() {
@@ -189,44 +244,7 @@ pub fn op(attribute: TokenStream, item: TokenStream) -> TokenStream {
                 call: ::fusor_runtime::HostCall,
             ) -> ::std::result::Result<::fusor_runtime::JsValue, ::fusor_runtime::JsValue> {
                 let mut arguments = call.arguments().iter();
-                let mut argument_index: usize = 0;
-                #(
-                    let #parameter_names: #parameter_declarations = {
-                        let index = argument_index;
-                        argument_index = argument_index.saturating_add(1);
-                        match arguments.next() {
-                            ::std::option::Option::Some(value) => {
-                                match ::serde::Deserialize::deserialize(
-                                    ::fusor_host::ops::JsValueDeserializer::new(ctx, value, index),
-                                ) {
-                                    ::std::result::Result::Ok(value) => value,
-                                    ::std::result::Result::Err(error) => {
-                                        return ::std::result::Result::Err(
-                                            ::fusor_host::ops::op_error_value(
-                                                ctx,
-                                                ::fusor_host::ops::OpError::type_error(
-                                                    error.parameter,
-                                                    error.message,
-                                                ),
-                                            ),
-                                        );
-                                    }
-                                }
-                            }
-                            ::std::option::Option::None => {
-                                return ::std::result::Result::Err(
-                                    ::fusor_host::ops::op_error_value(
-                                        ctx,
-                                        ::fusor_host::ops::OpError::type_error(
-                                            index,
-                                            "missing argument",
-                                        ),
-                                    ),
-                                );
-                            }
-                        }
-                    };
-                )*
+                #(#parameter_bindings)*
                 match #function_name(#(#parameter_names),*) {
                     ::std::result::Result::Ok(value) => {
                         ::fusor_host::ops::serialize_value(ctx, &value)

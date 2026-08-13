@@ -193,8 +193,7 @@ pub fn poll_op_completions(context: &mut Context<'_>) -> Result<usize, OpRuntime
 }
 
 thread_local! {
-    static OP_RUNTIME: std::cell::RefCell<Option<OpRuntime>> =
-        const { std::cell::RefCell::new(None) };
+    static OP_RUNTIME: std::cell::RefCell<Option<OpRuntime>> = std::cell::RefCell::new(None);
 }
 
 /// Settles one finished op promise with its stored outcome.
