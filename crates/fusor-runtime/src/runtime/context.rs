@@ -1377,6 +1377,38 @@ impl Context<'_> {
         )
     }
 
+    /// Constructs a fresh realm-owned JavaScript Error object of the given
+    /// intrinsic family (ECMA-262 20.5.1.1 `Error` constructor semantics:
+    /// `%Error%`, `%TypeError%`, `%RangeError%`, `%SyntaxError%`, and the
+    /// remaining families all construct here).
+    ///
+    /// The returned value is a rooted ordinary object with the family's
+    /// intrinsic prototype and a `message` own property. It is not thrown by
+    /// this call; hand it to [`Object::get`]-observable code, to a host
+    /// callback's `Err` arm, or to a future Promise rejection to make the
+    /// engine surface it.
+    ///
+    /// This function never panics.
+    ///
+    /// # Errors
+    ///
+    /// Returns a string error when `message` is not valid UTF-16, or a
+    /// limit, allocation, or engine error when the object cannot be
+    /// materialized.
+    pub fn error(
+        &mut self,
+        kind: crate::ErrorObjectKind,
+        message: &str,
+    ) -> Result<JsValue, crate::ExecutionError> {
+        let object = self.runtime.materialize_error_object_of_family(
+            self.realm,
+            super::ErrorIntrinsicKind::from_error_object_kind(kind),
+            JsString::from_utf8(message)?,
+            None,
+        )?;
+        self.runtime.public_value(StoredValue::Object(object))
+    }
+
     /// Roots this context's realm global object as an ordinary object value
     /// (ECMA-262 9.1.1 `GetGlobalObject`).
     ///

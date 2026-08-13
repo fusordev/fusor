@@ -33,9 +33,9 @@
 
 ### 异常 API(§4.3)
 
-- [ ] `Context::error(kind, message)`(Error/TypeError/RangeError/SyntaxError)
-- [ ] `CallError::Thrown` / `ExecutionError::Exception` 携带结构化 `StackTrace`(source/span/function name)
-- [ ] 测试:thrown 值同一性(JS `catch` 观察值与 Rust 侧一致);stack frame 映射
+- [x] `Context::error(kind, message)`(Error/TypeError/RangeError/SyntaxError)
+- [x] `CallError::Thrown` / `ExecutionError::Exception` 携带结构化 `StackTrace`(source/span/function name)
+- [x] 测试:thrown 值同一性(JS `catch` 观察值与 Rust 侧一致);stack frame 映射
 
 ### Promise resolver(§4.4)
 

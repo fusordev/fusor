@@ -167,6 +167,20 @@ impl ErrorIntrinsicKind {
         Self::AggregateError,
     ];
 
+    pub(crate) const fn from_error_object_kind(kind: ErrorObjectKind) -> Self {
+        match kind {
+            ErrorObjectKind::Error => Self::Error,
+            ErrorObjectKind::EvalError => Self::EvalError,
+            ErrorObjectKind::RangeError => Self::RangeError,
+            ErrorObjectKind::ReferenceError => Self::ReferenceError,
+            ErrorObjectKind::SyntaxError => Self::SyntaxError,
+            ErrorObjectKind::TypeError => Self::TypeError,
+            ErrorObjectKind::UriError => Self::UriError,
+            ErrorObjectKind::InternalError => Self::InternalError,
+            ErrorObjectKind::AggregateError => Self::AggregateError,
+        }
+    }
+
     const fn public_kind(self) -> ErrorObjectKind {
         match self {
             Self::Error => ErrorObjectKind::Error,

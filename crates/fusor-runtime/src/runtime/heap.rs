@@ -734,7 +734,24 @@ impl Runtime {
         message: JsString,
         stack: Option<JsString>,
     ) -> Result<ObjectId, crate::ExecutionError> {
-        let prototype = self.realm_error_prototype(realm, kind)?;
+        self.materialize_error_object_of_family(
+            realm,
+            ErrorIntrinsicKind::from_exception_kind(kind),
+            message,
+            stack,
+        )
+    }
+
+    /// Materializes one realm-owned Error object of an exact intrinsic family
+    /// (including plain `%Error%`, which [`ExceptionKind`] cannot express).
+    pub(crate) fn materialize_error_object_of_family(
+        &mut self,
+        realm: RealmId,
+        kind: ErrorIntrinsicKind,
+        message: JsString,
+        stack: Option<JsString>,
+    ) -> Result<ObjectId, crate::ExecutionError> {
+        let prototype = self.realm_error_intrinsic_prototype(realm, kind)?;
         let property_count = 1_usize;
         check_execution_limit(
             RuntimeResource::HeapObjects,
