@@ -496,14 +496,21 @@ pub(crate) fn reject_dynamic_import_load(
     import: crate::runtime::PendingDynamicImport,
     message: &str,
 ) -> Result<(), ExecutionError> {
+    reject_dynamic_import_load_kind(runtime, import, ExceptionKind::TypeError, message)
+}
+
+/// Rejects a parked dynamic `import()` with an engine-created error of `kind`
+/// (ECMA-262 `FinishDynamicImport` onRejected): a requested module that failed
+/// to parse or compile rejects with a `SyntaxError`, while a host load or
+/// resolution failure rejects with a `TypeError`.
+pub(crate) fn reject_dynamic_import_load_kind(
+    runtime: &mut Runtime,
+    import: crate::runtime::PendingDynamicImport,
+    kind: ExceptionKind,
+    message: &str,
+) -> Result<(), ExecutionError> {
     let record = import.record;
-    reject_parked_import(
-        runtime,
-        record.realm,
-        record.promise,
-        ExceptionKind::TypeError,
-        message,
-    )
+    reject_parked_import(runtime, record.realm, record.promise, kind, message)
 }
 
 fn reject_parked_import(

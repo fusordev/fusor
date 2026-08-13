@@ -1503,9 +1503,26 @@ pub fn settle_dynamic_import(
             limits.execution,
             Some(&dynamic_service),
         )?,
+        // A requested module that failed to parse or compile rejects with a
+        // `SyntaxError` (resolution phase); a host load or resolution miss
+        // rejects with a `TypeError` (ECMA-262 FinishDynamicImport onRejected).
+        Err(error) if is_syntax_resolution_failure(&error) => {
+            context.reject_dynamic_import_syntax(import, &error.to_string())?
+        }
         Err(error) => context.reject_dynamic_import(import, &error.to_string())?,
     }
     Ok(())
+}
+
+/// Whether a dynamic-import graph gather failure is a parse/compile failure in
+/// a requested module (SyntaxError-class) rather than a host load failure.
+fn is_syntax_resolution_failure(error: &ModuleEvaluationError) -> bool {
+    matches!(
+        error,
+        ModuleEvaluationError::Frontend(_)
+            | ModuleEvaluationError::Compiler(_)
+            | ModuleEvaluationError::Resolution(_)
+    )
 }
 
 // ---- Dynamic function support continues ----

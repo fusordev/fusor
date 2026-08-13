@@ -1236,6 +1236,26 @@ impl Context<'_> {
         crate::vm::reject_dynamic_import_load(self.runtime, import, message)
     }
 
+    /// Rejects a parked dynamic `import()` whose requested module failed to
+    /// parse or compile with a `SyntaxError` carrying the message (ECMA-262
+    /// `FinishDynamicImport` onRejected for a resolution-phase failure).
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`ExecutionError`] only for internal runtime failures.
+    pub fn reject_dynamic_import_syntax(
+        &mut self,
+        import: super::PendingDynamicImport,
+        message: &str,
+    ) -> Result<(), crate::ExecutionError> {
+        crate::vm::reject_dynamic_import_load_kind(
+            self.runtime,
+            import,
+            crate::ExceptionKind::SyntaxError,
+            message,
+        )
+    }
+
     /// Drains queued host jobs (Promise reactions, finalization cleanup,
     /// ready `Atomics.waitAsync` completions) to quiescence.
     ///
