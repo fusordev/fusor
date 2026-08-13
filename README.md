@@ -1,24 +1,26 @@
 # Project Fusor
 
-A safe, source-level Rust port of [QuickJS](https://bellard.org/quickjs/),
-targeting the upstream **2026-06-04** release and its ES2025 semantics.
+The Experimental JavaScript Engine — a safe, pure-Rust implementation of
+ECMAScript with ES2025 semantics. Runtime semantics and the differential-test
+profile are pinned and documented in [UPSTREAM.md](UPSTREAM.md).
 
 > [!IMPORTANT]
-> This is an in-progress port, not yet a complete JavaScript engine or a
-> drop-in QuickJS replacement. Unsupported behavior is intended to fail closed.
+> This is an in-progress engine, not yet a complete JavaScript
+> implementation or a drop-in replacement for its pinned reference.
+> Unsupported behavior is intended to fail closed.
 
 ## Scope
 
 - Pure Rust engine core: no C/C++ source, bindgen output, or C compiler in the
   build or runtime path. The optional N-API adapter is the isolated foreign-ABI
   boundary.
-- QuickJS is the sole runtime-semantics reference. Oxc is used only for parsing
-  and semantic analysis; the upstream C engine is a differential-test oracle,
-  never a linked or shipped dependency.
+- Runtime semantics follow a single pinned reference implementation, which is
+  a differential-test oracle only — never linked, compiled, or shipped. See
+  [UPSTREAM.md](UPSTREAM.md) and [PORTING.md](PORTING.md).
 - Only whole-function, typed, graph-verified bytecode may execute. Raw and
   serialized bytecode, and direct `eval`, remain fail closed.
-- The core crates forbid `unsafe`; Rust-native changes must preserve observable
-  behavior under differential tests.
+- The core crates forbid `unsafe`; changes must preserve observable behavior
+  under differential tests.
 
 ## Current profile
 
@@ -43,6 +45,8 @@ boundaries.
 | `fusor-bytecode` | Instructions, verifier, codec, and debug data |
 | `fusor-compiler` | Oxc lowering to verified bytecode |
 | `fusor-runtime` | Values, heap, realms, VM, and built-ins |
+| `fusor-cdp` | Loopback-only Chrome DevTools Protocol server |
+| `fusor-cli` | Node-like module runner, ESM REPL, and DevTools entry point |
 | `fusor` | Ergonomic host facade |
 
 Architecture and trust-boundary details are in
@@ -83,9 +87,9 @@ same way they do in Chromium.
 
 Known limits: evaluation is unavailable while the debugger is paused (the
 single runtime task owns the pause), `throwOnSideEffect` evaluates normally
-(QuickJS has no side-effect-free execution mode), `awaitPromise` and the
-command-line API (`includeCommandLineAPI`) are accepted but ignored, and
-`Runtime.globalLexicalScopeNames` lists global-object own properties only —
+(the pinned reference has no side-effect-free execution mode), `awaitPromise`
+and the command-line API (`includeCommandLineAPI`) are accepted but ignored,
+and `Runtime.globalLexicalScopeNames` lists global-object own properties only —
 `let`/`class` bindings live in the declarative global environment and are not
 enumerated.
 
@@ -102,25 +106,25 @@ cargo doc --workspace --no-deps
 ```
 
 For a changed compatibility area, run its matching differential corpus against
-the pinned upstream QuickJS oracle, for example:
+the pinned upstream oracle, for example:
 
 ```console
 cargo xtask parser-differential \\
-  --oracle /path/to/quickjs-2026-06-04/qjs
+  --oracle /path/to/pinned-qjs
 cargo xtask dynamic-function-differential \\
-  --oracle /path/to/quickjs-2026-06-04/qjsc
+  --oracle /path/to/pinned-qjsc
 ```
 
-The parser corpus is a closed ledger: it fails when a pinned QuickJS grammar
-production has no accepted fixture, when a diagnostic the pinned front end can
-raise has no fixture, or when the oracle's message stops matching the pinned
-text. Additional corpora cover Number radix conversion, control flow,
+The parser corpus is a closed ledger: it fails when a pinned grammar
+production has no accepted fixture, when a diagnostic the front end can raise
+has no fixture, or when the oracle's message stops matching the pinned text.
+Additional corpora cover Number radix conversion, control flow,
 `Function.prototype.apply`/`bind`, iterators, call spread, and Errors. Those
-manifests are expanding compatibility gates, not claims of exhaustive QuickJS
+manifests are expanding compatibility gates, not claims of exhaustive
 coverage.
 
 ## License
 
-MIT. The original QuickJS copyright and permission notice are retained in
-[LICENSE-quickjs](LICENSE-quickjs); the engine's own notice is in
-[LICENSE](LICENSE).
+MIT. The engine's own notice is in [LICENSE](LICENSE); the upstream
+reference's original copyright and permission notice are retained in
+[LICENSE-quickjs](LICENSE-quickjs).
