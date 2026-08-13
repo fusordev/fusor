@@ -23,7 +23,7 @@
 - [x] 全部路由到 `define_property.rs` 不变量校验路径(不可配置/不可写/`[[Extensible]]` 全生效)
 - [x] `Context::set_global` 改为 `[[DefineOwnProperty]]` 语义(writable/enumerable:false/configurable)
 - [x] `set_global` 三缺陷回归测试:foreign 值 → `HandleError::ForeignRuntime`;重复 key 覆盖(无影子槽位,delete 后无残留);冻结 global → 按规范抛错
-- [ ] 属性 API 全路径测试(每内部方法 × 正常 / 不变量违规 / 外来与过期句柄)
+- [x] 属性 API 全路径测试(每内部方法 × 正常 / 不变量违规 / 外来与过期句柄)
 
 ### 构造路径(§4.2)
 

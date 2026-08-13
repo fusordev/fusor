@@ -454,14 +454,53 @@ fn host_property_ops_reject_foreign_handles() {
         .expect("object");
 
     let x = key(&mut context, "x");
+    let assert_foreign_object = |result: Result<_, ExecutionError>| {
+        assert!(
+            matches!(
+                result,
+                Err(ExecutionError::Handle(fusor_runtime::HandleError::ForeignRuntime {
+                    kind: fusor_runtime::HandleKind::Object
+                }))
+            ),
+            "expected a foreign-object error"
+        );
+    };
+    assert_foreign_object(other_global.get(&mut context, x.clone()).map(|_| ()));
+    assert_foreign_object(other_global.has(&mut context, x.clone()).map(|_| ()));
+    let one = context.number(JsNumber::from_i32(1));
+    assert_foreign_object(
+        other_global
+            .set(&mut context, x.clone(), one)
+            .map(|_| ()),
+    );
+    assert_foreign_object(other_global.delete(&mut context, x.clone()).map(|_| ()));
+    assert_foreign_object(other_global.own_property_keys(&mut context).map(|_| ()));
+    let descriptor = DescriptorFields::<JsValue> {
+        value: Some(other_value.clone()),
+        ..DescriptorFields::new()
+    }
+    .into_descriptor()
+    .expect("data descriptor");
+    assert_foreign_object(
+        other_global
+            .define_own_property(&mut context, x.clone(), descriptor)
+            .map(|_| ()),
+    );
+
     assert!(matches!(
-        other_global.get(&mut context, x.clone()),
+        global.set(&mut context, x.clone(), other_value.clone()),
         Err(ExecutionError::Handle(fusor_runtime::HandleError::ForeignRuntime {
-            kind: fusor_runtime::HandleKind::Object
+            kind: fusor_runtime::HandleKind::Value
         }))
     ));
+    let foreign_value_descriptor = DescriptorFields::<JsValue> {
+        get: Some(other_value),
+        ..DescriptorFields::new()
+    }
+    .into_descriptor()
+    .expect("accessor descriptor");
     assert!(matches!(
-        global.set(&mut context, x, other_value),
+        global.define_own_property(&mut context, x, foreign_value_descriptor),
         Err(ExecutionError::Handle(fusor_runtime::HandleError::ForeignRuntime {
             kind: fusor_runtime::HandleKind::Value
         }))
@@ -521,4 +560,137 @@ fn context_global_object_roundtrips_with_set_global() {
         .into_object()
         .expect("object");
     assert_number(&global.get(&mut context, host_global).expect("read back"), 5);
+}
+
+#[test]
+fn host_property_ops_reject_orphaned_handles() {
+    // A handle outliving its runtime reports `Orphaned` at every internal
+    // method entry, before any engine state is touched. Stale handles (a
+    // live runtime whose object was collected) are unreachable through the
+    // public API: every published handle is an Arc-backed root, so a
+    // collectable object has no surviving handle by construction.
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let orphaned = context
+        .global_object()
+        .expect("global object")
+        .into_object()
+        .expect("object");
+    let x = key(&mut context, "x");
+    drop(context);
+    drop(runtime);
+
+    // A second runtime supplies the Context argument the API requires; the
+    // handle's own mailbox check fires first and wins.
+    let mut other_runtime = Runtime::try_new(RuntimeLimits::default()).expect("other runtime");
+    let other_realm = other_runtime.create_realm().expect("other realm");
+    let mut other_context = other_runtime.context(&other_realm).expect("other context");
+    let one = other_context.number(JsNumber::from_i32(1));
+
+    let assert_orphaned = |result: Result<_, ExecutionError>| {
+        assert!(
+            matches!(
+                result,
+                Err(ExecutionError::Handle(fusor_runtime::HandleError::Orphaned {
+                    kind: fusor_runtime::HandleKind::Object
+                }))
+            ),
+            "expected an orphaned-object error"
+        );
+    };
+    assert_orphaned(orphaned.get(&mut other_context, x.clone()).map(|_| ()));
+    assert_orphaned(orphaned.set(&mut other_context, x.clone(), one.clone()));
+    assert_orphaned(orphaned.has(&mut other_context, x.clone()).map(|_| ()));
+    assert_orphaned(orphaned.delete(&mut other_context, x.clone()).map(|_| ()));
+    assert_orphaned(
+        orphaned
+            .own_property_keys(&mut other_context)
+            .map(|_| ()),
+    );
+    let descriptor = DescriptorFields::<JsValue> {
+        value: Some(one.clone()),
+        ..DescriptorFields::new()
+    }
+    .into_descriptor()
+    .expect("data descriptor");
+    assert_orphaned(
+        orphaned
+            .define_own_property(&mut other_context, x.clone(), descriptor)
+            .map(|_| ()),
+    );
+}
+
+#[test]
+fn host_set_to_an_accessor_without_a_setter_throws_a_type_error() {
+    with_setup("var acc = { get g() { return 1; } };", |context, global| {
+        let acc_key = key(context, "acc");
+        let g = key(context, "g");
+        let acc = global
+            .get(context, acc_key)
+            .expect("get acc")
+            .into_object()
+            .expect("acc is an object");
+
+        match acc.set(context, g, context.number(JsNumber::from_i32(2))) {
+            Err(ExecutionError::Exception(exception)) => {
+                assert_eq!(exception.kind(), Some(ExceptionKind::TypeError));
+            }
+            other => panic!("expected a TypeError, got {other:?}"),
+        }
+    });
+}
+
+#[test]
+fn host_define_rejects_a_kind_change_on_a_non_configurable_property() {
+    with_setup(
+        "var o = {};\
+         Object.defineProperty(o, 'x', { value: 1, configurable: false });",
+        |context, global| {
+            let o_key = key(context, "o");
+            let x = key(context, "x");
+            let o = global
+                .get(context, o_key)
+                .expect("get o")
+                .into_object()
+                .expect("o is an object");
+
+            let accessor = DescriptorFields::<JsValue> {
+                get: Some(context.undefined()),
+                ..DescriptorFields::new()
+            }
+            .into_descriptor()
+            .expect("accessor descriptor");
+            assert!(
+                !o.define_own_property(context, x, accessor)
+                    .expect("kind change rejected"),
+                "a non-configurable data property cannot become an accessor"
+            );
+        },
+    );
+}
+
+#[test]
+fn host_get_on_a_revoked_proxy_throws_a_type_error() {
+    with_setup(
+        "var pair = Proxy.revocable({}, { get() { return 1; } });\
+         var p = pair.proxy;\
+         pair.revoke();",
+        |context, global| {
+            let p_key = key(context, "p");
+            let x = key(context, "x");
+            let proxy = global
+                .get(context, p_key)
+                .expect("get p")
+                .into_object()
+                .expect("p is an object");
+
+            match proxy.get(context, x) {
+                Err(ExecutionError::Exception(exception)) => {
+                    assert_eq!(exception.kind(), Some(ExceptionKind::TypeError));
+                }
+                other => panic!("expected a TypeError, got {other:?}"),
+            }
+        },
+    );
 }
