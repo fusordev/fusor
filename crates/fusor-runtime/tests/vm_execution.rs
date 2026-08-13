@@ -832,7 +832,7 @@ fn captured_tdz_state_survives_frame_teardown() {
 fn whole_graph_feature_admission_accepts_supported_unreachable_object_operators() {
     let authority = compile(
         "function fail(){\
-            if(false){return \"key\" in {};}\
+            if(false){function unreachable(){return \"key\" in {};}}\
             function child(left,right){return left instanceof right;}\
             return 0;\
         }",
@@ -850,6 +850,9 @@ fn whole_graph_feature_admission_accepts_supported_unreachable_object_operators(
                 .map(|instruction| instruction.decoded().instruction().opcode())
         })
         .collect::<Vec<_>>();
+    // Constant-folded dead code is eliminated from the reachable stream, but
+    // its closure templates keep their definition sites and are
+    // feature-checked like every other instruction in the graph.
     assert!(opcodes.contains(&FinalOpcode::In));
     assert!(opcodes.contains(&FinalOpcode::InstanceOf));
 
