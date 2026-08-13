@@ -45,9 +45,10 @@ pub use atom::{
 pub use bigint::{BigIntError, JsBigInt};
 pub use diagnostic::RuntimeDiagnosticError;
 pub use error::{
-    DynamicFunctionCompileFailure, DynamicFunctionScriptError, EngineFault, ErrorObjectKind,
-    ExceptionKind, ExecutionError, GlobalDeclarationRejectionKind, GlobalScriptError, HandleError,
-    HandleKind, InstallError, JsException, JsStackFrame, RuntimeError, RuntimeResource, ValueKind,
+    CallError, DynamicFunctionCompileFailure, DynamicFunctionScriptError, EngineFault,
+    ErrorObjectKind, ExceptionKind, ExecutionError, GlobalDeclarationRejectionKind,
+    GlobalScriptError, HandleError, HandleKind, InstallError, JsException, JsStackFrame,
+    RuntimeError, RuntimeResource, ValueKind,
 };
 pub use host::{
     DirectEvalCallerBinding, DirectEvalCallerBindingLocation, DirectEvalCallerBindingScope,
@@ -67,11 +68,11 @@ pub use property::{
     PropertyDescriptorKind, PropertyLayout, PropertyLayoutKind,
 };
 pub use runtime::{
-    CollectionReport, Context, ModuleError, ModuleErrorPhase, ModuleEvaluationError,
-    ModuleKey, ModuleLinkError, ModuleLoader, ModuleResolveError, PendingDynamicImport, Realm,
-    Runtime, RuntimeLimits, RuntimeUsage,
+    CollectionReport, Context, HostFunctionId, ModuleError, ModuleErrorPhase,
+    ModuleEvaluationError, ModuleKey, ModuleLinkError, ModuleLoader, ModuleResolveError,
+    PendingDynamicImport, Realm, Runtime, RuntimeLimits, RuntimeUsage,
 };
 pub use shared_array_buffer::SharedArrayBufferHandle;
 pub use string::{CodeUnits, JsString, JsStringError, MAX_STRING_CODE_UNITS};
-pub use value::{Function, JsValue, Object};
+pub use value::{Function, HostCall, HostCallback, JsValue, Object};
 pub use vm::ExecutionLimits;

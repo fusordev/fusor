@@ -5456,6 +5456,72 @@ pub(crate) fn execute_module_frame_internal(
     execute_frames_with_budget(runtime, frame, compiler, None, &mut execution_budget)
 }
 
+/// Invokes an arbitrary installed function with a receiver and argument list,
+/// returning its completion value (ECMA-262 `[[Call]]`).
+///
+/// This is the embedding entry point backing `Context::call_function`: native
+/// functions dispatch through the native-call machinery, bytecode functions
+/// through a prepared frame, both to a rooted completion value.
+pub(crate) fn call_function_internal(
+    runtime: &mut Runtime,
+    function: FunctionId,
+    receiver: StoredValue,
+    arguments: Vec<StoredValue>,
+    limits: ExecutionLimits,
+    compiler: Option<&Arc<dyn OrdinaryDynamicFunctionCompiler>>,
+) -> Result<StoredValue, ExecutionError> {
+    let mut execution_budget = ExecutionBudget::new(limits);
+    if let Some(native) = runtime
+        .functions
+        .get(function)
+        .and_then(|node| node.native().copied())
+    {
+        let inputs = CallInputs {
+            receiver,
+            arguments: CallArguments::from_values(arguments),
+            new_target: None,
+        };
+        let dispatch = dispatch_native_call_with_frames(
+            runtime,
+            function,
+            native,
+            inputs,
+            None,
+            None,
+            &[],
+            0,
+            0,
+            compiler,
+            &mut execution_budget,
+        );
+        return execute_root_dispatch_with_budget(
+            runtime,
+            dispatch,
+            Vec::new(),
+            compiler,
+            &mut execution_budget,
+        );
+    }
+    let plan = plan_frame(
+        runtime,
+        function,
+        0,
+        0,
+        arguments.len(),
+        FrameEntryKind::Call,
+    )?;
+    let frame = create_frame(
+        runtime,
+        plan,
+        receiver,
+        None,
+        FrameArguments::Owned(CallArguments::from_values(arguments)),
+        None,
+        None,
+    )?;
+    execute_frames_with_budget(runtime, frame, compiler, None, &mut execution_budget)
+}
+
 fn execute_frames(
     runtime: &mut Runtime,
     initial: Frame,

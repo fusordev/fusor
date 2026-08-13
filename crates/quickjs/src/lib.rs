@@ -2597,3 +2597,63 @@ fn engine_failure_with_source(
         }),
     }
 }
+
+#[cfg(test)]
+mod embed_tests {
+    use super::{ScriptLimits, evaluate_script};
+    use quickjs_runtime::{ExecutionLimits, JsNumber, Runtime, RuntimeLimits};
+
+    #[test]
+    fn call_function_and_host_function() {
+        let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+        let realm = runtime.create_realm().expect("realm");
+        let mut context = runtime.context(&realm).expect("context");
+        let limits = ScriptLimits::default();
+
+        let add = evaluate_script(
+            &mut context,
+            "function add(a, b) { return a + b; } add",
+            "embed-test",
+            limits,
+        )
+        .expect("script");
+        let add_fn = add.into_function().expect("function value");
+        let result = context
+            .call_function(
+                &add_fn,
+                context.undefined_value(),
+                vec![context.number(JsNumber::from_f64(2.0)), context.number(JsNumber::from_f64(3.0))],
+                ExecutionLimits::default(),
+            )
+            .expect("call");
+        assert_eq!(result.as_number().expect("number").unwrap().as_f64(), 5.0);
+
+        let double = context
+            .create_host_function("double", |ctx, call| {
+                let n = call.arguments()[0].as_number().expect("arg").expect("number");
+                Ok(ctx.number(n.add_numeric(n)))
+            })
+            .expect("host function");
+        let result = context
+            .call_function(
+                &double,
+                context.undefined_value(),
+                vec![context.number(JsNumber::from_f64(21.0))],
+                ExecutionLimits::default(),
+            )
+            .expect("host call");
+        assert_eq!(result.as_number().expect("number").unwrap().as_f64(), 42.0);
+
+        // Thrown exceptions surface as CallError::Thrown.
+        let thrown = context
+            .create_host_function("boom", |_ctx, _call| Err(_ctx.string(quickjs_runtime::JsString::from_utf8("boom").unwrap())))
+            .expect("host function");
+        let result = context.call_function(
+            &thrown,
+            context.undefined_value(),
+            vec![],
+            ExecutionLimits::default(),
+        );
+        assert!(matches!(result, Err(quickjs_runtime::CallError::Thrown(_))));
+    }
+}
