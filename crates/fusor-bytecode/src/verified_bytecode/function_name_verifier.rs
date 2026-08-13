@@ -829,6 +829,38 @@ fn derived_class_heritage_pair(
     let Some(closure_index) = definition_index.checked_sub(1) else {
         return false;
     };
+    // A compile-time `extends null` heritage emits the null-prototype pair
+    // directly — `[Null, Null, FClosure, DefineClass]` — with no runtime
+    // dispatch. The evaluated superclass is `null` and the prototype parent
+    // is the null-prototype marker, exactly the pair the runtime dispatch
+    // would have produced.
+    if let Some(superclass_index) = closure_index.checked_sub(1)
+        && let Some(prototype_index) = superclass_index.checked_sub(1)
+        && instructions
+            .get(superclass_index)
+            .is_some_and(|instruction| {
+                instruction.decoded().instruction().opcode() == FinalOpcode::Null
+            })
+        && instructions
+            .get(prototype_index)
+            .is_some_and(|instruction| {
+                instruction.decoded().instruction().opcode() == FinalOpcode::Null
+            })
+        && predecessor_counts.get(superclass_index) == Some(&1)
+        && predecessor_counts.get(prototype_index) == Some(&1)
+        && internal_stack.has_effective_successor(
+            instructions,
+            prototype_index,
+            usize_to_u32(superclass_index),
+        )
+        && internal_stack.has_effective_successor(
+            instructions,
+            superclass_index,
+            usize_to_u32(closure_index),
+        )
+    {
+        return true;
+    }
     let Some(null_index) = closure_index.checked_sub(1) else {
         return false;
     };

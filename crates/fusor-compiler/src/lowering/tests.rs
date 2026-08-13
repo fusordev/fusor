@@ -1108,6 +1108,7 @@ fn unreachable_closure_templates_keep_their_definition_sites() {
 }
 
 
+
 #[test]
 fn module_import_meta_compiles() {
     with_parsed_program(
@@ -1135,3 +1136,6 @@ fn module_import_meta_compiles() {
     )
     .expect("front-end acceptance");
 }
+
+
+
