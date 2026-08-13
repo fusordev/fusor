@@ -552,10 +552,10 @@ fn serve_connection(mut stream: TcpStream, session: Arc<DebugSession>) -> io::Re
 
 fn version_metadata(port: u16) -> Value {
     json!({
-        "Browser": "QuickJS-Rust/qjs",
+        "Browser": "Project Fusor",
         "Protocol-Version": "1.3",
-        "User-Agent": "fusor Chrome DevTools Protocol",
-        "V8-Version": "QuickJS-Rust",
+        "User-Agent": "Fusor with Chrome DevTools Protocol",
+        "V8-Version": "v0-fusor",
         "webSocketDebuggerUrl": websocket_url(port),
     })
 }
