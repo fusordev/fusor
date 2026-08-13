@@ -71,15 +71,21 @@ impl NodeLikeResolver {
             return Ok(normalize_path(Path::new(specifier)));
         }
         if specifier == "." || specifier == ".." || specifier.starts_with("./") || specifier.starts_with("../") {
-            let referrer = referrer.ok_or_else(|| {
-                ModuleSourceError::new(format!("relative specifier '{specifier}' has no referrer"))
-            })?;
-            let Some(referrer_file) = referrer.strip_prefix(FILE_SCHEME) else {
-                return Err(ModuleSourceError::new(format!(
-                    "relative specifier '{specifier}' cannot resolve against unknown referrer '{referrer}'"
-                )));
+            // A script-level `import()` has no module referrer; resolve its
+            // relative specifier against the process cwd, like Node's REPL.
+            let directory = match referrer {
+                Some(referrer) => {
+                    let Some(referrer_file) = referrer.strip_prefix(FILE_SCHEME) else {
+                        return Err(ModuleSourceError::new(format!(
+                            "relative specifier '{specifier}' cannot resolve against unknown referrer '{referrer}'"
+                        )));
+                    };
+                    Path::new(referrer_file)
+                        .parent()
+                        .map_or_else(|| PathBuf::from("/"), Path::to_path_buf)
+                }
+                None => self.cwd.clone(),
             };
-            let directory = Path::new(referrer_file).parent().map_or_else(|| PathBuf::from("/"), Path::to_path_buf);
             return Ok(normalize_path(&directory.join(specifier)));
         }
         Err(ModuleSourceError::new(format!(
@@ -293,11 +299,14 @@ mod tests {
     }
 
     #[test]
-    fn relative_specifiers_require_a_file_referrer() {
+    fn relative_specifiers_use_referrer_or_cwd() {
         let resolver = resolver();
-        resolver
-            .resolve_path("./dep.mjs", None)
-            .expect_err("missing referrer must error");
+        // A script-level import (no referrer) resolves against the cwd.
+        assert_eq!(
+            resolver.resolve_path("./dep.mjs", None).unwrap(),
+            PathBuf::from("/unused-cwd/dep.mjs")
+        );
+        // A non-file referrer still errors.
         resolver
             .resolve_path("./dep.mjs", Some("node:assert"))
             .expect_err("non-file referrer must error");

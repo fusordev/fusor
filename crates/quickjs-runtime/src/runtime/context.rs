@@ -1177,6 +1177,34 @@ impl Context<'_> {
         Ok(Function::from_root(value))
     }
 
+    /// Defines a writable, non-enumerable, configurable data property named
+    /// `name` on the realm's global object, hosting a value (for example a
+    /// [`Function`] returned by [`Self::create_host_function`]) so that
+    /// JavaScript code can reach it as `globalThis.name`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`ExecutionError`] for a foreign/orphaned value, a resource
+    /// limit, or an engine fault.
+    pub fn set_global(&mut self, name: &str, value: JsValue) -> Result<(), crate::ExecutionError> {
+        let object = self.runtime.realm_global_object(self.realm)?;
+        let stored = value.stored()?.duplicate();
+        let name_string = JsString::from_utf8(name)?;
+        let key = self.runtime.property_key_from_string(&name_string)?;
+        let record = self
+            .runtime
+            .object_record_mut(HeapReference::Object(object))?;
+        record
+            .append_data(key, PropertyLayout::data(true, false, true), stored)
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::ObjectProperties,
+                additional: 1,
+            })?;
+        self.runtime.object_properties = self.runtime.object_properties.saturating_add(1);
+        self.runtime.collection_pending = true;
+        Ok(())
+    }
+
     /// Registers a module record in this context's realm.
     pub fn register_module(
         &mut self,

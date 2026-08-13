@@ -19,8 +19,6 @@
 //! script entries cannot see module-scoped bindings, and only single-line
 //! imports are accumulated.
 
-use std::io::{BufRead, Write};
-
 use quickjs::{ScriptLimits, evaluate_preloaded_module_graph, evaluate_script};
 use quickjs_runtime::{Runtime, RuntimeLimits};
 
@@ -62,26 +60,56 @@ pub(crate) async fn run() -> u8 {
     let mut resolver = NodeLikeResolver::new(cwd.clone(), vec!["qjs".to_owned()]);
     let entry_prefix = format!("file://{}", cwd.display());
 
+    // Host `print`: renders each argument like the REPL's completion printer
+    // and writes it to stdout. Installed as a global so both script and module
+    // entries can reach it.
+    let print = match context.create_host_function("print", |ctx, call| {
+        let rendered: Vec<String> = call
+            .arguments()
+            .iter()
+            .map(crate::format::format_argument)
+            .collect();
+        println!("{}", rendered.join(" "));
+        Ok(ctx.undefined_value())
+    }) {
+        Ok(function) => function,
+        Err(error) => {
+            eprintln!("qjs: cannot install print: {error}");
+            return 1;
+        }
+    };
+    if let Err(error) = context.set_global("print", print.as_value()) {
+        eprintln!("qjs: cannot install the print global: {error}");
+        return 1;
+    }
+
     eprintln!("qjs REPL (host sugar, not a spec module record). .exit or Ctrl-D to quit.");
 
-    let stdin = std::io::stdin();
-    let mut lines = stdin.lock().lines();
+    let mut editor = match rustyline::DefaultEditor::new() {
+        Ok(editor) => editor,
+        Err(error) => {
+            eprintln!("qjs: cannot initialize the line editor: {error}");
+            return 1;
+        }
+    };
     let mut imports: Vec<String> = Vec::new();
     let mut entry_index = 0_u64;
     let mut pending = String::new();
     loop {
         let prompt = if pending.is_empty() { "qjs> " } else { "...> " };
-        print!("{prompt}");
-        let _ = std::io::stdout().flush();
-        let line = match lines.next() {
-            Some(Ok(line)) => line,
-            Some(Err(error)) => {
-                eprintln!("qjs: cannot read stdin: {error}");
-                return 1;
+        let line = match editor.readline(prompt) {
+            Ok(line) => {
+                let _ = editor.add_history_entry(line.as_str());
+                line
             }
-            None => {
+            Err(rustyline::error::ReadlineError::Interrupted) => continue,
+            Err(rustyline::error::ReadlineError::Eof) => {
                 println!();
                 return 0;
+            }
+            Err(error) => {
+                eprintln!("qjs: cannot read input: {error}");
+                return 1;
             }
         };
         if pending.is_empty() && line.trim() == ".exit" {
@@ -129,8 +157,19 @@ pub(crate) async fn run() -> u8 {
             }
         } else {
             let name = format!("<repl>:{entry_index}");
-            match evaluate_script(&mut context, &entry, &name, ScriptLimits::default()) {
-                Ok(value) => println!("{}", format_value(&value)),
+            let limits = ScriptLimits::default();
+            match evaluate_script(&mut context, &entry, &name, limits) {
+                Ok(value) => {
+                    // Script entries may park dynamic `import()`/`import.defer()`
+                    // loads; settle them so their reactions run before the next
+                    // entry.
+                    if let Err(error) =
+                        crate::imports::drain_pending_imports(&mut context, &mut resolver, limits).await
+                    {
+                        report_error("script entry", &error);
+                    }
+                    println!("{}", format_value(&value));
+                }
                 Err(error) => report_error("script entry", &error),
             }
         }

@@ -52,6 +52,25 @@ fn format_number(value: f64) -> String {
     format!("{value}")
 }
 
+/// Formats one `print` argument: strings render raw (Node `console.log`
+/// style), everything else uses the completion-value rendering.
+pub(crate) fn format_argument(value: &JsValue) -> String {
+    let Ok(kind) = value.kind() else {
+        return "<released value>".to_owned();
+    };
+    if kind == ValueKind::String
+        && let Ok(Some(string)) = value.as_string()
+    {
+        let units: Vec<u16> = string.code_units().take(MAX_STRING_UNITS + 1).collect();
+        let mut text = String::from_utf16_lossy(&units[..units.len().min(MAX_STRING_UNITS)]);
+        if units.len() > MAX_STRING_UNITS {
+            text.push('…');
+        }
+        return text;
+    }
+    format_value(value)
+}
+
 #[cfg(test)]
 mod tests {
     use quickjs::{ScriptLimits, evaluate_script};

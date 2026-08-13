@@ -16,6 +16,7 @@ quickjs = { path = "../quickjs" }
 quickjs-runtime = { path = "../quickjs-runtime" }
 tokio = { workspace = true, features = ["fs", "macros"] }
 miette = { workspace = true }
+rustyline = { workspace = true }
 
 [lints]
 workspace = true
