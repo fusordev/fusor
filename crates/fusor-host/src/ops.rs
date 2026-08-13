@@ -5,7 +5,10 @@ mod op_runtime;
 mod resources;
 mod serde;
 
-pub use op_runtime::{OpRuntime, OpRuntimeError, install_op_runtime, poll_op_completions, spawn_op};
+pub use op_runtime::{
+    OpRuntime, OpRuntimeError, install_op_runtime, pending_op_count, poll_op_completions,
+    spawn_op,
+};
 pub use resources::{
     Resource, ResourceId, ResourceTable, ResourceTableError,
 };

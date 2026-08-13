@@ -192,6 +192,17 @@ pub fn poll_op_completions(context: &mut Context<'_>) -> Result<usize, OpRuntime
     })
 }
 
+/// Returns the number of op futures still running (§6.5 alive source).
+#[must_use]
+pub fn pending_op_count() -> Result<usize, OpRuntimeError> {
+    OP_RUNTIME.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .map(OpRuntime::pending_count)
+            .ok_or(OpRuntimeError::NotInstalled)
+    })
+}
+
 thread_local! {
     static OP_RUNTIME: std::cell::RefCell<Option<OpRuntime>> = std::cell::RefCell::new(None);
 }

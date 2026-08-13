@@ -76,12 +76,12 @@
 
 ## 子项目 3:事件循环核心(fusor-host::loop)§6
 
-- [ ] `HostLoop`(Tokio current_thread)持续存活,非一次性 drain
-- [ ] turn 结构:事件处理 → `drain_host_jobs` 至静止 → 无事件时 select
+- [x] `HostLoop`(Tokio current_thread)持续存活,非一次性 drain
+- [x] turn 结构:事件处理 → `drain_host_jobs` 至静止 → 无事件时 select
 - [ ] 事件源:timers、异步 op 完成 mpsc、信号、`Atomics.waitAsync` deadline、自定义事件
 - [ ] timers ops + timer 记录堆(到期排序、同刻创建序、ms 向下取整、负值归 0)
 - [ ] `setImmediate` 队列语义(当前 turn 事件处理后、drain 前)
-- [ ] alive 判定(pending timers / 异步 op 队列);无 alive 且无 pending → 退出(可配置)
+- [x] alive 判定(pending timers / 异步 op 队列);无 alive 且无 pending → 退出(可配置)
 - [ ] `run_main` / `run_until_idle` API
 - [ ] 测试:虚拟时钟全 timer 场景;job 间不插入宿主回调(规范断言);退出条件矩阵
 
