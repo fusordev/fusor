@@ -11,7 +11,7 @@
 //!   single-line `import` statement from a successful module entry is
 //!   accumulated into a session prefix that is prepended to later module
 //!   entries, approximating the incrementally extended module environment of
-//!   MODULES.md's "ESM REPL".
+//!   docs/MODULES.md's "ESM REPL".
 //!
 //! This is documented host sugar, not a spec module record: each module entry
 //! gathers a fresh module graph (the facade is single-shot per call), so

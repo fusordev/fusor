@@ -2,7 +2,7 @@
 
 The Experimental JavaScript Engine — a safe, pure-Rust implementation of
 ECMAScript with ES2025 semantics. Runtime semantics and the differential-test
-profile are pinned and documented in [UPSTREAM.md](UPSTREAM.md).
+profile are pinned and documented in [docs/UPSTREAM.md](docs/UPSTREAM.md).
 
 > [!IMPORTANT]
 > This is an in-progress engine, not yet a complete JavaScript
@@ -16,7 +16,8 @@ profile are pinned and documented in [UPSTREAM.md](UPSTREAM.md).
   boundary.
 - Runtime semantics follow a single pinned reference implementation, which is
   a differential-test oracle only — never linked, compiled, or shipped. See
-  [UPSTREAM.md](UPSTREAM.md) and [PORTING.md](PORTING.md).
+  [docs/UPSTREAM.md](docs/UPSTREAM.md) and
+  [docs/PORTING.md](docs/PORTING.md).
 - Only whole-function, typed, graph-verified bytecode may execute. Raw and
   serialized bytecode, and direct `eval`, remain fail closed.
 - The core crates forbid `unsafe`; changes must preserve observable behavior
@@ -33,8 +34,8 @@ Symbol, Function, Array, and Error families.
 Key gaps remain: direct `eval` and `with`; residual class/compiler semantics;
 modules; the selected Annex B compatibility subset; multi-agent Atomics and
 immutable ArrayBuffer; and the public embedding/tooling surface. See
-[PORTING.md](PORTING.md) for the authoritative checklist and compatibility
-boundaries.
+[docs/PORTING.md](docs/PORTING.md) for the authoritative checklist and
+compatibility boundaries.
 
 ## Workspace
 
@@ -50,10 +51,10 @@ boundaries.
 | `fusor` | Ergonomic host facade |
 
 Architecture and trust-boundary details are in
-[ARCHITECTURE.md](ARCHITECTURE.md) and
-[BYTECODE_VERIFIER.md](BYTECODE_VERIFIER.md). See [UPSTREAM.md](UPSTREAM.md)
-for the pinned reference and [DEPENDENCIES.md](DEPENDENCIES.md) for dependency
-policy.
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and
+[docs/BYTECODE_VERIFIER.md](docs/BYTECODE_VERIFIER.md). See
+[docs/UPSTREAM.md](docs/UPSTREAM.md) for the pinned reference and
+[docs/DEPENDENCIES.md](docs/DEPENDENCIES.md) for dependency policy.
 
 ## DevTools
 
@@ -66,32 +67,8 @@ fusor run --inspect=9230 entry.mjs
 fusor run --script --inspect-brk app.js
 ```
 
-Chromium-compatible discovery endpoints are available at `/json/version` and
-`/json/list`; attach a CDP client to the returned `webSocketDebuggerUrl`.
-`--inspect-brk` pauses before the first verified instruction until the client
-sends `Runtime.runIfWaitingForDebugger` or `Debugger.resume`.
-
-The current protocol profile supports the `Runtime` inspection domain —
-`Runtime.evaluate` (with `objectId` results, object previews,
-`returnByValue` serialization, and structured `exceptionDetails`),
-`Runtime.getProperties` (descriptors, accessor getter execution, prototype
-chain walking, symbol keys), `Runtime.callFunctionOn`, `Runtime.releaseObject`
-and `Runtime.releaseObjectGroup`, `Runtime.globalLexicalScopeNames`,
-`Runtime.compileScript` (parse and compile only), `Runtime.getHeapUsage`, and
-`Runtime.getIsolateId` — together with the `Debugger` script-source,
-URL-breakpoint, pause, resume, and stepping controls. Stack locations retain
-exact compiler source spans and are converted to CDP's zero-based UTF-16 line
-and column coordinates. Inspection reads properties through the engine's own
-builtins, so accessor getters and Proxy traps execute during inspection the
-same way they do in Chromium.
-
-Known limits: evaluation is unavailable while the debugger is paused (the
-single runtime task owns the pause), `throwOnSideEffect` evaluates normally
-(the pinned reference has no side-effect-free execution mode), `awaitPromise`
-and the command-line API (`includeCommandLineAPI`) are accepted but ignored,
-and `Runtime.globalLexicalScopeNames` lists global-object own properties only —
-`let`/`class` bindings live in the declarative global environment and are not
-enumerated.
+The supported `Runtime`/`Debugger` protocol profile and its known limits are
+documented in [docs/DEVTOOLS.md](docs/DEVTOOLS.md).
 
 ## Development
 

@@ -2,7 +2,7 @@
 //!
 //! Where the pinned `QuickJS` 2026-06-04 engine and the specification agree, the
 //! oracle transcript is cited. Where they disagree the specification governs and
-//! the divergence carries an identifier; see `FUS-BIGINT-001` in `PORTING.md`.
+//! the divergence carries an identifier; see `FUS-BIGINT-001` in `docs/PORTING.md`.
 //!
 //! Oracle transcript for the agreeing behaviors:
 //!

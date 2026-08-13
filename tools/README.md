@@ -59,7 +59,7 @@ builtin table:
 
 ### ESM REPL (host sugar, not a spec module record)
 
-A session owns one realm and approximates MODULES.md's "ESM REPL" within
+A session owns one realm and approximates docs/MODULES.md's "ESM REPL" within
 the facade's single-shot module pipeline:
 
 - Entries without top-level `import`/`export` syntax evaluate as classic

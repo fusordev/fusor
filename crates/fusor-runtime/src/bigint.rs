@@ -865,7 +865,7 @@ impl JsBigInt {
     /// whenever `bits` covers the whole value, so the pinned `qjs` reports
     /// `BigInt.asUintN(64, -1n)` as `-1n`. The specification requires the
     /// result to be non-negative, and V8 reports `18446744073709551615n`. The
-    /// divergence is recorded as `FUS-BIGINT-001` in `PORTING.md`, and this
+    /// divergence is recorded as `FUS-BIGINT-001` in `docs/PORTING.md`, and this
     /// implementation follows ECMAScript.
     ///
     /// # Errors
