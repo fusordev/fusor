@@ -191,19 +191,25 @@ fn do_while_resets_script_completion_on_every_iteration() {
     )
     .expect("escaped wrapper with a do-while statement");
     let flow = tree.root().control_flow();
+    // A constant-true `while (true)` condition folds the conditional back
+    // edge into a plain goto; both spellings re-enter the loop at the same
+    // reset boundary. The target must precede the branch itself.
     let back_edge = flow
         .instructions()
         .iter()
-        .find(|instruction| {
-            matches!(
-                instruction.decoded().instruction().opcode(),
-                FinalOpcode::IfTrue | FinalOpcode::IfTrue8
-            )
+        .enumerate()
+        .find_map(|(index, instruction)| {
+            let target = instruction
+                .successors()
+                .branch_target()
+                .or_else(|| instruction.successors().jump_target())?;
+            (target.get() < index as u32).then_some(instruction)
         })
         .expect("do-while back edge");
     let reset_target = back_edge
         .successors()
         .branch_target()
+        .or_else(|| back_edge.successors().jump_target())
         .expect("verified do-while iteration target");
     let reset = flow
         .instruction(reset_target)
@@ -327,10 +333,17 @@ fn unresolved_names_lower_through_constructor_realm_global_slots() {
                 CompilerClosureSource::ConstructorRealmGlobal(_)
             ))
     );
+    // Unresolved global writes lower through the reference-based mutation
+    // pair (make_var_ref_ref / put_ref_value) in the current encoding.
     assert!(
         wrapper_opcodes
             .iter()
-            .any(|(opcode, _)| *opcode == FinalOpcode::PutVar)
+            .any(|(opcode, _)| {
+                matches!(
+                    *opcode,
+                    FinalOpcode::PutVar | FinalOpcode::PutRefValue
+                )
+            })
     );
     assert!(
         wrapper_opcodes
@@ -405,7 +418,12 @@ fn unresolved_global_mutation_forms_remain_whole_function_verified() {
         assert!(
             opcodes(wrapper)
                 .iter()
-                .any(|(opcode, _)| *opcode == FinalOpcode::PutVar)
+                .any(|(opcode, _)| {
+                    matches!(
+                        *opcode,
+                        FinalOpcode::PutVar | FinalOpcode::PutRefValue
+                    )
+                })
         );
     }
 }
@@ -927,3 +945,5 @@ fn var_initializer_runs_after_merged_function_instantiation() {
         "the source-order var initializer overwrites the hoisted function later"
     );
 }
+
+
