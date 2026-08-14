@@ -641,7 +641,7 @@ impl Runtime {
         for (id, binding) in self.global_bindings.iter() {
             let realm_id = realms
                 .get(binding.realm.index())
-                .map(super::runtime::Realm::id)
+                .map(Realm::id)
                 .ok_or(SnapshotError::IntegrityViolation)?;
             let state = self
                 .realms
@@ -1882,7 +1882,7 @@ fn encode_functions(runtime: &Runtime, watermark: usize) -> Result<Vec<u8>, Snap
     let mut code_payloads: Vec<(usize, RealmId, Vec<u8>)> = Vec::new();
     for (code_id, code) in runtime.code.iter() {
         let encoded =
-            fusor_bytecode::encode_verified_bytecode(&code.authority).map_err(|error| {
+            fusor_bytecode::encode_verified_bytecode(&code.authority).map_err(|_error| {
                 SnapshotError::Unsupported {
                     index: code_id.index(),
                     what: "a verified bytecode authority",

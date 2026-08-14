@@ -27,10 +27,20 @@ impl Overlay for CliOverlay {
 
     fn init_sources(&self) -> Vec<OverlaySource> {
         vec![OverlaySource {
-            specifier: "fusor:cli/print.js".to_owned(),
-            text: "globalThis.print = function print(...args) {\n\
-                       return Fusor.ops.op_core_print(...args);\n\
-                   };\n",
+            specifier: "fusor:core/testing".to_owned(),
+            text: r#"// Core
+Fusor.print = Fusor.ops.op_core_print;
+Fusor.now = () => Fusor.ops.op_core_now();
+Fusor.exit = (code) => Fusor.ops.op_process_exit(code);
+
+// Timers
+globalThis.setImmediate = Fusor.ops.op_set_immediate;
+globalThis.setTimeout = Fusor.ops.op_set_timeout;
+globalThis.setInterval = Fusor.ops.op_set_interval;
+globalThis.clearImmediate = Fusor.ops.op_clear_immediate;
+globalThis.clearTimeout = Fusor.ops.op_clear_timeout;
+globalThis.clearInterval = Fusor.ops.op_clear_interval;
+"#,
         }]
     }
 
