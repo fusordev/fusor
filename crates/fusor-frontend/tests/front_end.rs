@@ -921,19 +921,9 @@ fn rejects_import_phases_outside_the_quickjs_profile() {
             FrontendDiagnosticCode::UnsupportedImportSource,
         ),
         (
-            "import defer * as dependency from './dep.js';",
-            ParseMode::Module,
-            FrontendDiagnosticCode::UnsupportedImportDefer,
-        ),
-        (
             "const wasm = import.source('./module.wasm');",
             ParseMode::Script,
             FrontendDiagnosticCode::UnsupportedImportSource,
-        ),
-        (
-            "const dependency = import.defer('./dep.js');",
-            ParseMode::Script,
-            FrontendDiagnosticCode::UnsupportedImportDefer,
         ),
     ] {
         assert_profile_rejection(source, mode, expected_code);

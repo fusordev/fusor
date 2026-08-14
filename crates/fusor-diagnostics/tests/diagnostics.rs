@@ -12,7 +12,7 @@ fn diagnostic_codes_have_a_stable_validated_alphabet() {
     assert!(matches!(
         DiagnosticCode::new("fusor parser"),
         Err(DiagnosticCodeError::InvalidCharacter {
-            index: 7,
+            index: 5,
             character: ' '
         })
     ));

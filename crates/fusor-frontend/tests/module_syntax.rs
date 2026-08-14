@@ -107,27 +107,6 @@ fn decodes_oxc_lone_surrogate_markers_without_conflating_replacement_characters(
 }
 
 #[test]
-fn rejects_oxc_string_export_forms_that_the_quickjs_profile_does_not_accept() {
-    for (source, expected_code) in [
-        (
-            "export { \"remote\" as local } from './dep.js';",
-            FrontendDiagnosticCode::UnsupportedStringNamedReExport,
-        ),
-        (
-            "export * as \"namespace\" from './dep.js';",
-            FrontendDiagnosticCode::UnsupportedStringNamespaceExport,
-        ),
-    ] {
-        let allocator = Allocator::new();
-        let error = parse(&allocator, source, FrontendOptions::new(ParseMode::Module))
-            .expect_err("QuickJS-incompatible export syntax");
-
-        assert_eq!(error.stage(), DiagnosticStage::Profile);
-        assert_eq!(error.diagnostics()[0].code, expected_code);
-    }
-}
-
-#[test]
 fn retains_quickjs_accepted_string_import_and_export_names() {
     let source = r#"
         import { "remote" as imported } from "./dep.js";

@@ -19,7 +19,7 @@ fn storage_result(
 }
 
 #[test]
-fn ordinary_dynamic_function_keeps_its_name_without_a_lexical_self_binding() {
+fn ordinary_dynamic_function_binds_its_name_locally() {
     let plan = storage_result(DynamicFunctionKind::Function, "return anonymous;")
         .expect("ordinary dynamic Function storage");
 
@@ -37,24 +37,27 @@ fn ordinary_dynamic_function_keeps_its_name_without_a_lexical_self_binding() {
     );
     assert_eq!(plan.executables()[1].name(), Some("anonymous"));
     let wrapper = plan.executables()[1].id();
-    assert!(
-        plan.bindings_for(wrapper)
-            .expect("wrapper bindings")
-            .iter()
-            .all(|binding| binding.policy().kind() != DeclarationKind::FunctionName)
-    );
-    let global = plan
-        .unresolved_globals_for(wrapper)
-        .expect("wrapper globals")
+    // ES2018+ `CreateDynamicFunction` (ECMA-262 20.2.1.1.1): the synthetic
+    // `anonymous` name is a FunctionName local on the wrapper body, not a
+    // constructor-realm global reference.
+    let name_bindings: Vec<_> = plan
+        .bindings_for(wrapper)
+        .expect("wrapper bindings")
         .iter()
-        .find(|global| global.name() == "anonymous")
-        .expect("constructor-realm anonymous reference");
-    assert!(global.access().reads());
-    assert!(!global.access().writes());
+        .filter(|binding| binding.policy().kind() == DeclarationKind::FunctionName)
+        .collect();
+    assert_eq!(name_bindings.len(), 1);
+    assert_eq!(name_bindings[0].name(), "anonymous");
+    assert_eq!(name_bindings[0].placement(), StoragePlacement::Local);
+    assert!(
+        plan.unresolved_globals_for(wrapper)
+            .expect("wrapper globals")
+            .is_empty()
+    );
 }
 
 #[test]
-fn every_dynamic_function_family_omits_the_synthetic_name_binding() {
+fn every_dynamic_function_family_binds_the_synthetic_name_locally() {
     for kind in [
         DynamicFunctionKind::Function,
         DynamicFunctionKind::GeneratorFunction,
@@ -66,25 +69,25 @@ fn every_dynamic_function_family_omits_the_synthetic_name_binding() {
         let wrapper = plan.executables()[1].id();
 
         assert_eq!(plan.executables()[1].name(), Some("anonymous"), "{kind:?}");
-        assert!(
-            plan.bindings_for(wrapper)
-                .expect("wrapper bindings")
-                .iter()
-                .all(|binding| binding.policy().kind() != DeclarationKind::FunctionName),
-            "{kind:?}"
-        );
+        let name_bindings = plan
+            .bindings_for(wrapper)
+            .expect("wrapper bindings")
+            .iter()
+            .filter(|binding| binding.policy().kind() == DeclarationKind::FunctionName)
+            .count();
+        assert_eq!(name_bindings, 1, "{kind:?}");
         assert!(
             plan.unresolved_globals_for(wrapper)
                 .expect("wrapper globals")
                 .iter()
-                .any(|global| global.name() == "anonymous" && global.access().reads()),
+                .all(|global| global.name() != "anonymous"),
             "{kind:?}"
         );
     }
 }
 
 #[test]
-fn nested_direct_eval_cannot_observe_a_dynamic_wrapper_name_binding() {
+fn nested_direct_eval_observes_the_wrapper_name_through_a_capture() {
     let plan = storage_result(
         DynamicFunctionKind::Function,
         "return function inner(){ eval(''); return typeof anonymous; };",
@@ -95,17 +98,36 @@ fn nested_direct_eval_cannot_observe_a_dynamic_wrapper_name_binding() {
         .iter()
         .find(|executable| executable.name() == Some("inner"))
         .expect("nested function");
+    let wrapper = plan
+        .executables()
+        .iter()
+        .find(|executable| executable.name() == Some("anonymous"))
+        .expect("dynamic function wrapper");
 
     assert!(child.has_direct_eval());
     let globals = plan
         .unresolved_globals_for(child.id())
         .expect("nested globals");
     assert!(globals.iter().any(|global| global.name() == "eval"));
-    assert!(globals.iter().any(|global| global.name() == "anonymous"));
-    assert!(
-        plan.frame_captures_for(child.id())
-            .expect("nested captures")
-            .is_empty()
+    // The synthetic name is the wrapper's FunctionName local; the nested
+    // function observes it through a parent-frame capture, never through the
+    // constructor realm's global object.
+    assert!(globals.iter().all(|global| global.name() != "anonymous"));
+    let wrapper_name = plan
+        .bindings_for(wrapper.id())
+        .expect("wrapper bindings")
+        .iter()
+        .find(|binding| binding.policy().kind() == DeclarationKind::FunctionName)
+        .expect("wrapper FunctionName binding");
+    let captures = plan
+        .frame_captures_for(child.id())
+        .expect("nested captures");
+    assert_eq!(captures.len(), 1);
+    assert_eq!(captures[0].binding(), wrapper_name.id());
+    assert_eq!(captures[0].slot().index(), 0);
+    assert_eq!(
+        captures[0].source(),
+        CaptureSource::ParentBinding(wrapper_name.id())
     );
 }
 

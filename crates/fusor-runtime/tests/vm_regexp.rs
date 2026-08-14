@@ -75,15 +75,30 @@ fn dynamic_function(context: &mut Context<'_>, body: &str) -> Function {
         .expect("dynamic Function")
 }
 
-fn evaluate<T>(
+fn evaluate<T: Send + 'static>(
     body: &str,
-    project: impl FnOnce(Result<fusor_runtime::JsValue, ExecutionError>) -> T,
+    project: impl FnOnce(Result<fusor_runtime::JsValue, ExecutionError>) -> T + Send + 'static,
 ) -> T {
-    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
-    let realm = runtime.create_realm().expect("realm");
-    let mut context = runtime.context(&realm).expect("context");
-    let run = dynamic_function(&mut context, body);
-    project(context.call(&run, &[], ExecutionLimits::default()))
+    // The RegExp replace machinery drives continuation stages synchronously
+    // (conversion completions resume the next stage without returning to the
+    // native dispatch loop), so a debug build nests one large frame set per
+    // capture read. Run on a dedicated 32 MiB thread: the default test
+    // thread stack overflows on a three-capture `String.prototype.replace`
+    // in debug builds.
+    let body = body.to_owned();
+    std::thread::Builder::new()
+        .name("fusor-runtime test evaluator".to_owned())
+        .stack_size(32 * 1024 * 1024)
+        .spawn(move || {
+            let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+            let realm = runtime.create_realm().expect("realm");
+            let mut context = runtime.context(&realm).expect("context");
+            let run = dynamic_function(&mut context, &body);
+            project(context.call(&run, &[], ExecutionLimits::default()))
+        })
+        .expect("spawn the test evaluator thread")
+        .join()
+        .expect("test evaluator thread panicked")
 }
 
 fn rendered(body: &str) -> String {
