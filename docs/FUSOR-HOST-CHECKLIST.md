@@ -88,7 +88,7 @@
 
 ## 子项目 4:进程生命周期与诊断(fusor-host::process)§7
 
-- [ ] 信号事件源;SIGINT 首次 → 引擎 `InterruptHandler`;二次 SIGINT/SIGTERM → 128+n
+- [x] 信号事件源;SIGINT 首次 → 引擎 `InterruptHandler`;二次 SIGINT/SIGTERM → 128+n(可注入 + `spawn_signal_forwarder` OS 转发;OS 投递按 §7.6 用合成信号测试)
 - [ ] JS 侧 `process.on("SIGINT", ...)` 注册(op 暴露)
 - [ ] exit code 表(§7.2)实现与文档化;`process.exit(code)` op
 - [ ] uncaughtException / unhandledRejection 默认路径(完整 stack + exit 1)+ 宿主处理器

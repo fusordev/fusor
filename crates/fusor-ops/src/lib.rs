@@ -99,7 +99,6 @@ pub fn op(attribute: TokenStream, item: TokenStream) -> TokenStream {
         })
         .collect();
     let parameter_names: Vec<&syn::Ident> = parameters.iter().map(|(name, _)| *name).collect();
-    let parameter_declarations: Vec<&syn::Type> = parameters.iter().map(|(_, ty)| *ty).collect();
 
     // Per-parameter deserialization: `ResourceId` parameters resolve through
     // the installed resource table (§5.6, §5.8) and everything else through

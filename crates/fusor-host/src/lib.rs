@@ -16,3 +16,4 @@ extern crate self as fusor_host;
 
 pub mod r#loop;
 pub mod ops;
+pub mod process;

@@ -40,7 +40,7 @@ pub(crate) struct TimerCallback {
 }
 
 /// One deadline entry in the ordering heap.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct TimerEntry {
     pub deadline: Instant,
     pub sequence: u64,

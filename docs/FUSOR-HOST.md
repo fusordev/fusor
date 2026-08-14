@@ -262,9 +262,10 @@ fusor-host 与 fusor-runtime 公开 API;展开可用 cargo expand 验证。
 `Send`,所有引擎交互只在主任务发生——与现有 CLI 模式同构,但循环**持续存活**
 而非一次性 drain-to-quiescence。
 
-实现顺序注记:虚拟时钟阶段 loop 由宿主同步驱动(`run_one_turn` /
-`run_until_idle`),select 等待由虚拟时钟推进模拟;Tokio executor 与真实 select
-等待随信号事件源(§7)一并回归,此前 `HostLoop` 不创建 executor。
+实现顺序注记:loop 由宿主同步驱动(`run_one_turn` / `run_until_idle`),select
+等待由虚拟时钟推进模拟,loop 自身不持有 executor;OS 信号经
+`process::spawn_signal_forwarder` 在独立线程的 current_thread executor 上转发进
+共享 `SignalState`(§7.1),真实 select 等待仍待后续事件源。
 
 ### 6.2 ECMA-262 对齐
 
