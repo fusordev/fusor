@@ -80,6 +80,9 @@ where
     let mut output = String::new();
     let _ = GraphicalReportHandler::new_themed(policy.theme())
         .render_report(&mut output, &diagnostic);
+    if !output.ends_with('\n') {
+        output.push('\n');
+    }
     output
 }
 

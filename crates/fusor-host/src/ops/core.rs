@@ -4,6 +4,8 @@
 //! engine `ToString`, falling back to a kind-shaped rendering for values
 //! the host conversion rejects (objects, functions).
 
+use std::io::Write as _;
+
 use fusor_runtime::{Context, JsValue, ValueKind};
 
 use super::OpStateRegistry;
@@ -15,7 +17,12 @@ pub struct PrintSink(Box<dyn FnMut(&str)>);
 
 impl Default for PrintSink {
     fn default() -> Self {
-        Self(Box::new(|line: &str| println!("{line}")))
+        Self(Box::new(|line: &str| {
+            println!("{line}");
+            // Piped stdout is block-buffered: flush each line so print
+            // output appears promptly instead of at process exit.
+            let _ = std::io::stdout().flush();
+        }))
     }
 }
 

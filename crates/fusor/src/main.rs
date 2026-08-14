@@ -12,6 +12,7 @@ mod cli;
 use std::{
     cell::RefCell,
     error::Error,
+    io::Write as _,
     path::Path,
     process::ExitCode,
     rc::Rc,
@@ -31,12 +32,23 @@ usage:
   fusor repl [--inspect[=PORT]] [--inspect-brk[=PORT]]
                                 start the ESM REPL with optional CDP (default port 9229)";
 
-/// The whole CLI runs on one shared `current_thread` Tokio runtime. The
-/// engine is synchronous and its GC'd types are not `Send`, so all engine
-/// calls stay on this main task; only pure data (paths, file bytes) crosses
-/// await boundaries inside the module loader/drain.
-#[tokio::main(flavor = "current_thread")]
+/// The CLI runs on a multi-threaded Tokio runtime (`rt-multi-thread`): the
+/// timer driver lives on a dedicated worker and reliably wakes the parked
+/// task, which the single-threaded flavor did not do while the REPL's
+/// line-editor thread blocked on stdin. The engine is synchronous and its
+/// GC'd types are not `Send`, so all engine interaction stays on one
+/// [`tokio::task::LocalSet`] pinned to this thread — only pure data
+/// (paths, file bytes) crosses await boundaries inside the module
+/// loader/drain.
+#[tokio::main]
 async fn main() -> ExitCode {
+    let local = tokio::task::LocalSet::new();
+    local.run_until(cli_main()).await
+}
+
+/// The CLI body: argument parsing plus the run/REPL dispatch, executed on
+/// the pinned local task set above.
+async fn cli_main() -> ExitCode {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     match parse_arguments(&arguments) {
         Ok(Command::Repl {
@@ -398,6 +410,9 @@ pub(crate) fn report_error(origin: &str, error: &dyn Error) {
         policy,
     );
     eprint!("{rendered}");
+    // Piped stderr is block-buffered: flush the report so it appears
+    // promptly; the renderer guarantees the trailing newline.
+    let _ = std::io::stderr().flush();
 }
 
 /// Renders one engine [`ExecutionError`] through the §7.5 pipeline as a
@@ -411,6 +426,7 @@ pub(crate) fn report_execution(origin: &str, execution: fusor_runtime::Execution
         policy,
     );
     eprint!("{rendered}");
+    let _ = std::io::stderr().flush();
 }
 
 /// Renders one script evaluation failure: the facade's `Runtime` arm carries

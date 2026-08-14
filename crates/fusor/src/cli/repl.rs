@@ -127,92 +127,83 @@ pub(crate) async fn run(inspect_port: Option<u16>, inspect_break: bool) -> u8 {
         .await;
     }
 
-    let mut editor = match rustyline::DefaultEditor::new() {
-        Ok(editor) => editor,
-        Err(error) => {
-            eprintln!("fusor: cannot initialize the line editor: {error}");
-            return 1;
-        }
-    };
+    // V8 semantics: the JS thread stays responsive while the line editor
+    // waits — the input reader runs on its own thread, and the main task
+    // sleeps precisely until the next timer deadline (no polling tick).
+    let mut input_receiver = spawn_input_reader();
     let mut imports: Vec<String> = Vec::new();
     let mut entry_index = 0_u64;
     let mut pending = String::new();
-    // V8 REPL semantics: pending timers fire on schedule — the virtual clock
-    // advances by the real time that passed while waiting for input.
-    let mut watermark = std::time::Instant::now();
     loop {
-        let prompt = if pending.is_empty() { "fusor> " } else { "...> " };
-        let line = match editor.readline(prompt) {
-            Ok(line) => {
-                let _ = editor.add_history_entry(line.as_str());
-                line
+        // Read the next deadline synchronously (the select cannot hold a
+        // loop borrow across both branches); the deadline future owns the
+        // duration and is re-armed after every event.
+        let remaining = host_loop.next_deadline_in();
+        tokio::select! {
+            Some(line) = input_receiver.recv() => {
+                let Some(line) = line else {
+                    println!();
+                    return 0;
+                };
+                if pending.is_empty() && line.trim() == ".exit" {
+                    return 0;
+                }
+                pending.push_str(&line);
+                pending.push('\n');
+                if !braces_balanced(&pending) {
+                    continue;
+                }
+                let entry = std::mem::take(&mut pending);
+                if entry.trim().is_empty() {
+                    continue;
+                }
+                entry_index += 1;
+                evaluate_repl_entry(
+                    &mut host_loop,
+                    &entry,
+                    &resolver,
+                    &entry_prefix,
+                    &mut imports,
+                    entry_index,
+                    true,
+                )
+                .await;
+                // The loop's uncaught/unhandled default paths request the exit code
+                // (§7.2); honor the request and leave the session.
+                if let Some(code) = host_loop.pending_exit_code() {
+                    return u8::try_from(code).unwrap_or(1);
+                }
             }
-            Err(rustyline::error::ReadlineError::Interrupted) => continue,
-            Err(rustyline::error::ReadlineError::Eof) => {
-                println!();
-                return 0;
+            awaited = timer_deadline(remaining) => {
+                // Delayed timers fire on schedule while the editor waits.
+                if let Err(error) = host_loop.advance_time(awaited) {
+                    report_execution("timers", error);
+                }
+                if let Err(error) = host_loop.run_one_turn() {
+                    report_execution("timers", error);
+                }
             }
-            Err(error) => {
-                eprintln!("fusor: cannot read input: {error}");
-                return 1;
-            }
-        };
-        if pending.is_empty() && line.trim() == ".exit" {
-            return 0;
-        }
-        pending.push_str(&line);
-        pending.push('\n');
-        if !braces_balanced(&pending) {
-            continue;
-        }
-        let entry = std::mem::take(&mut pending);
-        if entry.trim().is_empty() {
-            continue;
-        }
-        let elapsed = watermark.elapsed();
-        if let Err(error) = host_loop.advance_time(elapsed) {
-            report_execution("timers", error);
-            continue;
-        }
-        if let Err(error) = host_loop.run_one_turn() {
-            report_execution("timers", error);
-            continue;
-        }
-        entry_index += 1;
-        evaluate_repl_entry(
-            &mut host_loop,
-            &entry,
-            &resolver,
-            &entry_prefix,
-            &mut imports,
-            entry_index,
-            true,
-        )
-        .await;
-        watermark = std::time::Instant::now();
-        // The loop's uncaught/unhandled default paths request the exit code
-        // (§7.2); honor the request and leave the session.
-        if let Some(code) = host_loop.pending_exit_code() {
-            return u8::try_from(code).unwrap_or(1);
         }
     }
 }
 
-/// Runs the REPL with CDP requests and stdin entries multiplexed on the owning
-/// runtime task. The input thread transports only owned source text. The
-/// caller installed the suppression-gated print sink (§9: `print` is the CLI
-/// overlay's shim, not a host-installed global). Every engine interaction
-/// (CDP protocol handling and entry evaluation) happens inside a host-loop
-/// turn (§6).
-async fn run_with_inspector(
-    host_loop: &mut HostLoop,
-    mut debug_requests: mpsc::UnboundedReceiver<cdp::EngineRequest>,
-    session: Arc<cdp::DebugSession>,
-    resolver: Rc<RefCell<NodeLikeResolver>>,
-    entry_prefix: String,
-    print_suppressed: Rc<Cell<bool>>,
-) -> u8 {
-    let (input_sender, mut input_receiver) = mpsc::unbounded_channel();
+/// Sleeps until the loop's next timer deadline, returning the awaited
+/// duration. Pends forever when no timer is scheduled; the caller re-arms
+/// this future after every event, so freshly scheduled timers are observed.
+async fn timer_deadline(remaining: Option<std::time::Duration>) -> std::time::Duration {
+    match remaining {
+        Some(remaining) => {
+            tokio::time::sleep(remaining).await;
+            remaining
+        }
+        None => std::future::pending().await,
+    }
+}
+
+/// Spawns the REPL's line-editor thread: rustyline reads stdin and sends
+/// each line through the channel, `None` on EOF or an editor failure.
+fn spawn_input_reader() -> mpsc::UnboundedReceiver<Option<String>> {
+    let (input_sender, input_receiver) = mpsc::unbounded_channel();
     thread::spawn(move || {
         let mut editor = match rustyline::DefaultEditor::new() {
             Ok(editor) => editor,
@@ -243,13 +234,28 @@ async fn run_with_inspector(
             }
         }
     });
+    input_receiver
+}
+
+/// Runs the REPL with CDP requests and stdin entries multiplexed on the owning
+/// runtime task. The input thread transports only owned source text. The
+/// caller installed the suppression-gated print sink (§9: `print` is the CLI
+/// overlay's shim, not a host-installed global). Every engine interaction
+/// (CDP protocol handling and entry evaluation) happens inside a host-loop
+/// turn (§6).
+async fn run_with_inspector(
+    host_loop: &mut HostLoop,
+    mut debug_requests: mpsc::UnboundedReceiver<cdp::EngineRequest>,
+    session: Arc<cdp::DebugSession>,
+    resolver: Rc<RefCell<NodeLikeResolver>>,
+    entry_prefix: String,
+    print_suppressed: Rc<Cell<bool>>,
+) -> u8 {
+    let mut input_receiver = spawn_input_reader();
 
     let mut entry_index = 0_u64;
     let mut imports = Vec::new();
     let mut pending = String::new();
-    // V8 REPL semantics: pending timers fire on schedule — the virtual clock
-    // advances by the real time that passed while waiting for input.
-    let mut watermark = std::time::Instant::now();
 
     // CDP inspection state lives in one owner (this task); the engine-side
     // intrinsics are created inside a turn and held across turns.
@@ -282,6 +288,10 @@ async fn run_with_inspector(
     }
 
     loop {
+        // Read the next deadline synchronously (the select cannot hold a
+        // loop borrow across both branches); the deadline future owns the
+        // duration and is re-armed after every event.
+        let remaining = host_loop.next_deadline_in();
         tokio::select! {
             Some(request) = debug_requests.recv() => {
                 let response_slot: Rc<RefCell<Option<serde_json::Value>>> =
@@ -328,15 +338,6 @@ async fn run_with_inspector(
                 if entry.trim().is_empty() {
                     continue;
                 }
-                let elapsed = watermark.elapsed();
-                if let Err(error) = host_loop.advance_time(elapsed) {
-                    report_execution("timers", error);
-                    continue;
-                }
-                if let Err(error) = host_loop.run_one_turn() {
-                    report_execution("timers", error);
-                    continue;
-                }
                 entry_index += 1;
                 evaluate_repl_entry(
                     host_loop,
@@ -347,11 +348,19 @@ async fn run_with_inspector(
                     entry_index,
                     true,
                 ).await;
-                watermark = std::time::Instant::now();
                 // The loop's uncaught/unhandled default paths request the exit
                 // code (§7.2); honor the request and leave the session.
                 if let Some(code) = host_loop.pending_exit_code() {
                     return u8::try_from(code).unwrap_or(1);
+                }
+            }
+            awaited = timer_deadline(remaining) => {
+                // Delayed timers fire on schedule while the editor waits.
+                if let Err(error) = host_loop.advance_time(awaited) {
+                    report_execution("timers", error);
+                }
+                if let Err(error) = host_loop.run_one_turn() {
+                    report_execution("timers", error);
                 }
             }
             else => return 0,

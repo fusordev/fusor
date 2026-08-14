@@ -16,6 +16,7 @@ pub(crate) use timers::{TimerCallback, TimerId, with_timer_state};
 use std::collections::VecDeque;
 use std::error::Error;
 use std::fmt;
+use std::io::Write as _;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -342,6 +343,9 @@ impl HostLoop {
                 crate::process::ColorPolicy::from_env(),
             );
             eprint!("{report}");
+            // Piped stderr is block-buffered: flush the report so it appears
+            // promptly, and the renderer guarantees the trailing newline.
+            let _ = std::io::stderr().flush();
             self.signals.request_exit(1);
             return Ok(());
         };
@@ -407,6 +411,7 @@ impl HostLoop {
                     crate::process::ColorPolicy::from_env(),
                 );
                 eprint!("{report}");
+                let _ = std::io::stderr().flush();
                 self.signals.request_exit(1);
                 continue;
             };

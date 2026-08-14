@@ -279,6 +279,54 @@ fn run_path_rejecting_top_level_await_exits_non_zero() {
         stderr.contains("boom"),
         "expected the rejection on stderr: {stderr}"
     );
+    assert!(
+        stderr.ends_with('\n'),
+        "the report must end with a newline: {stderr:?}"
+    );
+}
+
+#[test]
+fn repl_fires_timers_while_waiting_for_input() {
+    // V8 semantics: the JS thread stays responsive while the line editor
+    // waits — a delayed timer fires on schedule even when no entry arrives.
+    let mut child = Command::new(env!("CARGO_BIN_EXE_fusor"))
+        .arg("repl")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn fusor repl");
+    {
+        let stdin = child.stdin.as_mut().expect("stdin");
+        stdin
+            .write_all(
+                b"Fusor.ops.op_set_timeout(function () { print('fired'); }, 300);\n",
+            )
+            .expect("write the timer entry");
+        stdin.flush().expect("flush stdin");
+    }
+    // The REPL now waits for the next line; the timer must fire during the
+    // wait, not after the next entry. The window is generous because the
+    // suite spawns binaries under parallel load.
+    std::thread::sleep(std::time::Duration::from_millis(1200));
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin")
+        .write_all(b".exit\n")
+        .expect("write exit");
+    let output = child.wait_with_output().expect("wait for repl");
+    assert!(
+        output.status.success(),
+        "repl failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("fired"),
+        "the timer must fire while the REPL waits for input: stdout={stdout:?} stderr={:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]
