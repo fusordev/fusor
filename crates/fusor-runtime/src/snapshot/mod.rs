@@ -131,9 +131,10 @@
 //! [`SnapshotError::Unsupported`] (intermediate slices, §8.2): promises,
 //! proxies, array buffers and typed views, weak collections, Intl and
 //! Temporal objects, iterators, identity-symbol keys, accessor slots,
-//! and module registries. Snapshotting drains the job queue to
-//! quiescence and collects garbage first, so unreachable records —
-//! exhausted iterators, collected cycles — never enter the blob.
+//! module namespaces, and module registries. Snapshotting drains the
+//! job queue to quiescence and collects garbage first, so unreachable
+//! records — exhausted iterators, collected cycles — never enter the
+//! blob.
 
 mod codec;
 
@@ -2119,6 +2120,7 @@ fn encode_bindings(runtime: &Runtime) -> Result<Vec<u8>, SnapshotError> {
     }
     Ok(payload)
 }
+
 
 fn write_function_ref(buffer: &mut Vec<u8>, target: Option<FunctionId>) {
     match target {

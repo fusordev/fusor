@@ -8404,6 +8404,45 @@ fn snapshot_fails_closed_on_uncovered_exotic_and_async_state() {
 }
 
 #[test]
+fn snapshot_fails_closed_on_a_module_registry() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let (syntax, authority) = with_parsed_program(
+        "export const answer = 42;",
+        FrontendOptions::for_goal(CompilationGoal::Module),
+        |unit| {
+            let syntax = unit.module_syntax().clone();
+            let compiler =
+                CompilationContext::new_with_source_name(unit, Arc::from("<snapshot module>"))
+                    .expect("storage plan");
+            let tree = compiler
+                .compile_module_with_all_limits(
+                    fusor_bytecode::VerificationLimits::default(),
+                    fusor_bytecode::FunctionGraphVerificationLimits::default(),
+                    fusor_bytecode::BytecodeGraphVerificationLimits::default(),
+                )
+                .expect("verified Module");
+            (syntax, Arc::new(tree.verified_bytecode().clone()))
+        },
+    )
+    .expect("frontend");
+    let mut context = runtime.context(&realm).expect("context");
+    context
+        .register_module(crate::ModuleKey::new(Arc::from("pkg")), syntax, authority)
+        .expect("registered module");
+    drop(context);
+    // Snapshots carry no ESM support (2026-08-14: init scripts are
+    // plain Global Scripts, §8.4), so any module registry fails closed.
+    assert!(
+        matches!(
+            runtime.snapshot(),
+            Err(crate::snapshot::SnapshotError::Unsupported { what: "a module registry", .. })
+        ),
+        "module registries fail closed"
+    );
+}
+
+#[test]
 fn snapshot_round_trips_a_realm_with_user_heap_content() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
@@ -8520,46 +8559,6 @@ fn snapshot_fails_closed_when_a_realm_is_created_after_user_content() {
 }
 
 #[test]
-fn snapshot_fails_closed_on_a_module_registry() {
-    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
-    let realm = runtime.create_realm().expect("realm");
-    let (syntax, authority) = with_parsed_program(
-        "export const answer = 42;",
-        FrontendOptions::for_goal(CompilationGoal::Module),
-        |unit| {
-            let syntax = unit.module_syntax().clone();
-            let compiler =
-                CompilationContext::new_with_source_name(unit, Arc::from("<snapshot module>"))
-                    .expect("storage plan");
-            let tree = compiler
-                .compile_module_with_all_limits(
-                    fusor_bytecode::VerificationLimits::default(),
-                    fusor_bytecode::FunctionGraphVerificationLimits::default(),
-                    fusor_bytecode::BytecodeGraphVerificationLimits::default(),
-                )
-                .expect("verified Module");
-            (syntax, Arc::new(tree.verified_bytecode().clone()))
-        },
-    )
-    .expect("frontend");
-    let mut context = runtime.context(&realm).expect("context");
-    context
-        .register_module(
-            crate::ModuleKey::new(Arc::from("pkg")),
-            syntax,
-            authority,
-        )
-        .expect("registered module");
-    drop(context);
-    assert!(
-        matches!(
-            runtime.snapshot(),
-            Err(crate::snapshot::SnapshotError::Unsupported { what: "a module registry", .. })
-        ),
-        "module registries fail closed until their serializer slice lands"
-    );
-}
-
 #[test]
 fn snapshot_restores_reclaimed_heap_slots_with_stable_identities() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");

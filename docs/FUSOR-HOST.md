@@ -228,7 +228,8 @@ async fn op_sleep(ms: u64) -> Result<(), OpError> { ... }
   在组装期检测 → 构建期报错
 - **op 不做任何全局环境绑定**:只有 `Fusor.ops`(timer op 即
   `Fusor.ops.op_set_timeout` 等;`print` 全局移除)
-- overlay 的 init ESM 负责把原始 op 包装成惯用 API(类型化 JS 包装层归属 overlay)
+- overlay 的 init 脚本负责把原始 op 包装成惯用 API(类型化 JS 包装层归属 overlay;
+  2026-08-14:init 不需要 ESM,用 Global Script,§8.4)
 - `op_queue_microtask` 入引擎 promise-job 队列(ECMA-262 `HostEnqueuePromiseJob`,
   经 `Context::enqueue_host_job`):与 Promise 反应同一 FIFO 微任务队列,由 loop
   的检查点 drain 至静止;ECMA-262 内建 `queueMicrotask` 全局包装留待引擎后续
@@ -315,7 +316,7 @@ timers 计为存活(alive 判定简化版,文档化)。`op_queue_microtask` 见 
 ### 6.5 宿主驱动 API
 
 ```rust
-let host = HostRuntime::builder()       // §9:overlay 组装 + init ESM 求值
+let host = HostRuntime::builder()       // §9:overlay 组装 + init 脚本求值
     .with_overlay(CoreOverlay)          // 核心 op 集(§9)
     .build()?                           // 快照 with_snapshot 随子项目 5 接入
     .into_loop()?;                      // HostLoop 包装(§6.1)
@@ -399,7 +400,7 @@ shutdown 期间不再 drain 微任务(文档化)。
 
 ### 8.1 概念与边界
 
-- **blob = 完整堆序列化**:创建期执行引擎安装 + overlay 组装(ops 安装 + init ESM
+- **blob = 完整堆序列化**:创建期执行引擎安装 + overlay 组装(ops 安装 + init 脚本
   求值,含 `Fusor` 命名空间)→ 序列化整个堆;加载期反序列化直接恢复,跳过安装执行
 - **无版本兼容**(alpha 决策):magic + 格式戳,不匹配 fail closed 拒绝
 - 实现落在 fusor-runtime(序列化器需堆内部访问);fusor-host 只提供 builder 侧
@@ -408,16 +409,17 @@ shutdown 期间不再 drain 微任务(文档化)。
 ### 8.2 序列化内容与不可序列化项
 
 - 序列化:全部 heap records(objects + shapes + 属性表、functions、strings、atoms
-  表、模块注册表、realm 表、binding cells)。当前切片已落地:atoms 表、用户对象
-  (含 shape/属性表)、binding cells、函数(字节码 + host 槽位)、realm 表 + 全局
-  binding 表;模块注册表与异形对象实例(§8.2 下述)尚未落地,fail closed
+  表、realm 表、binding cells)。当前切片已落地:atoms 表、用户对象(含 shape/
+  属性表)、binding cells、函数(字节码 + host 槽位)、realm 表 + 全局 binding 表;
+  **模块注册表不进快照**(2026-08-14:init 不需要 ESM,§8.4),任何已注册模块 →
+  fail closed(Unsupported)
 - **内置对象不序列化**(2026-08-14 决策):`globalThis` 上的固有对象图不进 blob——
   realm 段只记录 realm 表(每 realm 的全局对象/对象原型身份、math-random 状态、
   各 arena 的段边界水位线、全局对象的完整对象记录);恢复时逐 realm 重放
   `create_realm` 确定性重建固有图,并以水位线与全局对象身份校验重放结果(不一致
   → fail closed)。**用户对全局对象本身的修改**(`globalThis.x = ...`、全局对象
   属性增删改)随全局对象记录保留;**对其他内置对象**(`Object.prototype` 等)的
-  修改不跨快照保留(alpha 语义:需要保留的初始化放 startup 模式 init ESM)
+  修改不跨快照保留(alpha 语义:需要保留的初始化放 startup 模式 init 脚本)
 - **realm 前缀约束**:固有图必须占据 objects/functions 两个 arena 的连续首段
   (全部 realm 先于用户堆创建、无释放/复用)。不满足 → snapshot 时 fail closed
   (Unsupported:用户堆在 realm 之间创建 / realm 记录被释放复用)。快照编码跳过
@@ -457,10 +459,13 @@ shutdown 期间不再 drain 微任务(文档化)。
   性、shape/计数一致性、跨表引用闭包);恢复失败 → 明确错误 + 干净 drop,无 panic
 - 恢复路径:空 Runtime 骨架 → 反序列化填充 → 校验 → 就绪
 
-### 8.4 初始化脚本(ESM 模块图)
+### 8.4 初始化脚本(Global Script)
 
-- 源:overlay 内嵌 ESM(§9)或宿主显式提供;Module goal 编译 + 模块图求值(引擎
-  已有全套能力)
+- **不需要 ESM**(2026-08-14 决策):快照不支持 ESM,init 脚本用 Global Script
+  编译 + 执行;overlay init_sources 随此改为脚本载体(§9,待改造)
+- **location**:init 源以 overlay 提供的 specifier 作为 source_name 编译,诊断与
+  堆栈帧显示该虚拟位置(现有 compile_init_module 已如此,脚本化改造保持);不需要
+  debugger 钩子
 - 双模式:`warmup`(创建期求值,效果烘焙进快照,默认)/ `startup`(恢复后前置求值,
   宿主显式指定,用于依赖运行时环境的部分)
 - 创建工具:CLI 子命令 `fusor snapshot -o blob` + builder API `build_snapshot()`
@@ -468,11 +473,11 @@ shutdown 期间不再 drain 微任务(文档化)。
 ### 8.5 与 overlay 的关系
 
 `HostRuntime::from_snapshot(blob, overlays)` —— overlays 仅用于重建 op 闭包表,
-**不重新执行 init ESM**;warmup 效果已在 blob 中。
+**不重新执行 init 脚本**;warmup 效果已在 blob 中。
 
 ### 8.6 测试
 
-- 往返一致性:创建 → 恢复 → 断言(全局形状、`Fusor.ops` 属性表、init 模块导出、
+- 往返一致性:创建 → 恢复 → 断言(全局形状、`Fusor.ops` 属性表、init 脚本效果、
   同一脚本行为等价)
 - 负例:截断/篡改 blob → fail closed 且无 panic;格式戳不匹配 → 拒绝;op 集不匹配
   → 拒绝

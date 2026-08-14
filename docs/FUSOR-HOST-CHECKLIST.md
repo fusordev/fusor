@@ -99,12 +99,12 @@
 
 ## 子项目 5:Snapshot 与初始化脚本(fusor-runtime + fusor-host)§8
 
-- [ ] 序列化:全部 heap records、shapes、atoms 表、模块注册表、realm 表、binding cells(atoms/对象/cells/函数/realm 表/全局 binding 表已落地;剩模块注册表 + Map/Set 等异形对象实例切片)
+- [x] 序列化:全部 heap records、shapes、atoms 表、realm 表、binding cells(2026-08-14:模块注册表按决策移除——快照不支持 ESM,注册模块 fail closed)
 - [x] host Function 解耦:blob 记录槽位 + op 元数据;恢复时重建 op 闭包表并重绑定(不匹配 fail closed)
 - [x] 资源不进快照:文档化约束 + 启动期惰性重建模式(§8.2 已文档化;startup 模式随条目 107)
 - [x] 自写紧凑二进制 codec(零新依赖);magic + 格式戳 + 结构校验,加载即校验
 - [x] 失败路径:截断/篡改/格式戳/op 集不匹配 → `SnapshotError`,无 panic、干净 drop
-- [ ] init ESM 双模式:warmup(默认,创建期烘焙)/ startup(显式,恢复后前置)
+- [ ] init 双模式:warmup(默认,创建期烘焙)/ startup(显式,恢复后前置);载体为 Global Script(2026-08-14:不需要 ESM)
 - [ ] `fusor snapshot -o blob` 子命令 + builder `build_snapshot()` / `from_snapshot(blob, overlays)`
 - [ ] 测试:往返一致性(全局形状、`Fusor.ops`、init 导出、行为等价)、负例矩阵
 
@@ -112,7 +112,7 @@
 
 - [x] `Overlay` trait + `OverlaySource`(2026-08-14;`#[op]` 同名 mod + `register_op!`,首参 `&mut Context` 注入)
 - [x] 拓扑排序 + 环检测(构建期报错;重复 overlay 名/未知依赖/重复 init 源一并 fail closed)
-- [x] op 注册 → `Fusor.ops` 安装;init 模块图按序求值(内嵌虚拟说明符互 import;文件系统回退随条目 4)
+- [ ] op 注册 → `Fusor.ops` 安装;init 按序求值(2026-08-14 改造:init 改 Global Script 载体,替换现有 ESM 模块图求值)
 - [ ] `PluginModuleLoader`(内嵌虚拟模块说明符 + 文件系统回退)
 - [ ] CLI 重组为"核心 overlay + CLI overlay";`print` 全局移除
 - [ ] DevTools `Runtime.consoleAPICalled` 捕获改由 console overlay 承担
