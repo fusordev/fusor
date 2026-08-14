@@ -1,7 +1,8 @@
 //! Overlay assembly (subproject 6, §9): the `Overlay` trait, the
 //! `HostRuntime::builder()` pipeline (topological ordering with cycle
-//! detection, op registration through the assembly registry, init ESM
-//! graph evaluation in dependency order), and the host core overlay.
+//! detection, op registration through the assembly registry, init
+//! scripts — Global Scripts, §8.4 — evaluated in dependency order), and
+//! the host core overlay.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -12,7 +13,7 @@ use fusor_compiler::CompilationContext;
 use fusor_frontend::{CompilationGoal, FrontendOptions, GlobalScriptGoal, with_parsed_program};
 use fusor_host::ops::{OpDeclaration, OpError, OpRegistry, set_print_sink};
 use fusor_host::overlay::{
-    CoreOverlay, HostBuildError, HostRuntime, InitModuleError, Overlay, OverlaySource,
+    CoreOverlay, HostBuildError, HostRuntime, InitScriptError, Overlay, OverlaySource,
 };
 use fusor_host::process::ExitCode;
 use fusor_ops::{op, register_op};
@@ -72,7 +73,6 @@ struct TestOverlay {
     name: &'static str,
     op_registrations: fn(&mut OpRegistry),
     init_sources: Vec<OverlaySource>,
-    entry: &'static str,
     dependencies: &'static [&'static str],
 }
 
@@ -82,7 +82,6 @@ impl TestOverlay {
             name,
             op_registrations: |_| {},
             init_sources: Vec::new(),
-            entry: "",
             dependencies: &[],
         }
     }
@@ -92,17 +91,11 @@ impl TestOverlay {
         self
     }
 
-    fn with_init(
-        mut self,
-        specifier: &'static str,
-        text: &'static str,
-        entry: &'static str,
-    ) -> Self {
+    fn with_init(mut self, specifier: &'static str, text: &'static str) -> Self {
         self.init_sources.push(OverlaySource {
             specifier: specifier.to_owned(),
             text,
         });
-        self.entry = entry;
         self
     }
 
@@ -123,10 +116,6 @@ impl Overlay for TestOverlay {
 
     fn init_sources(&self) -> Vec<OverlaySource> {
         self.init_sources.clone()
-    }
-
-    fn entry(&self) -> &'static str {
-        self.entry
     }
 
     fn dependencies(&self) -> &'static [&'static str] {
@@ -177,19 +166,17 @@ fn the_builder_installs_the_host_core_without_any_overlay() {
 }
 
 #[test]
-fn init_modules_evaluate_in_topological_order() {
+fn init_scripts_evaluate_in_topological_order() {
     // `b` is registered first but depends on `a`: the build must evaluate
-    // `a`'s init module first regardless of registration order.
+    // `a`'s init script first regardless of registration order.
     let a = TestOverlay::new("a").with_init(
         "fusor:a/init.js",
         "globalThis.order = ['a'];",
-        "fusor:a/init.js",
     );
     let b = TestOverlay::new("b")
         .with_init(
             "fusor:b/init.js",
             "globalThis.order.push('b'); globalThis.order_string = globalThis.order.join(',');",
-            "fusor:b/init.js",
         )
         .depending_on(&["a"]);
     let mut builder = HostRuntime::builder();
@@ -271,20 +258,19 @@ fn overlay_ops_install_onto_fusor_ops() {
 }
 
 #[test]
-fn init_modules_may_import_across_overlays() {
+fn init_scripts_share_the_global_across_overlays() {
+    // Scripts have no imports (§8.4): later overlays read what earlier
+    // ones published on `globalThis`, ordered by the dependency graph.
     let base = TestOverlay::new("base").with_init(
         "fusor:base/value.js",
-        "export const answer = 41; globalThis.order = ['base'];",
-        "fusor:base/value.js",
+        "globalThis.answer = 41; globalThis.order = ['base'];",
     );
     let user = TestOverlay::new("user")
         .with_init(
             "fusor:user/init.js",
-            "import { answer } from 'fusor:base/value.js';\
-             globalThis.order.push('user');\
+            "globalThis.order.push('user');\
              globalThis.order_string = globalThis.order.join(',');\
-             globalThis.derived = answer + 1;",
-            "fusor:user/init.js",
+             globalThis.derived = globalThis.answer + 1;",
         )
         .depending_on(&["base"]);
     let mut host = HostRuntime::builder()
@@ -299,16 +285,33 @@ fn init_modules_may_import_across_overlays() {
 }
 
 #[test]
+fn init_script_sources_evaluate_in_declaration_order() {
+    // Within one overlay, sources run in declaration order.
+    let overlay = TestOverlay::new("pair")
+        .with_init("fusor:pair/first.js", "globalThis.steps = ['first'];")
+        .with_init(
+            "fusor:pair/second.js",
+            "globalThis.steps.push('second'); globalThis.steps_string = globalThis.steps.join(',');",
+        );
+    let mut host = HostRuntime::builder()
+        .with_overlay(overlay)
+        .build()
+        .expect("built");
+    assert_eq!(
+        eval_string(&mut host, "String(globalThis.steps_string);"),
+        "first,second"
+    );
+}
+
+#[test]
 fn duplicate_init_sources_are_rejected_at_build_time() {
     let first = TestOverlay::new("first").with_init(
         "fusor:shared.js",
         "globalThis.first = true;",
-        "fusor:shared.js",
     );
     let second = TestOverlay::new("second").with_init(
         "fusor:shared.js",
         "globalThis.second = true;",
-        "fusor:shared.js",
     );
     let mut builder = HostRuntime::builder();
     builder.with_overlay(first).with_overlay(second);
@@ -322,70 +325,31 @@ fn duplicate_init_sources_are_rejected_at_build_time() {
 }
 
 #[test]
-fn unresolved_init_imports_fail_closed() {
-    let broken = TestOverlay::new("broken").with_init(
-        "fusor:broken/init.js",
-        "import 'fusor:missing/thing.js';",
-        "fusor:broken/init.js",
-    );
-    let mut builder = HostRuntime::builder();
-    builder.with_overlay(broken);
-    let error = builder.build().expect_err("unresolved imports must fail the build");
-    match error {
-        HostBuildError::InitModule {
-            overlay: "broken",
-            error:
-                InitModuleError::Unresolved {
-                    referrer,
-                    specifier,
-                },
-        } => {
-            assert_eq!(referrer, "fusor:broken/init.js");
-            assert_eq!(specifier, "fusor:missing/thing.js");
-        }
-        other => panic!("expected an unresolved import, got: {other}"),
-    }
-}
-
-#[test]
-fn an_entry_without_a_provided_source_fails_closed() {
-    let lost = TestOverlay::new("lost").with_init(
-        "fusor:lost/a.js",
-        "globalThis.lost = 1;",
-        "fusor:lost/other.js",
-    );
-    let mut builder = HostRuntime::builder();
-    builder.with_overlay(lost);
-    let error = builder.build().expect_err("a missing entry must fail the build");
-    match error {
-        HostBuildError::InitModule {
-            overlay: "lost",
-            error:
-                InitModuleError::EntryNotProvided {
-                    entry: "fusor:lost/other.js",
-                    ..
-                },
-        } => {}
-        other => panic!("expected a missing entry, got: {other}"),
-    }
-}
-
-#[test]
-fn init_evaluation_failures_fail_closed() {
+fn init_script_locations_use_the_specifier() {
+    // A throwing init script reports its specifier as the source name
+    // (§8.4: location only, no debugger hook).
     let boom = TestOverlay::new("boom").with_init(
         "fusor:boom/init.js",
         "throw new Error('boom');",
-        "fusor:boom/init.js",
     );
     let mut builder = HostRuntime::builder();
     builder.with_overlay(boom);
-    let error = builder.build().expect_err("a throwing init module must fail the build");
+    let error = builder.build().expect_err("a throwing init script must fail the build");
     match error {
-        HostBuildError::InitModule {
+        HostBuildError::InitScript {
             overlay: "boom",
-            error: InitModuleError::Module(_),
-        } => {}
-        other => panic!("expected an init evaluation failure, got: {other}"),
+            error: InitScriptError::Execution(GlobalScriptError::Execution(source)),
+        } => {
+            let ExecutionError::Exception(exception) = source else {
+                panic!("expected a JavaScript exception, got: {source}");
+            };
+            assert_eq!(
+                exception.source_name(),
+                "fusor:boom/init.js",
+                "the specifier is the diagnostic location"
+            );
+        }
+        other => panic!("expected an init script failure, got: {other}"),
     }
 }
 

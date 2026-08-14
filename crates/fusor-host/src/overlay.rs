@@ -9,9 +9,9 @@
 //! 2. the host core installation (the `Fusor` namespace, §5.4, and the
 //!    process ops, §7.1), then op registration through the
 //!    assembly [`OpRegistry`] and installation as `Fusor.ops.<name>`
-//! 3. per-overlay init module graphs evaluated in dependency order; an
-//!    init module may `import` any other overlay's init modules through
-//!    their embedded virtual specifiers
+//! 3. per-overlay init scripts (Global Scripts, §8.4 — no ESM) evaluated
+//!    in dependency order; later scripts read earlier overlays' effects
+//!    through `globalThis`
 //!
 //! The assembled state is the snapshot input (§8): assembly plus init
 //! evaluation serialize into a blob; loading the blob skips steps 1–3
@@ -26,37 +26,34 @@ use std::error::Error;
 use std::fmt;
 use std::sync::Arc;
 
-use fusor_bytecode::{
-    BytecodeGraphVerificationLimits, FunctionGraphVerificationLimits, VerificationLimits,
-    VerifiedBytecode,
-};
+use fusor_bytecode::{VerificationLimits, VerifiedBytecode};
 use fusor_compiler::{CompilationContext, CompilerError, LeafCompilationError};
-use fusor_frontend::{
-    CompilationGoal, FrontendError, FrontendOptions, ModuleSyntaxRecord, StaticModuleRequest,
-    with_parsed_program,
-};
+use fusor_frontend::{CompilationGoal, FrontendError, FrontendOptions, GlobalScriptGoal, with_parsed_program};
 use fusor_runtime::{
-    Context, ExecutionError, ExecutionLimits, ModuleError, ModuleKey, Realm, Runtime, RuntimeError,
+    Context, ExecutionError, ExecutionLimits, GlobalScriptError, Realm, Runtime, RuntimeError,
     RuntimeLimits,
 };
 
 use crate::ops::{OpDeclarationConflict, OpRegistry, install_namespace, install_op, install_process};
 use crate::r#loop::{HostLoop, HostLoopError};
 
-/// One embedded ESM source contributed by an overlay's init phase (§9).
+/// One embedded init script contributed by an overlay's init phase (§9,
+/// §8.4): a Global Script — no ESM. The specifier names the source
+/// location reported by diagnostics and stack frames.
 #[derive(Clone, Debug)]
 pub struct OverlaySource {
-    /// The virtual module specifier (for example `fusor:core/init.js`),
-    /// resolved by init modules' `import` requests.
+    /// The virtual source name (for example `fusor:core/init.js`),
+    /// reported as the script's location by diagnostics and stack
+    /// frames.
     pub specifier: String,
-    /// The module source text (Module goal).
+    /// The script source text (Global Script goal).
     pub text: &'static str,
 }
 
 /// A host feature assembled by the builder (§9).
 ///
 /// Implementations are stateless feature declarations: ops to register,
-/// embedded init sources to evaluate, and the ordering constraints between
+/// embedded init scripts to evaluate, and the ordering constraints between
 /// overlays. The builder owns all mutable assembly state.
 pub trait Overlay: 'static {
     /// The overlay's unique name, referenced by other overlays'
@@ -70,12 +67,9 @@ pub trait Overlay: 'static {
     /// closed).
     fn ops(&self, registry: &mut OpRegistry);
 
-    /// The overlay's embedded init ESM sources.
+    /// The overlay's embedded init scripts (§8.4): Global Scripts
+    /// evaluated in declaration order when the overlay is assembled.
     fn init_sources(&self) -> Vec<OverlaySource>;
-
-    /// The entry module specifier whose graph the builder evaluates during
-    /// assembly; the empty string means no init module.
-    fn entry(&self) -> &'static str;
 
     /// The names of the overlays this overlay depends on, establishing the
     /// assembly evaluation order.
@@ -84,7 +78,7 @@ pub trait Overlay: 'static {
 
 /// An assembled host runtime: the engine [`Runtime`], one realm with the
 /// host core installed, the overlays' ops installed as `Fusor.ops`, and
-/// the overlays' init module graphs evaluated (§9).
+/// the overlays' init scripts evaluated (§9, §8.4).
 ///
 /// Convert the assembled runtime into the event loop with
 /// [`Self::into_loop`], or evaluate scripts directly through
@@ -160,14 +154,14 @@ impl HostRuntimeBuilder {
     }
 
     /// Assembles the host runtime (§9): sorts the overlays, installs the
-    /// host core and the registered ops, and evaluates the init module
-    /// graphs in dependency order.
+    /// host core and the registered ops, and evaluates the init scripts
+    /// in dependency order (§8.4).
     ///
     /// # Errors
     ///
     /// Fails closed on any assembly defect — dependency cycles, unknown
     /// dependencies, duplicate overlay names or init sources, op-name
-    /// conflicts, and init module compile/link/evaluate failures — leaving
+    /// conflicts, and init script compile/evaluate failures — leaving
     /// no half-assembled runtime behind.
     pub fn build(&mut self) -> Result<HostRuntime, HostBuildError> {
         let order = sort_overlays(&self.overlays)?;
@@ -195,17 +189,14 @@ impl HostRuntimeBuilder {
             for (declaration, glue) in registry.registrations() {
                 install_op(&mut context, declaration, glue).map_err(HostBuildError::Execution)?;
             }
-            // Init ESM (§9 step 3): one graph per overlay, in dependency
-            // order; init modules may import any overlay's sources.
-            let sources = collect_init_sources(&order, &self.overlays)?;
+            // Init scripts (§9 step 3, §8.4): every overlay's sources
+            // evaluate in dependency order — no imports; later scripts
+            // read earlier overlays' effects through `globalThis`.
+            collect_init_sources(&order, &self.overlays)?;
             for &index in &order {
                 let overlay = &self.overlays[index];
-                let entry = overlay.entry();
-                if entry.is_empty() {
-                    continue;
-                }
-                evaluate_init_graph(&mut context, overlay.name(), &sources, entry).map_err(
-                    |error| HostBuildError::InitModule {
+                evaluate_init_scripts(&mut context, &overlay.init_sources()).map_err(
+                    |error| HostBuildError::InitScript {
                         overlay: overlay.name(),
                         error,
                     },
@@ -249,12 +240,12 @@ pub enum HostBuildError {
         /// The duplicated virtual specifier.
         specifier: String,
     },
-    /// An overlay's init module graph failed to compile, link, or evaluate.
-    InitModule {
+    /// An overlay's init scripts failed to compile or evaluate.
+    InitScript {
         /// The owning overlay.
         overlay: &'static str,
         /// The init failure.
-        error: InitModuleError,
+        error: InitScriptError,
     },
 }
 
@@ -281,7 +272,7 @@ impl fmt::Display for HostBuildError {
                 formatter,
                 "init source '{specifier}' is provided by more than one overlay"
             ),
-            Self::InitModule { overlay, error } => {
+            Self::InitScript { overlay, error } => {
                 write!(formatter, "overlay '{overlay}' init failed: {error}")
             }
         }
@@ -293,75 +284,44 @@ impl Error for HostBuildError {
         match self {
             Self::Execution(error) => Some(error),
             Self::OpConflict(conflict) => Some(conflict),
-            Self::InitModule { error, .. } => Some(error),
+            Self::InitScript { error, .. } => Some(error),
             _ => None,
         }
     }
 }
 
-/// One init module graph's failure during assembly (§9 step 3).
+/// One overlay's init-script failure during assembly (§9 step 3).
 #[derive(Debug)]
-pub enum InitModuleError {
-    /// The init source failed to parse (frontend early errors).
+pub enum InitScriptError {
+    /// An init source failed to parse (frontend early errors).
     Frontend(FrontendError),
-    /// Storage planning failed for the init source.
+    /// Storage planning failed for an init source.
     Planning(CompilerError),
-    /// Lowering or verification failed for the init source.
+    /// Lowering or verification failed for an init source.
     Lowering(LeafCompilationError),
-    /// An `import` request resolved to no embedded source (fail closed).
-    Unresolved {
-        /// The importing module's specifier.
-        referrer: String,
-        /// The unresolvable request.
-        specifier: String,
-    },
-    /// The overlay's entry specifier is not among its init sources.
-    EntryNotProvided {
-        /// The owning overlay.
-        overlay: &'static str,
-        /// The missing entry.
-        entry: &'static str,
-    },
-    /// Module registration, linking, or evaluation failed.
-    Module(ModuleError),
+    /// The init script's execution failed (installation or a JavaScript
+    /// exception).
+    Execution(GlobalScriptError),
 }
 
-impl From<ModuleError> for InitModuleError {
-    fn from(error: ModuleError) -> Self {
-        Self::Module(error)
-    }
-}
-
-impl fmt::Display for InitModuleError {
+impl fmt::Display for InitScriptError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Frontend(error) => error.fmt(formatter),
             Self::Planning(error) => error.fmt(formatter),
             Self::Lowering(error) => error.fmt(formatter),
-            Self::Unresolved {
-                referrer,
-                specifier,
-            } => write!(
-                formatter,
-                "module '{referrer}' imports '{specifier}', which no overlay provides"
-            ),
-            Self::EntryNotProvided { overlay, entry } => write!(
-                formatter,
-                "overlay '{overlay}' declares init entry '{entry}' but provides no source for it"
-            ),
-            Self::Module(error) => error.fmt(formatter),
+            Self::Execution(error) => error.fmt(formatter),
         }
     }
 }
 
-impl Error for InitModuleError {
+impl Error for InitScriptError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Frontend(error) => Some(error),
             Self::Planning(error) => Some(error),
             Self::Lowering(error) => Some(error),
-            Self::Module(error) => Some(error),
-            _ => None,
+            Self::Execution(error) => Some(error),
         }
     }
 }
@@ -433,114 +393,51 @@ fn collect_init_sources(
     Ok(sources)
 }
 
-/// One compiled init module, ready for registration.
-struct CompiledInitModule {
-    syntax: ModuleSyntaxRecord,
-    authority: Arc<VerifiedBytecode>,
-}
-
 /// The closure-crossable compile failure: `with_parsed_program` requires
-/// the callback's result to be `Send`, which the full [`InitModuleError`]
+/// the callback's result to be `Send`, which the full [`InitScriptError`]
 /// is not (frontend errors carry arena references).
 enum CompileFailure {
     Planning(CompilerError),
     Lowering(LeafCompilationError),
 }
 
-/// Compiles one init source (Module goal) against the default verification
-/// limits.
-fn compile_init_module(text: &str, specifier: &str) -> Result<CompiledInitModule, InitModuleError> {
+/// Compiles one init source (Global Script goal, §8.4) against the
+/// default verification limits, with the specifier as the source name so
+/// diagnostics and stack frames report the virtual location.
+fn compile_init_script(text: &str, specifier: &str) -> Result<Arc<VerifiedBytecode>, InitScriptError> {
     let source_name: Arc<str> = Arc::from(specifier);
-    let (syntax, tree) = with_parsed_program(
+    with_parsed_program(
         text,
-        FrontendOptions::for_goal(CompilationGoal::Module),
+        FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
         move |unit| {
-            let syntax = unit.module_syntax().clone();
             let compiler = CompilationContext::new_with_source_name(unit, source_name)
                 .map_err(CompileFailure::Planning)?;
-            let tree = compiler
-                .compile_module_with_all_limits(
-                    VerificationLimits::default(),
-                    FunctionGraphVerificationLimits::default(),
-                    BytecodeGraphVerificationLimits::default(),
-                )
-                .map_err(CompileFailure::Lowering)?;
-            Ok((syntax, tree))
+            compiler
+                .compile_global_script(VerificationLimits::default())
+                .map(|tree| Arc::new(tree.verified_bytecode().clone()))
+                .map_err(CompileFailure::Lowering)
         },
     )
-    .map_err(InitModuleError::Frontend)?
+    .map_err(InitScriptError::Frontend)?
     .map_err(|failure| match failure {
-        CompileFailure::Planning(error) => InitModuleError::Planning(error),
-        CompileFailure::Lowering(error) => InitModuleError::Lowering(error),
-    })?;
-    Ok(CompiledInitModule {
-        syntax,
-        authority: Arc::new(tree.verified_bytecode().clone()),
+        CompileFailure::Planning(error) => InitScriptError::Planning(error),
+        CompileFailure::Lowering(error) => InitScriptError::Lowering(error),
     })
 }
 
-/// Decodes a static module request's specifier to a UTF-8 `String`.
-fn decode_request_specifier(request: &StaticModuleRequest) -> String {
-    request
-        .specifier()
-        .code_units()
-        .iter()
-        .copied()
-        .map(u32::from)
-        .filter_map(char::from_u32)
-        .collect()
-}
-
-/// Registers, links, and evaluates one overlay's init module graph,
-/// resolving every request against the embedded sources (§9 step 3).
-///
-/// Modules registered by an earlier overlay's graph are reused (ECMA-262
-/// [[Evaluation]] runs at most once per realm); the virtual module key is
-/// the specifier text itself.
-fn evaluate_init_graph(
+/// Evaluates one overlay's init scripts in declaration order (§9 step 3,
+/// §8.4): each source compiles as a Global Script and executes against
+/// the shared realm — later scripts read earlier effects through
+/// `globalThis`.
+fn evaluate_init_scripts(
     context: &mut Context<'_>,
-    overlay_name: &'static str,
-    sources: &HashMap<String, &'static str>,
-    entry: &'static str,
-) -> Result<(), InitModuleError> {
-    let Some(&entry_text) = sources.get(entry) else {
-        return Err(InitModuleError::EntryNotProvided {
-            overlay: overlay_name,
-            entry,
-        });
-    };
-    let entry_key = ModuleKey::new(Arc::from(entry));
-    let mut queue: Vec<(ModuleKey, ModuleSyntaxRecord)> = Vec::new();
-    if !context.has_module(&entry_key) {
-        let compiled = compile_init_module(entry_text, entry)?;
-        context.register_module(entry_key.clone(), compiled.syntax.clone(), compiled.authority)?;
-        queue.push((entry_key.clone(), compiled.syntax));
+    sources: &[OverlaySource],
+) -> Result<(), InitScriptError> {
+    for source in sources {
+        let authority = compile_init_script(source.text, &source.specifier)?;
+        context
+            .execute_global_script(authority, ExecutionLimits::default())
+            .map_err(InitScriptError::Execution)?;
     }
-    let mut seen: HashSet<String> = HashSet::new();
-    seen.insert(entry.to_owned());
-    while let Some((referrer, syntax)) = queue.pop() {
-        for request in syntax.requests() {
-            let specifier = decode_request_specifier(request);
-            let Some(&dependency_text) = sources.get(&specifier) else {
-                return Err(InitModuleError::Unresolved {
-                    referrer: referrer.as_str().to_owned(),
-                    specifier,
-                });
-            };
-            let dependency_key = ModuleKey::new(Arc::from(specifier.as_str()));
-            if seen.insert(specifier.clone()) && !context.has_module(&dependency_key) {
-                let compiled = compile_init_module(dependency_text, &specifier)?;
-                context.register_module(
-                    dependency_key.clone(),
-                    compiled.syntax.clone(),
-                    compiled.authority,
-                )?;
-                queue.push((dependency_key.clone(), compiled.syntax));
-            }
-            context.register_module_dependency(&referrer, &specifier, &dependency_key)?;
-        }
-    }
-    context.link_module(&entry_key)?;
-    context.evaluate_module(&entry_key, ExecutionLimits::default())?;
     Ok(())
 }

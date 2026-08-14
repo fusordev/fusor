@@ -112,7 +112,7 @@
 
 - [x] `Overlay` trait + `OverlaySource`(2026-08-14;`#[op]` 同名 mod + `register_op!`,首参 `&mut Context` 注入)
 - [x] 拓扑排序 + 环检测(构建期报错;重复 overlay 名/未知依赖/重复 init 源一并 fail closed)
-- [ ] op 注册 → `Fusor.ops` 安装;init 按序求值(2026-08-14 改造:init 改 Global Script 载体,替换现有 ESM 模块图求值)
+- [x] op 注册 → `Fusor.ops` 安装;init 按序求值(2026-08-14 已改造:init 为 Global Script 载体,按拓扑序+声明序求值,specifier 作 location)
 - [ ] `PluginModuleLoader`(内嵌虚拟模块说明符 + 文件系统回退)
 - [ ] CLI 重组为"核心 overlay + CLI overlay";`print` 全局移除
 - [ ] DevTools `Runtime.consoleAPICalled` 捕获改由 console overlay 承担

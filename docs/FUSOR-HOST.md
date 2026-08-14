@@ -491,8 +491,7 @@ Deno `Extension` 式;曾用名 Plugin,已确认改名 Overlay。
 pub trait Overlay: 'static {
     fn name(&self) -> &'static str;
     fn ops(&self, registry: &mut OpRegistry);              // 注册 op(§5)
-    fn init_sources(&self) -> Vec<OverlaySource>;          // 内嵌 ESM 源
-    fn entry(&self) -> &'static str;                       // 入口模块说明符
+    fn init_sources(&self) -> Vec<OverlaySource>;          // 内嵌 Global Script 源(§8.4)
     fn dependencies(&self) -> &'static [&'static str];     // 依赖的其他 overlay(排序)
 }
 
@@ -503,13 +502,14 @@ pub struct OverlaySource { pub specifier: String, pub text: &'static str }
 
 已落地(2026-08-14):builder 固定安装 host core(`Fusor` 命名空间 + process ops
 到 `Fusor.ops`),overlay op 经 `OpRegistry`(注册序确定、同名冲突构建期报错,
-`register_op!` 注册)安装为 `Fusor.ops.<name>`,init 模块图按拓扑序求值
-(`HostBuildError`/`InitModuleError` fail closed)。步骤:
+`register_op!` 注册)安装为 `Fusor.ops.<name>`,init **脚本**按拓扑序 + 声明序求值
+(`HostBuildError`/`InitScriptError` fail closed)。步骤:
 
 1. 拓扑排序 overlay 依赖,环检测 → 构建期报错(alpha:不做运行时容错)
 2. 所有 op 注册进 `OpRegistry` → 安装为 `Fusor.ops.<name>`(§5.4)
-3. 各 overlay init 模块图按序求值;init 模块可 `import` 其他 overlay 的 init
-   模块(内嵌虚拟模块说明符已落地;`PluginModuleLoader` 文件系统回退为条目 4)
+3. 各 overlay init 脚本按序求值(2026-08-14:不需要 ESM——Global Script 载体,
+   无 import;跨 overlay 经 globalThis 共享效果;specifier 作 source_name 进
+   诊断与堆栈,即 location,无 debugger 钩子)
 4. 结果状态即快照输入(§8:组装 + init 求值后序列化;加载快照 = 跳过 1–3)
 
 CLI 自身成为"核心 overlay + CLI overlay"的组合(`CoreOverlay` 已落地:5 个

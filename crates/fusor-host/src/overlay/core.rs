@@ -46,10 +46,6 @@ impl Overlay for CoreOverlay {
         Vec::new()
     }
 
-    fn entry(&self) -> &'static str {
-        ""
-    }
-
     fn dependencies(&self) -> &'static [&'static str] {
         &[]
     }
