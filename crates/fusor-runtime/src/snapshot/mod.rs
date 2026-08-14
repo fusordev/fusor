@@ -40,6 +40,26 @@
 //!     count u32 LE, then per cell:
 //!       value u8 (0 = uninitialized, 1 = value) + [the value encoding],
 //!       forward u8 (0 = none, 1 = target cell index u32 LE)
+//!   tag 4 = functions:
+//!     code count u32 LE, then per code: byte length u32 LE + the
+//!     verified-bytecode payload (FUSRBYTE codec)
+//!     function count u32 LE, then per function:
+//!       kind u8 (0 = JS bytecode, 1 = host)
+//!       kind 0: code ordinal u32 LE, template u32 LE,
+//!         environment count u32 LE + per entry:
+//!           tag u8 (0 = Captured cell index u32 LE,
+//!                   1 = RealmGlobal binding index u32 LE)
+//!         eval shadows u8 (always 0 in this slice), eval environment u8,
+//!         lexical receiver u8 + [the value encoding],
+//!         lexical eval flags u8 u8,
+//!         lexical new target u8 + function index u32 LE,
+//!         lexical derived constructor u8 + function index u32 LE,
+//!         lexical derived this u8 + cell index u32 LE,
+//!         has_instance_elements u8,
+//!         home object u8 (0 none, 1 object index u32 LE,
+//!                         2 function index u32 LE)
+//!         then the object record (same sub-format as tag 2)
+//!       kind 1: host slot index u32 LE + the object record
 //! ```
 //!
 //! The atoms section records the live dynamic atoms deterministically;
@@ -56,14 +76,17 @@
 
 mod codec;
 
+use std::sync::Arc;
 use std::{error::Error, fmt};
+
+use fusor_bytecode::VerifiedBytecode;
 
 use crate::{
     ArrayIndex, AtomError, AtomKind, JsBigInt, JsNumber, JsString, JsStringError, PredefinedAtom,
     PropertyKey, PropertyLayout, Runtime,
-    ids::ObjectId,
+    ids::{FunctionId, ObjectId, RealmId},
     object::{HeapObject, HeapObjectKind, ObjectRecord, PropertySlot, ShapeProperty},
-    runtime::BindingCell,
+    runtime::{BindingCell, BytecodeFunction, EnvironmentBinding, FunctionImplementation, HeapFunction, InstalledCode},
     value::{HeapReference, SlotValue, StoredValue},
 };
 
@@ -82,6 +105,9 @@ const SECTION_OBJECTS: u8 = 2;
 
 /// The binding-cells section tag.
 const SECTION_CELLS: u8 = 3;
+
+/// The functions section tag.
+const SECTION_FUNCTIONS: u8 = 4;
 
 /// Snapshot serialization and restoration failures (§8.3, §8.6 negative
 /// matrix). Every failure is typed; none panic.
@@ -117,6 +143,9 @@ pub enum SnapshotError {
     String(JsStringError),
     /// The atom table rejected a restore (limits or allocation).
     Atom(AtomError),
+    /// A restored verified-bytecode payload failed its load-time
+    /// re-verification (§8.3).
+    Bytecode(String),
 }
 
 impl fmt::Display for SnapshotError {
@@ -136,6 +165,9 @@ impl fmt::Display for SnapshotError {
             }
             Self::String(source) => write!(formatter, "snapshot string rebuild failed: {source}"),
             Self::Atom(source) => write!(formatter, "snapshot atom restore failed: {source}"),
+            Self::Bytecode(source) => {
+                write!(formatter, "snapshot bytecode re-verification failed: {source}")
+            }
         }
     }
 }
@@ -179,6 +211,11 @@ impl Runtime {
             codec::write_section(&mut buffer, SECTION_CELLS, &payload);
             sections += 1;
         }
+        if self.functions.len() > 0 {
+            let payload = encode_functions(self)?;
+            codec::write_section(&mut buffer, SECTION_FUNCTIONS, &payload);
+            sections += 1;
+        }
         buffer[count_position..count_position + 4].copy_from_slice(&sections.to_le_bytes());
         Ok(buffer)
     }
@@ -213,6 +250,7 @@ impl Runtime {
         let mut atoms = None;
         let mut staged_objects = None;
         let mut staged_cells = None;
+        let mut staged_functions = None;
         for _ in 0..sections {
             let tag = reader.read_u8()?;
             let payload = codec::read_section_payload(&mut reader)?;
@@ -220,6 +258,7 @@ impl Runtime {
                 SECTION_ATOMS => atoms = Some(decode_atoms(payload)?),
                 SECTION_OBJECTS => staged_objects = Some(decode_objects(payload)?),
                 SECTION_CELLS => staged_cells = Some(decode_cells(payload)?),
+                SECTION_FUNCTIONS => staged_functions = Some(decode_functions(payload)?),
                 other => return Err(SnapshotError::FormatMismatch { found: u32::from(other) }),
             }
         }
@@ -235,6 +274,9 @@ impl Runtime {
         };
         if let Some(staged) = staged_cells {
             restore_cells(self, staged, &object_ids)?;
+        }
+        if let Some((authorities, staged)) = staged_functions {
+            restore_functions(self, authorities, staged, &object_ids)?;
         }
         Ok(())
     }
@@ -342,45 +384,12 @@ fn encode_objects(runtime: &Runtime) -> Result<Vec<u8>, SnapshotError> {
             }
         }
         let record = &object.record;
-        match record.prototype() {
-            None => payload.push(0),
-            Some(HeapReference::Object(target)) => {
-                payload.push(1);
-                payload.extend_from_slice(&(target.index() as u32).to_le_bytes());
+        encode_object_record_payload(&mut payload, record).map_err(|what| {
+            SnapshotError::Unsupported {
+                index: id.index(),
+                what,
             }
-            Some(HeapReference::Function(_)) => {
-                return Err(SnapshotError::Unsupported {
-                    index: id.index(),
-                    what: "a function prototype",
-                });
-            }
-        }
-        payload.push(u8::from(record.is_extensible()));
-        payload.push(u8::from(record.is_html_dda()));
-        let shape = record.shape();
-        payload.extend_from_slice(&(shape.len() as u32).to_le_bytes());
-        for property in shape.iter() {
-            encode_property_key(&mut payload, property.key());
-            encode_layout(&mut payload, property.layout());
-        }
-        for slot in record.slots() {
-            match slot {
-                PropertySlot::Data(value) => {
-                    payload.push(0);
-                    encode_stored_value(&mut payload, value).map_err(|what| {
-                        SnapshotError::Unsupported {
-                            index: id.index(),
-                            what,
-                        }
-                    })?;
-                }                PropertySlot::Accessor { .. } => {
-                    return Err(SnapshotError::Unsupported {
-                        index: id.index(),
-                        what: "an accessor property slot",
-                    });
-                }
-            }
-        }
+        })?;
     }
     Ok(payload)
 }
@@ -503,66 +512,7 @@ fn decode_objects(payload: &[u8]) -> Result<Vec<StagedObject>, SnapshotError> {
         if kind != 0 {
             return Err(SnapshotError::FormatMismatch { found: u32::from(kind) });
         }
-        let prototype = match reader.read_u8()? {
-            0 => None,
-            1 => Some((1, reader.read_u32()? as usize)),
-            2 => Some((2, reader.read_u32()? as usize)),
-            other => return Err(SnapshotError::FormatMismatch { found: u32::from(other) }),
-        };
-        let extensible = reader.read_u8()? != 0;
-        let is_html_dda = reader.read_u8()? != 0;
-        let property_count = reader.read_u32()?;
-        let mut shape = Vec::new();
-        for _ in 0..property_count {
-            let key = match reader.read_u8()? {
-                0 => StagedKey::Index(reader.read_u32()?),
-                1 => {
-                    let kind = match reader.read_u8()? {
-                        0 => AtomKind::String,
-                        1 => AtomKind::GlobalSymbol,
-                        other => {
-                            return Err(SnapshotError::FormatMismatch { found: u32::from(other) });
-                        }
-                    };
-                    let unit_count = reader.read_u32()?;
-                    let mut units = Vec::new();
-                    for _ in 0..unit_count {
-                        units.push(reader.read_u16()?);
-                    }
-                    StagedKey::Atom(kind, units)
-                }
-                other => return Err(SnapshotError::FormatMismatch { found: u32::from(other) }),
-            };
-            let layout = match reader.read_u8()? {
-                0 => {
-                    let bits = reader.read_u8()?;
-                    PropertyLayout::data(bits & 1 != 0, bits & 2 != 0, bits & 4 != 0)
-                }
-                1 => {
-                    let bits = reader.read_u8()?;
-                    PropertyLayout::accessor(bits & 2 != 0, bits & 4 != 0)
-                }
-                other => return Err(SnapshotError::FormatMismatch { found: u32::from(other) }),
-            };
-            shape.push((key, layout));
-        }
-        let mut slots = Vec::new();
-        for _ in 0..property_count {
-            let slot_tag = reader.read_u8()?;
-            if slot_tag != 0 {
-                return Err(SnapshotError::FormatMismatch {
-                    found: u32::from(slot_tag),
-                });
-            }
-            slots.push(decode_staged_value(&mut reader)?);
-        }
-        staged.push(StagedObject {
-            prototype,
-            extensible,
-            is_html_dda,
-            shape,
-            slots,
-        });
+        staged.push(decode_object_record_content(&mut reader)?);
     }
     Ok(staged)
 }
@@ -633,60 +583,12 @@ fn restore_objects(
         ids.push(id);
     }
     for (staged, id) in staged.into_iter().zip(ids.iter().copied()) {
-        let mut shape_properties = Vec::new();
-        for (key, layout) in staged.shape {
-            let key = match key {
-                StagedKey::Index(index) => {
-                    let index = ArrayIndex::new(index).ok_or(SnapshotError::IntegrityViolation)?;
-                    PropertyKey::from_index(index)
-                }
-                StagedKey::Atom(kind, units) => {
-                    let description =
-                        JsString::from_code_units(units).map_err(SnapshotError::String)?;
-                    let atom = match kind {
-                        AtomKind::String => runtime
-                            .atoms
-                            .intern_string(&description)
-                            .map_err(SnapshotError::Atom)?,
-                        AtomKind::GlobalSymbol => runtime
-                            .atoms
-                            .intern_global_symbol(&description)
-                            .map_err(SnapshotError::Atom)?,
-                        AtomKind::Symbol | AtomKind::Private => {
-                            return Err(SnapshotError::IntegrityViolation);
-                        }
-                    };
-                    PropertyKey::from_validated_atom(atom)
-                }
-            };
-            shape_properties.push(ShapeProperty::from_parts(key, layout));
-        }
-        let mut slots = Vec::new();
-        for value in staged.slots {
-            slots.push(PropertySlot::Data(resolve_staged_value(
-                runtime, value, &ids,
-            )?));
-        }
-        let prototype = match staged.prototype {
-            None => None,
-            Some((1, index)) => {
-                let target = *ids.get(index).ok_or(SnapshotError::IntegrityViolation)?;
-                Some(HeapReference::Object(target))
-            }
-            Some(_) => return Err(SnapshotError::IntegrityViolation),
-        };
+        let record = resolve_object_record(runtime, staged, &ids, &[])?;
         let object = runtime
             .objects
             .get_mut(id)
             .ok_or(SnapshotError::IntegrityViolation)?;
-        *object = HeapObject::ordinary(ObjectRecord::from_parts(
-            prototype,
-            staged.extensible,
-            staged.is_html_dda,
-            std::sync::Arc::new(shape_properties),
-            Some(runtime.shape_interner.clone()),
-            slots,
-        ));
+        *object = HeapObject::ordinary(record);
     }
     Ok(ids)
 }
@@ -815,4 +717,644 @@ fn resolve_staged_value(
         }
         StagedValue::Function(_) => return Err(SnapshotError::IntegrityViolation),
     })
+}
+
+
+/// One staged (not yet resolved) function from the functions section.
+struct StagedFunction {
+    kind: StagedFunctionKind,
+    record: StagedObject,
+}
+
+enum StagedFunctionKind {
+    Bytecode {
+        code: usize,
+        template: u32,
+        environment: Vec<(u8, u32)>,
+        lexical_receiver: Option<StagedValue>,
+        lexical_eval_in_function: bool,
+        lexical_eval_in_class_field_initializer: bool,
+        lexical_new_target: Option<usize>,
+        lexical_derived_constructor: Option<usize>,
+        lexical_derived_this: Option<u32>,
+        has_instance_elements: bool,
+        home_object: Option<(u8, u32)>,
+    },
+    Host {
+        slot: u32,
+    },
+}
+
+/// Encodes every heap function and the distinct installed-code
+/// authorities they reference (format above). Direct-eval machinery,
+/// engine intrinsics, and non-bytecode implementation kinds fail closed
+/// (§8.2).
+fn encode_functions(runtime: &Runtime) -> Result<Vec<u8>, SnapshotError> {
+    let mut code_payloads: Vec<(usize, Vec<u8>)> = Vec::new();
+    for (code_id, code) in runtime.code.iter() {
+        let encoded = fusor_bytecode::encode_verified_bytecode(&code.authority).map_err(|error| {
+            SnapshotError::Unsupported {
+                index: code_id.index(),
+                what: match error {
+                    _ => "a verified bytecode authority",
+                },
+            }
+        })?;
+        code_payloads.push((code_id.index(), encoded));
+    }
+    let code_ordinals: std::collections::HashMap<usize, u32> = code_payloads
+        .iter()
+        .enumerate()
+        .map(|(ordinal, (index, _))| (*index, ordinal as u32))
+        .collect();
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&(code_payloads.len() as u32).to_le_bytes());
+    for (_, encoded) in &code_payloads {
+        payload.extend_from_slice(&(encoded.len() as u32).to_le_bytes());
+        payload.extend_from_slice(encoded);
+    }
+    payload.extend_from_slice(&(runtime.functions.len() as u32).to_le_bytes());
+    for (function_id, function) in runtime.functions.iter() {
+        match &function.implementation {
+            FunctionImplementation::Bytecode(bytecode) => {
+                payload.push(0);
+                let ordinal = *code_ordinals
+                    .get(&bytecode.code.index())
+                    .ok_or(SnapshotError::IntegrityViolation)?;
+                payload.extend_from_slice(&ordinal.to_le_bytes());
+                payload.extend_from_slice(&bytecode.template.get().to_le_bytes());
+                payload.extend_from_slice(&(bytecode.environment.len() as u32).to_le_bytes());
+                for binding in &bytecode.environment {
+                    match binding {
+                        EnvironmentBinding::Captured(cell) => {
+                            payload.push(0);
+                            payload.extend_from_slice(&(cell.index() as u32).to_le_bytes());
+                        }
+                        EnvironmentBinding::RealmGlobal(binding) => {
+                            payload.push(1);
+                            payload.extend_from_slice(&(binding.index() as u32).to_le_bytes());
+                        }
+                    }
+                }
+                if !bytecode.environment_eval_shadows.is_empty()
+                    || bytecode.eval_environment.is_some()
+                {
+                    return Err(SnapshotError::Unsupported {
+                        index: function_id.index(),
+                        what: "a direct-eval environment",
+                    });
+                }
+                payload.push(0);
+                payload.push(0);
+                match &bytecode.lexical_receiver {
+                    Some(value) => {
+                        payload.push(1);
+                        encode_stored_value(&mut payload, value).map_err(|what| {
+                            SnapshotError::Unsupported {
+                                index: function_id.index(),
+                                what,
+                            }
+                        })?;
+                    }
+                    None => payload.push(0),
+                }
+                payload.push(u8::from(bytecode.lexical_eval_in_function));
+                payload.push(u8::from(bytecode.lexical_eval_in_class_field_initializer));
+                write_function_ref(&mut payload, bytecode.lexical_new_target);
+                write_function_ref(&mut payload, bytecode.lexical_derived_constructor);
+                match bytecode.lexical_derived_this {
+                    Some(cell) => {
+                        payload.push(1);
+                        payload.extend_from_slice(&(cell.index() as u32).to_le_bytes());
+                    }
+                    None => payload.push(0),
+                }
+                payload.push(u8::from(bytecode.has_instance_elements));
+                match bytecode.home_object {
+                    None => payload.push(0),
+                    Some(HeapReference::Object(object)) => {
+                        payload.push(1);
+                        payload.extend_from_slice(&(object.index() as u32).to_le_bytes());
+                    }
+                    Some(HeapReference::Function(function)) => {
+                        payload.push(2);
+                        payload.extend_from_slice(&(function.index() as u32).to_le_bytes());
+                    }
+                }
+                encode_object_record_payload(&mut payload, &function.object)
+                    .map_err(|what| SnapshotError::Unsupported {
+                        index: function_id.index(),
+                        what,
+                    })?;
+            }
+            FunctionImplementation::Native(native) => match native.kind {
+                crate::runtime::NativeFunctionKind::Host(slot) => {
+                    payload.push(1);
+                    payload.extend_from_slice(&(slot.index() as u32).to_le_bytes());
+                    encode_object_record_payload(&mut payload, &function.object).map_err(|what| {
+                        SnapshotError::Unsupported {
+                            index: function_id.index(),
+                            what,
+                        }
+                    })?;
+                }
+                _ => {
+                    return Err(SnapshotError::Unsupported {
+                        index: function_id.index(),
+                        what: "an engine intrinsic function",
+                    });
+                }
+            },
+            _ => {
+                return Err(SnapshotError::Unsupported {
+                    index: function_id.index(),
+                    what: "a non-bytecode function kind",
+                });
+            }
+        }
+    }
+    Ok(payload)
+}
+
+fn write_function_ref(buffer: &mut Vec<u8>, target: Option<FunctionId>) {
+    match target {
+        Some(function) => {
+            buffer.push(1);
+            buffer.extend_from_slice(&(function.index() as u32).to_le_bytes());
+        }
+        None => buffer.push(0),
+    }
+}
+
+/// Encodes one object record's content (prototype, flags, shape, slots)
+/// shared by the objects and functions sections; returns the unsupported
+/// content name on failure.
+fn encode_object_record_payload(
+    buffer: &mut Vec<u8>,
+    record: &ObjectRecord,
+) -> Result<(), &'static str> {
+    match record.prototype() {
+        None => buffer.push(0),
+        Some(HeapReference::Object(target)) => {
+            buffer.push(1);
+            buffer.extend_from_slice(&(target.index() as u32).to_le_bytes());
+        }
+        Some(HeapReference::Function(_)) => {
+            return Err("a function prototype");
+        }
+    }
+    buffer.push(u8::from(record.is_extensible()));
+    buffer.push(u8::from(record.is_html_dda()));
+    let shape = record.shape();
+    buffer.extend_from_slice(&(shape.len() as u32).to_le_bytes());
+    for property in shape.iter() {
+        encode_property_key(buffer, property.key());
+        encode_layout(buffer, property.layout());
+    }
+    for slot in record.slots() {
+        match slot {
+            PropertySlot::Data(value) => {
+                buffer.push(0);
+                encode_stored_value(buffer, value)?;
+            }
+            PropertySlot::Accessor { .. } => {
+                return Err("an accessor property slot");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Decodes one object record's content (the shared sub-format).
+fn decode_object_record_content(
+    reader: &mut codec::Reader<'_>,
+) -> Result<StagedObject, SnapshotError> {
+    let prototype = match reader.read_u8()? {
+        0 => None,
+        1 => Some((1, reader.read_u32()? as usize)),
+        2 => Some((2, reader.read_u32()? as usize)),
+        other => return Err(SnapshotError::FormatMismatch { found: u32::from(other) }),
+    };
+    let extensible = reader.read_u8()? != 0;
+    let is_html_dda = reader.read_u8()? != 0;
+    let property_count = reader.read_u32()?;
+    let mut shape = Vec::new();
+    for _ in 0..property_count {
+        let key = match reader.read_u8()? {
+            0 => StagedKey::Index(reader.read_u32()?),
+            1 => {
+                let kind = match reader.read_u8()? {
+                    0 => AtomKind::String,
+                    1 => AtomKind::GlobalSymbol,
+                    other => {
+                        return Err(SnapshotError::FormatMismatch { found: u32::from(other) });
+                    }
+                };
+                let unit_count = reader.read_u32()?;
+                let mut units = Vec::new();
+                for _ in 0..unit_count {
+                    units.push(reader.read_u16()?);
+                }
+                StagedKey::Atom(kind, units)
+            }
+            other => return Err(SnapshotError::FormatMismatch { found: u32::from(other) }),
+        };
+        let layout = match reader.read_u8()? {
+            0 => {
+                let bits = reader.read_u8()?;
+                PropertyLayout::data(bits & 1 != 0, bits & 2 != 0, bits & 4 != 0)
+            }
+            1 => {
+                let bits = reader.read_u8()?;
+                PropertyLayout::accessor(bits & 2 != 0, bits & 4 != 0)
+            }
+            other => return Err(SnapshotError::FormatMismatch { found: u32::from(other) }),
+        };
+        shape.push((key, layout));
+    }
+    let mut slots = Vec::new();
+    for _ in 0..property_count {
+        let slot_tag = reader.read_u8()?;
+        if slot_tag != 0 {
+            return Err(SnapshotError::FormatMismatch {
+                found: u32::from(slot_tag),
+            });
+        }
+        slots.push(decode_staged_value(reader)?);
+    }
+    Ok(StagedObject {
+        prototype,
+        extensible,
+        is_html_dda,
+        shape,
+        slots,
+    })
+}
+
+/// Decodes the functions-section payload into the distinct authorities
+/// and the staged functions.
+fn decode_functions(
+    payload: &[u8],
+) -> Result<(Vec<Arc<VerifiedBytecode>>, Vec<StagedFunction>), SnapshotError> {
+    let mut reader = codec::Reader::new(payload);
+    let code_count = reader.read_u32()?;
+    let mut authorities = Vec::new();
+    for _ in 0..code_count {
+        let length = reader.read_u32()? as usize;
+        let encoded = reader.read_bytes(length)?;
+        let authority = fusor_bytecode::decode_verified_bytecode(encoded)
+            .map_err(|error| SnapshotError::Bytecode(error.to_string()))?;
+        authorities.push(Arc::new(authority));
+    }
+    let function_count = reader.read_u32()?;
+    let mut functions = Vec::new();
+    for _ in 0..function_count {
+        let kind = reader.read_u8()?;
+        match kind {
+            0 => {
+                let code = reader.read_u32()? as usize;
+                let template = reader.read_u32()?;
+                let environment_count = reader.read_u32()?;
+                let mut environment = Vec::new();
+                for _ in 0..environment_count {
+                    let tag = reader.read_u8()?;
+                    let index = reader.read_u32()?;
+                    match tag {
+                        0 | 1 => environment.push((tag, index)),
+                        other => {
+                            return Err(SnapshotError::FormatMismatch { found: u32::from(other) });
+                        }
+                    }
+                }
+                let eval_shadows = reader.read_u8()?;
+                let eval_environment = reader.read_u8()?;
+                if eval_shadows != 0 || eval_environment != 0 {
+                    return Err(SnapshotError::IntegrityViolation);
+                }
+                let lexical_receiver = match reader.read_u8()? {
+                    0 => None,
+                    1 => Some(decode_staged_value(&mut reader)?),
+                    other => {
+                        return Err(SnapshotError::FormatMismatch { found: u32::from(other) });
+                    }
+                };
+                let lexical_eval_in_function = reader.read_u8()? != 0;
+                let lexical_eval_in_class_field_initializer = reader.read_u8()? != 0;
+                let lexical_new_target = read_function_ref(&mut reader)?;
+                let lexical_derived_constructor = read_function_ref(&mut reader)?;
+                let lexical_derived_this = match reader.read_u8()? {
+                    0 => None,
+                    1 => Some(reader.read_u32()?),
+                    other => {
+                        return Err(SnapshotError::FormatMismatch { found: u32::from(other) });
+                    }
+                };
+                let has_instance_elements = reader.read_u8()? != 0;
+                let home_object = match reader.read_u8()? {
+                    0 => None,
+                    1 => Some((1, reader.read_u32()?)),
+                    2 => Some((2, reader.read_u32()?)),
+                    other => {
+                        return Err(SnapshotError::FormatMismatch { found: u32::from(other) });
+                    }
+                };
+                let record = decode_object_record_content(&mut reader)?;
+                functions.push(StagedFunction {
+                    kind: StagedFunctionKind::Bytecode {
+                        code,
+                        template,
+                        environment,
+                        lexical_receiver,
+                        lexical_eval_in_function,
+                        lexical_eval_in_class_field_initializer,
+                        lexical_new_target,
+                        lexical_derived_constructor,
+                        lexical_derived_this,
+                        has_instance_elements,
+                        home_object,
+                    },
+                    record,
+                });
+            }
+            1 => {
+                let slot = reader.read_u32()?;
+                let record = decode_object_record_content(&mut reader)?;
+                functions.push(StagedFunction {
+                    kind: StagedFunctionKind::Host { slot },
+                    record,
+                });
+            }
+            other => return Err(SnapshotError::FormatMismatch { found: u32::from(other) }),
+        }
+    }
+    if reader.remaining() != 0 {
+        return Err(SnapshotError::Truncated);
+    }
+    Ok((authorities, functions))
+}
+
+fn read_function_ref(reader: &mut codec::Reader<'_>) -> Result<Option<usize>, SnapshotError> {
+    match reader.read_u8()? {
+        0 => Ok(None),
+        1 => Ok(Some(reader.read_u32()? as usize)),
+        other => Err(SnapshotError::FormatMismatch { found: u32::from(other) }),
+    }
+}
+
+/// Resolves one staged object record against the restored object and
+/// function identities (the shared record content used by both sections).
+fn resolve_object_record(
+    runtime: &mut Runtime,
+    staged: StagedObject,
+    object_ids: &[ObjectId],
+    function_ids: &[FunctionId],
+) -> Result<ObjectRecord, SnapshotError> {
+    let mut shape_properties = Vec::new();
+    for (key, layout) in staged.shape {
+        let key = match key {
+            StagedKey::Index(index) => {
+                let index = ArrayIndex::new(index).ok_or(SnapshotError::IntegrityViolation)?;
+                PropertyKey::from_index(index)
+            }
+            StagedKey::Atom(kind, units) => {
+                let description = JsString::from_code_units(units).map_err(SnapshotError::String)?;
+                let atom = match kind {
+                    AtomKind::String => runtime
+                        .atoms
+                        .intern_string(&description)
+                        .map_err(SnapshotError::Atom)?,
+                    AtomKind::GlobalSymbol => runtime
+                        .atoms
+                        .intern_global_symbol(&description)
+                        .map_err(SnapshotError::Atom)?,
+                    AtomKind::Symbol | AtomKind::Private => {
+                        return Err(SnapshotError::IntegrityViolation);
+                    }
+                };
+                PropertyKey::from_validated_atom(atom)
+            }
+        };
+        shape_properties.push(ShapeProperty::from_parts(key, layout));
+    }
+    let mut slots = Vec::new();
+    for value in staged.slots {
+        let value = match value {
+            StagedValue::Function(index) => {
+                let target = *function_ids
+                    .get(index)
+                    .ok_or(SnapshotError::IntegrityViolation)?;
+                StoredValue::Function(target)
+            }
+            other => resolve_staged_value(runtime, other, object_ids)?,
+        };
+        slots.push(PropertySlot::Data(value));
+    }
+    let prototype = match staged.prototype {
+        None => None,
+        Some((1, index)) => {
+            let target = *object_ids.get(index).ok_or(SnapshotError::IntegrityViolation)?;
+            Some(HeapReference::Object(target))
+        }
+        Some((2, index)) => {
+            let target = *function_ids
+                .get(index)
+                .ok_or(SnapshotError::IntegrityViolation)?;
+            Some(HeapReference::Function(target))
+        }
+        Some(_) => return Err(SnapshotError::IntegrityViolation),
+    };
+    Ok(ObjectRecord::from_parts(
+        prototype,
+        staged.extensible,
+        staged.is_html_dda,
+        std::sync::Arc::new(shape_properties),
+        Some(runtime.shape_interner.clone()),
+        slots,
+    ))
+}
+
+struct PendingFunction {
+    record: StagedObject,
+    home_object: Option<(u8, u32)>,
+    lexical_new_target: Option<usize>,
+    lexical_derived_constructor: Option<usize>,
+}
+
+/// Restores the staged functions: authorities re-install (load-time
+/// verification, §8.3), functions insert in decode order so their
+/// identities match the encoded indices, then record contents and
+/// cross-references patch once every id exists.
+fn restore_functions(
+    runtime: &mut Runtime,
+    authorities: Vec<Arc<VerifiedBytecode>>,
+    staged: Vec<StagedFunction>,
+    object_ids: &[ObjectId],
+) -> Result<(), SnapshotError> {
+    let mut code_ids = Vec::new();
+    for authority in authorities {
+        let templates = runtime
+            .stage_templates(&authority)
+            .map_err(|_| SnapshotError::IntegrityViolation)?;
+        let id = runtime
+            .code
+            .try_insert(InstalledCode {
+                authority,
+                realm: RealmId::ZERO,
+                templates,
+                live_functions: 0,
+            })
+            .map_err(|_| SnapshotError::IntegrityViolation)?;
+        code_ids.push(id);
+    }
+    let mut function_ids = Vec::new();
+    let mut pending = Vec::new();
+    for function in staged {
+        let implementation = match function.kind {
+            StagedFunctionKind::Bytecode {
+                code,
+                template,
+                environment,
+                lexical_receiver,
+                lexical_eval_in_function,
+                lexical_eval_in_class_field_initializer,
+                lexical_new_target,
+                lexical_derived_constructor,
+                lexical_derived_this,
+                has_instance_elements,
+                home_object,
+            } => {
+                let code = *code_ids.get(code).ok_or(SnapshotError::IntegrityViolation)?;
+                let mut bindings = Vec::new();
+                for (tag, index) in environment {
+                    match tag {
+                        0 => bindings.push(EnvironmentBinding::Captured(
+                            runtime.cells.id_from_index(index as usize),
+                        )),
+                        1 => bindings.push(EnvironmentBinding::RealmGlobal(
+                            runtime.global_bindings.id_from_index(index as usize),
+                        )),
+                        _ => return Err(SnapshotError::IntegrityViolation),
+                    }
+                }
+                let lexical_receiver = match lexical_receiver {
+                    Some(value) => Some(resolve_staged_value(runtime, value, object_ids)?),
+                    None => None,
+                };
+                pending.push(PendingFunction {
+                    record: function.record,
+                    home_object,
+                    lexical_new_target,
+                    lexical_derived_constructor,
+                });
+                FunctionImplementation::Bytecode(BytecodeFunction {
+                    code,
+                    template: fusor_bytecode::FunctionTemplateId::new(template),
+                    environment: bindings,
+                    environment_eval_shadows: Vec::new(),
+                    eval_environment: None,
+                    lexical_receiver,
+                    lexical_eval_in_function,
+                    lexical_eval_in_class_field_initializer,
+                    lexical_new_target: None,
+                    lexical_derived_constructor: None,
+                    lexical_derived_this: lexical_derived_this
+                        .map(|index| runtime.cells.id_from_index(index as usize)),
+                    has_instance_elements,
+                    home_object: None,
+                })
+            }
+            StagedFunctionKind::Host { slot } => {
+                pending.push(PendingFunction {
+                    record: function.record,
+                    home_object: None,
+                    lexical_new_target: None,
+                    lexical_derived_constructor: None,
+                });
+                FunctionImplementation::Native(crate::runtime::NativeFunction {
+                    realm: RealmId::ZERO,
+                    kind: crate::runtime::NativeFunctionKind::Host(
+                        crate::HostFunctionId::new(slot as usize),
+                    ),
+                })
+            }
+        };
+        let id = runtime
+            .insert_heap_function(HeapFunction {
+                implementation,
+                object: ObjectRecord::from_parts(
+                    None,
+                    true,
+                    false,
+                    std::sync::Arc::new(Vec::new()),
+                    Some(runtime.shape_interner.clone()),
+                    Vec::new(),
+                ),
+                public_roots: 0,
+            })
+            .map_err(|_| SnapshotError::IntegrityViolation)?;
+        function_ids.push(id);
+    }
+    for (function_id, pending) in function_ids.iter().copied().zip(pending) {
+        let record = resolve_object_record(runtime, pending.record, object_ids, &function_ids)?;
+        let lexical_new_target = match pending.lexical_new_target {
+            Some(index) => Some(
+                *function_ids
+                    .get(index as usize)
+                    .ok_or(SnapshotError::IntegrityViolation)?,
+            ),
+            None => None,
+        };
+        let lexical_derived_constructor = match pending.lexical_derived_constructor {
+            Some(index) => Some(
+                *function_ids
+                    .get(index as usize)
+                    .ok_or(SnapshotError::IntegrityViolation)?,
+            ),
+            None => None,
+        };
+        let home_object = match pending.home_object {
+            None => None,
+            Some((1, index)) => {
+                let target = *object_ids
+                    .get(index as usize)
+                    .ok_or(SnapshotError::IntegrityViolation)?;
+                Some(HeapReference::Object(target))
+            }
+            Some((2, index)) => {
+                let target = *function_ids
+                    .get(index as usize)
+                    .ok_or(SnapshotError::IntegrityViolation)?;
+                Some(HeapReference::Function(target))
+            }
+            Some(_) => return Err(SnapshotError::IntegrityViolation),
+        };
+        let function = runtime
+            .functions
+            .get_mut(function_id)
+            .ok_or(SnapshotError::IntegrityViolation)?;
+        function.object = record;
+        let FunctionImplementation::Bytecode(bytecode) = &mut function.implementation else {
+            continue;
+        };
+        bytecode.home_object = home_object;
+        bytecode.lexical_new_target = lexical_new_target;
+        bytecode.lexical_derived_constructor = lexical_derived_constructor;
+    }
+    // live_functions accounting: count bytecode functions per code.
+    let live_counts: Vec<(crate::ids::InstalledCodeId, u64)> = {
+        let mut counts = std::collections::HashMap::new();
+        for function in runtime.functions.iter() {
+            let FunctionImplementation::Bytecode(bytecode) = &function.1.implementation else {
+                continue;
+            };
+            *counts.entry(bytecode.code).or_insert(0) += 1;
+        }
+        counts.into_iter().collect()
+    };
+    for (code, live) in live_counts {
+        if let Some(code) = runtime.code.get_mut(code) {
+            code.live_functions = live;
+        }
+    }
+    Ok(())
 }

@@ -43,6 +43,16 @@ impl<K> Id<K> {
         }
     }
 
+    /// The never-allocated zero identity, used by snapshot restoration for
+    /// records whose owning arena does not exist yet (realm-less restore,
+    /// §8.2).
+    pub(crate) const ZERO: Self = Self {
+        runtime: RuntimeIdentity(0),
+        index: 0,
+        generation: 0,
+        marker: PhantomData,
+    };
+
     pub(crate) const fn index(self) -> usize {
         self.index
     }
@@ -131,6 +141,17 @@ pub(crate) struct Arena<K, T> {
 }
 
 impl<K, T> Arena<K, T> {
+    /// Rebuilds a live identity from its arena index (snapshot
+    /// restoration: records insert in encode order, so indices match).
+    pub(crate) const fn id_from_index(&self, index: usize) -> Id<K> {
+        Id {
+            runtime: self.runtime,
+            index,
+            generation: 0,
+            marker: PhantomData,
+        }
+    }
+
     pub(crate) const fn new(runtime: RuntimeIdentity) -> Self {
         Self {
             runtime,

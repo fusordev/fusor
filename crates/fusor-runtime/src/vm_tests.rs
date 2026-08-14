@@ -7924,6 +7924,94 @@ fn snapshot_round_trips_binding_cells() {
 }
 
 #[test]
+fn snapshot_round_trips_bytecode_functions() {
+    let authority = compile_test_function(
+        "function outer(x) { return function inner(y) { return x + y; }; }",
+        "outer",
+    );
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let templates = runtime.stage_templates(&authority).expect("templates");
+    let code = runtime
+        .code
+        .try_insert(crate::runtime::InstalledCode {
+            authority: Arc::clone(&authority),
+            realm: crate::ids::RealmId::ZERO,
+            templates,
+            live_functions: 1,
+        })
+        .expect("code");
+    let cell = runtime
+        .cells
+        .try_insert(crate::runtime::BindingCell {
+            value: crate::value::SlotValue::Value(StoredValue::Number(JsNumber::from_f64(1.0))),
+            forward: None,
+        })
+        .expect("cell");
+    runtime
+        .insert_heap_function(crate::runtime::HeapFunction {
+            implementation: crate::runtime::FunctionImplementation::Bytecode(
+                crate::runtime::BytecodeFunction {
+                    code,
+                    template: authority.root_id(),
+                    environment: vec![crate::runtime::EnvironmentBinding::Captured(cell)],
+                    environment_eval_shadows: Vec::new(),
+                    eval_environment: None,
+                    lexical_receiver: None,
+                    lexical_eval_in_function: false,
+                    lexical_eval_in_class_field_initializer: false,
+                    lexical_new_target: None,
+                    lexical_derived_constructor: None,
+                    lexical_derived_this: None,
+                    has_instance_elements: false,
+                    home_object: None,
+                },
+            ),
+            object: ObjectRecord::from_parts(
+                None,
+                true,
+                false,
+                Arc::new(Vec::new()),
+                None,
+                Vec::new(),
+            ),
+            public_roots: 0,
+        })
+        .expect("function");
+
+    let blob = runtime.snapshot().expect("snapshot");
+    let mut restored = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    restored.from_snapshot(&blob).expect("restore");
+
+    let restored_functions: Vec<_> = restored.functions.iter().collect();
+    assert_eq!(restored_functions.len(), 1, "the function restored");
+    let function = restored_functions[0]
+        .1
+        .bytecode()
+        .expect("bytecode implementation");
+    assert_eq!(
+        function.template, authority.root_id(),
+        "template identity preserved"
+    );
+    match function.environment.as_slice() {
+        [crate::runtime::EnvironmentBinding::Captured(restored_cell)] => {
+            let cell = restored.cells.get(*restored_cell).expect("cell");
+            match &cell.value {
+                crate::value::SlotValue::Value(StoredValue::Number(number)) => {
+                    assert_eq!(number.as_f64(), 1.0);
+                }
+                other => panic!("unexpected cell value"),
+            }
+        }
+        other => panic!("unexpected environment"),
+    }
+    let restored_code = restored.code.get(function.code).expect("code");
+    assert_eq!(
+        restored_code.authority, authority,
+        "the authority round-tripped"
+    );
+}
+
+#[test]
 fn snapshot_fails_closed_on_unsupported_heap_content() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     // An accessor slot is not serializable yet (§8.2 intermediate).
