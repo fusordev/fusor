@@ -1070,6 +1070,16 @@ impl MapEntry {
     pub(crate) const fn is_live(&self) -> bool {
         self.live
     }
+
+    /// Snapshot-restore constructor (§8.2): a live entry with its
+    /// recorded key and value.
+    pub(crate) const fn live(key: StoredValue, value: StoredValue) -> Self {
+        Self {
+            key,
+            value,
+            live: true,
+        }
+    }
 }
 
 /// Ordered `[[MapData]]` plus an average-sublinear `SameValueZero` index.
@@ -1093,6 +1103,25 @@ impl MapState {
             entries: Vec::new(),
             index: HashMap::new(),
             live: 0,
+        }
+    }
+
+    /// Rebuilds the ordered entry vector and its lookup index from
+    /// snapshot-restored live entries (§8.2): tombstones never survive a
+    /// snapshot, so every restored entry is live and the index rebuilds
+    /// by position.
+    pub(crate) fn restored(entries: Vec<MapEntry>) -> Self {
+        let live = entries.iter().filter(|entry| entry.is_live()).count();
+        let mut index = HashMap::new();
+        for (position, entry) in entries.iter().enumerate() {
+            if entry.is_live() {
+                index.insert(MapKey::from_value(&entry.key), position);
+            }
+        }
+        Self {
+            entries,
+            index,
+            live,
         }
     }
 
@@ -1198,6 +1227,19 @@ pub(crate) struct SetState {
 }
 
 impl SetState {
+    /// The underlying map state (snapshot access to the ordered
+    /// `[[SetData]]` entries).
+    pub(crate) const fn map_state(&self) -> &MapState {
+        &self.data
+    }
+
+    /// Rebuilds a set from snapshot-restored live entries (§8.2).
+    pub(crate) fn restored(entries: Vec<MapEntry>) -> Self {
+        Self {
+            data: MapState::restored(entries),
+        }
+    }
+
     pub(crate) fn empty() -> Self {
         Self {
             data: MapState::empty(),
@@ -2521,8 +2563,8 @@ pub(crate) enum ArrayStorage {
 
 #[derive(Debug)]
 pub(crate) struct ArrayState {
-    length: u32,
-    storage: ArrayStorage,
+    pub(crate) length: u32,
+    pub(crate) storage: ArrayStorage,
 }
 
 impl ArrayState {
@@ -2750,6 +2792,12 @@ impl ArgumentsState {
 
     pub(crate) fn cells(&self) -> impl Iterator<Item = BindingCellId> + '_ {
         self.parameter_map.iter().copied().flatten()
+    }
+
+    /// The raw `[[ParameterMap]]` (snapshot access: `None` entries mark
+    /// unmapped parameters).
+    pub(crate) fn parameter_map(&self) -> &[Option<BindingCellId>] {
+        &self.parameter_map
     }
 
     pub(crate) fn detach(&mut self, index: u32) -> Option<BindingCellId> {
@@ -4055,6 +4103,17 @@ pub(crate) struct HeapObject {
 }
 
 impl HeapObject {
+    /// Rebuilds one snapshot-restored object from its recorded kind
+    /// state and resolved record (§8.2).
+    #[must_use]
+    pub(crate) const fn restored(record: ObjectRecord, kind: HeapObjectKind) -> Self {
+        Self {
+            kind,
+            record,
+            public_roots: 0,
+        }
+    }
+
     #[must_use]
     pub(crate) const fn ordinary(record: ObjectRecord) -> Self {
         Self {

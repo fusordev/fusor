@@ -20,17 +20,34 @@
 //!   tag 1 = atoms: count u64 LE, then per atom:
 //!     kind u8 (0 = String, 1 = GlobalSymbol),
 //!     description: unit count u32 LE, UTF-16 code units u16 LE
-//!   tag 2 = objects (ordinary objects only in this slice, §8.2):
+//!   tag 2 = objects (user heap; the realm prefix is omitted, §8.2):
 //!     count u64 LE, then per object:
 //!       index u32 LE (arena index; records ascend, holes are omitted and
 //!         become reusable vacant slots on restore)
-//!       kind u8 (0 = Ordinary)
+//!       kind u8:
+//!         0 Ordinary
+//!         1 Array: length u32 LE, storage u8 (0 dense, 1 sparse),
+//!           dense: element count u32 LE + per element
+//!             present u8 + [the value encoding]
+//!         2 Error: stack string (unit count u32 LE + UTF-16 u16 LE)
+//!         3 Date: value f64 LE
+//!         4 BoxedPrimitive: tag u8 (0 Boolean + u8, 1 Number + f64 LE,
+//!           2 BigInt + limb count u32 + u32 limbs LE, 3 String units,
+//!           4 GlobalSymbol units)
+//!         5 RegExp: source units + flags units (the matcher recompiles)
+//!         6 Map: live entry count u32 LE + per entry
+//!           key [value encoding] + value [value encoding]
+//!         7 Set: live entry count u32 LE + per entry key [value encoding]
+//!         8 RawJson
+//!         9 Arguments: map count u32 LE + per entry
+//!           u8 (0 unmapped, 1 cell index u32 LE)
 //!       prototype u8 (0 = none, 1 = object, 2 = function) + index u32 LE
 //!       extensible u8, is_html_dda u8
 //!       shape: property count u32 LE, then per property:
-//!         key u8 (0 = array index + u32 LE, 1 = atom) then for atoms:
-//!           kind u8 (0 = String, 1 = GlobalSymbol), description units
-//!           (unit count u32 LE, UTF-16 u16 LE)
+//!         key u8 (0 = array index + u32 LE,
+//!                 1 = atom (kind u8 + description units),
+//!                 2 = predefined atom ordinal u32 LE — includes the
+//!                     well-known symbols, which are predefined here)
 //!         layout u8 (0 = data, 1 = accessor) + bits u8
 //!       slots: aligned with the shape, per slot:
 //!         tag u8 (0 = data) + the value encoding:
@@ -111,9 +128,12 @@
 //! record's identity stable.
 //!
 //! Heap content the current format does not cover yet fails closed with
-//! [`SnapshotError::Unsupported`] (intermediate slices, §8.2): exotic
-//! object kinds, accessor slots, identity symbols, and module
-//! registries.
+//! [`SnapshotError::Unsupported`] (intermediate slices, §8.2): promises,
+//! proxies, array buffers and typed views, weak collections, Intl and
+//! Temporal objects, iterators, identity-symbol keys, accessor slots,
+//! and module registries. Snapshotting drains the job queue to
+//! quiescence and collects garbage first, so unreachable records —
+//! exhausted iterators, collected cycles — never enter the blob.
 
 mod codec;
 
@@ -126,7 +146,11 @@ use crate::{
     ArrayIndex, AtomError, AtomKind, JsBigInt, JsNumber, JsString, JsStringError, PredefinedAtom,
     PropertyKey, PropertyLayout, Realm, Runtime,
     ids::{FunctionId, ObjectId, RealmId},
-    object::{HeapObject, HeapObjectKind, ObjectRecord, PropertySlot, ShapeProperty},
+    object::{
+        ArgumentsState, ArrayState, ArrayStorage, BoxedPrimitive, DateState, ErrorState,
+        HeapObject, HeapObjectKind, MapEntry, MapState, ObjectRecord, PropertySlot,
+        RegExpState, SetState, ShapeProperty,
+    },
     runtime::{
         BindingCell, BytecodeFunction, EnvironmentBinding, EvalBindingShadow,
         EvalVariableEnvironment, EvalVariableEnvironmentKind, FunctionImplementation,
@@ -198,6 +222,14 @@ pub enum SnapshotError {
     /// A restored verified-bytecode payload failed its load-time
     /// re-verification (§8.3).
     Bytecode(String),
+    /// A restored `RegExp` pattern failed to recompile from its
+    /// recorded source and flags (§8.2).
+    RegExp(String),
+    /// The job-queue drain before snapshotting failed (§8.2: pending
+    /// microtasks settle before the heap freezes).
+    Jobs(String),
+    /// The pre-snapshot garbage collection failed (§8.2).
+    Gc(String),
     /// The deterministic realm replay failed to rebuild one realm
     /// (§8.2: `create_realm` is replayed on restore).
     Realm(String),
@@ -233,6 +265,15 @@ impl fmt::Display for SnapshotError {
             Self::Atom(source) => write!(formatter, "snapshot atom restore failed: {source}"),
             Self::Bytecode(source) => {
                 write!(formatter, "snapshot bytecode re-verification failed: {source}")
+            }
+            Self::RegExp(source) => {
+                write!(formatter, "snapshot regexp recompilation failed: {source}")
+            }
+            Self::Jobs(source) => {
+                write!(formatter, "snapshot job-queue drain failed: {source}")
+            }
+            Self::Gc(source) => {
+                write!(formatter, "snapshot garbage collection failed: {source}")
             }
             Self::Realm(source) => {
                 write!(formatter, "snapshot realm reconstruction failed: {source}")
@@ -318,24 +359,73 @@ fn validate_realms(runtime: &Runtime) -> Result<Vec<RealmRecord>, SnapshotError>
     Ok(records)
 }
 
+/// Validates the runtime-level async state (§8.2): suspended generators
+/// and in-flight async machinery live outside the arenas, so a snapshot
+/// of a runtime with any of it would silently lose execution state.
+/// Everything here fails closed until its serializer slice lands.
+fn validate_runtime_state(runtime: &Runtime) -> Result<(), SnapshotError> {
+    let unsupported = |what: &'static str| SnapshotError::Unsupported { index: 0, what };
+    if !runtime.generator_states.is_empty() {
+        return Err(unsupported("a suspended generator"));
+    }
+    if !runtime.async_function_states.is_empty() {
+        return Err(unsupported("a suspended async function"));
+    }
+    if !runtime.async_generator_states.is_empty() {
+        return Err(unsupported("a suspended async generator"));
+    }
+    if !runtime.array_from_async_states.is_empty() {
+        return Err(unsupported("an in-flight Array.fromAsync"));
+    }
+    if !runtime.pending_dynamic_imports.is_empty() {
+        return Err(unsupported("an in-flight dynamic import"));
+    }
+    if !runtime.deferred_import_waiters.is_empty() {
+        return Err(unsupported("an in-flight import.defer"));
+    }
+    if !runtime.promise_jobs.is_empty() {
+        return Err(unsupported("a pending promise job"));
+    }
+    if !runtime.atomics_waiters.is_empty() {
+        return Err(unsupported("a pending Atomics.waitAsync"));
+    }
+    Ok(())
+}
+
 impl Runtime {
     /// Serializes the heap into one snapshot blob (§8.1, §8.3).
+    ///
+    /// Snapshotting first waits for the job queue to quiesce (pending
+    /// microtasks settle before the heap freezes), then runs a full
+    /// mark-and-sweep collection so unreachable records — exhausted
+    /// iterators, collected cycles — drop out of the blob (§8.2).
     ///
     /// The realm table is serialized; the intrinsic graph on `globalThis`
     /// is not — restore replays `create_realm` deterministically and
     /// validates the replay against the recorded segments (§8.2). The
-    /// current format covers the dynamic atoms table and ordinary
-    /// objects (shapes, data properties, primitive values, object
-    /// references). Heap content beyond that — exotic object kinds,
-    /// accessor slots, function values, identity symbols, module
-    /// registries — fails closed with [`SnapshotError::Unsupported`]
-    /// until its serializer slice lands (§8.2).
+    /// current format covers the dynamic atoms table and the user heap:
+    /// ordinary objects, arrays, errors, dates, boxed primitives,
+    /// regexps, maps, sets, raw JSON, arguments, functions, and binding
+    /// cells. Heap content beyond that — promises, proxies, array
+    /// buffers and typed views, weak collections, Intl/Temporal objects,
+    /// iterators, module registries — fails closed with
+    /// [`SnapshotError::Unsupported`] until its serializer slice lands
+    /// (§8.2).
     ///
     /// # Errors
     ///
-    /// Returns a typed [`SnapshotError`] for unsupported heap content.
-    /// This function never panics.
-    pub fn snapshot(&self) -> Result<Vec<u8>, SnapshotError> {
+    /// Returns a typed [`SnapshotError`] for unsupported heap content or
+    /// a failed job-queue drain or collection. This function never
+    /// panics.
+    pub fn snapshot(&mut self) -> Result<Vec<u8>, SnapshotError> {
+        crate::vm::promise::drain_host_jobs_with_limits(
+            self,
+            None,
+            crate::ExecutionLimits::default(),
+        )
+        .map_err(|error| SnapshotError::Jobs(error.to_string()))?;
+        self.collect_cycles()
+            .map_err(|error| SnapshotError::Gc(error.to_string()))?;
         let mut buffer = Vec::new();
         buffer.extend_from_slice(&SNAPSHOT_MAGIC);
         buffer.extend_from_slice(&SNAPSHOT_FORMAT_STAMP.to_le_bytes());
@@ -349,6 +439,7 @@ impl Runtime {
             sections += 1;
         }
         let realm_records = validate_realms(self)?;
+        validate_runtime_state(self)?;
         let objects_watermark = realm_records.last().map_or(0, |record| record.objects.1);
         let functions_watermark = realm_records.last().map_or(0, |record| record.functions.1);
         if self.objects.len() > objects_watermark {
@@ -614,6 +705,7 @@ pub(crate) fn decode_atoms(payload: &[u8]) -> Result<Vec<(AtomKind, JsString)>, 
 enum StagedKey {
     Index(u32),
     Atom(AtomKind, Vec<u16>),
+    Predefined(u32),
 }
 
 /// One staged (not yet resolved) slot value from the objects section.
@@ -632,11 +724,49 @@ enum StagedValue {
 /// One staged object waiting for its arena slot at the recorded index.
 struct StagedObject {
     index: usize,
+    kind: StagedObjectKind,
     prototype: Option<(u8, usize)>,
     extensible: bool,
     is_html_dda: bool,
     shape: Vec<(StagedKey, PropertyLayout)>,
     slots: Vec<StagedValue>,
+}
+
+/// One staged exotic-kind state (the tag-2 kind payloads).
+enum StagedObjectKind {
+    Ordinary,
+    Array {
+        length: u32,
+        storage: StagedArrayStorage,
+    },
+    Error {
+        stack: Vec<u16>,
+    },
+    Date {
+        value: f64,
+    },
+    Boxed(StagedBoxed),
+    RegExp {
+        source: Vec<u16>,
+        flags: Vec<u16>,
+    },
+    Map(Vec<(StagedValue, StagedValue)>),
+    Set(Vec<StagedValue>),
+    RawJson,
+    Arguments(Vec<Option<u32>>),
+}
+
+enum StagedArrayStorage {
+    Dense(Vec<Option<StagedValue>>),
+    Sparse,
+}
+
+enum StagedBoxed {
+    Boolean(bool),
+    Number(f64),
+    BigInt(Vec<u32>),
+    String(Vec<u16>),
+    GlobalSymbol(Vec<u16>),
 }
 
 /// One staged (not yet resolved) binding cell.
@@ -664,15 +794,12 @@ fn encode_objects(runtime: &Runtime, watermark: usize) -> Result<Vec<u8>, Snapsh
         .filter(|(id, _)| id.index() >= watermark)
     {
         payload.extend_from_slice(&(id.index() as u32).to_le_bytes());
-        match object.kind() {
-            HeapObjectKind::Ordinary => payload.push(0),
-            _ => {
-                return Err(SnapshotError::Unsupported {
-                    index: id.index(),
-                    what: "an exotic object kind",
-                });
+        encode_object_kind(&mut payload, object.kind()).map_err(|what| {
+            SnapshotError::Unsupported {
+                index: id.index(),
+                what,
             }
-        }
+        })?;
         let record = &object.record;
         encode_object_record_payload(&mut payload, record).map_err(|what| {
             SnapshotError::Unsupported {
@@ -684,14 +811,197 @@ fn encode_objects(runtime: &Runtime, watermark: usize) -> Result<Vec<u8>, Snapsh
     Ok(payload)
 }
 
-/// Encodes one property key (format above).
-fn encode_property_key(buffer: &mut Vec<u8>, key: &PropertyKey) {
+/// Encodes one exotic-kind tag and payload (format above); returns the
+/// unsupported content name on failure.
+fn encode_object_kind(
+    payload: &mut Vec<u8>,
+    kind: &HeapObjectKind,
+) -> Result<(), &'static str> {
+    match kind {
+        HeapObjectKind::Ordinary => payload.push(0),
+        HeapObjectKind::Array(state) => {
+            payload.push(1);
+            payload.extend_from_slice(&state.length.to_le_bytes());
+            match &state.storage {
+                ArrayStorage::Dense { elements, .. } => {
+                    payload.push(0);
+                    payload.extend_from_slice(&(elements.len() as u32).to_le_bytes());
+                    for element in elements {
+                        match element {
+                            None => payload.push(0),
+                            Some(value) => {
+                                payload.push(1);
+                                encode_stored_value(payload, value)?;
+                            }
+                        }
+                    }
+                }
+                ArrayStorage::Sparse => payload.push(1),
+            }
+        }
+        HeapObjectKind::Error(state) => {
+            payload.push(2);
+            encode_string_units(payload, state.stack());
+        }
+        HeapObjectKind::Date(state) => {
+            payload.push(3);
+            payload.extend_from_slice(&state.value().as_f64().to_le_bytes());
+        }
+        HeapObjectKind::BoxedPrimitive(value) => {
+            payload.push(4);
+            match value {
+                BoxedPrimitive::Boolean(value) => {
+                    payload.push(0);
+                    payload.push(u8::from(*value));
+                }
+                BoxedPrimitive::Number(value) => {
+                    payload.push(1);
+                    payload.extend_from_slice(&value.as_f64().to_le_bytes());
+                }
+                BoxedPrimitive::BigInt(value) => {
+                    payload.push(2);
+                    let limbs = value.limbs();
+                    payload.extend_from_slice(&(limbs.len() as u32).to_le_bytes());
+                    for limb in limbs {
+                        payload.extend_from_slice(&limb.to_le_bytes());
+                    }
+                }
+                BoxedPrimitive::String(value) => {
+                    payload.push(3);
+                    encode_string_units(payload, value);
+                }
+                BoxedPrimitive::Symbol(atom) => match atom.kind() {
+                    AtomKind::GlobalSymbol => {
+                        payload.push(4);
+                        encode_atom_content(payload, atom);
+                    }
+                    _ => return Err("an identity symbol box"),
+                },
+            }
+        }
+        HeapObjectKind::RegExp(state) => {
+            payload.push(5);
+            encode_string_units(payload, state.source());
+            encode_string_units(payload, state.flags());
+        }
+        HeapObjectKind::Map(state) => {
+            payload.push(6);
+            let live = state.len();
+            payload.extend_from_slice(&(live as u32).to_le_bytes());
+            for position in 0..state.retained_len() {
+                let entry = state
+                    .entry(position)
+                    .ok_or("a map entry index")?;
+                if !entry.is_live() {
+                    continue;
+                }
+                encode_stored_value(payload, entry.key())?;
+                encode_stored_value(payload, entry.value())?;
+            }
+        }
+        HeapObjectKind::Set(state) => {
+            payload.push(7);
+            let data = state.map_state();
+            let live = data.len();
+            payload.extend_from_slice(&(live as u32).to_le_bytes());
+            for position in 0..data.retained_len() {
+                let entry = data.entry(position).ok_or("a set entry index")?;
+                if !entry.is_live() {
+                    continue;
+                }
+                encode_stored_value(payload, entry.key())?;
+            }
+        }
+        HeapObjectKind::RawJson => payload.push(8),
+        HeapObjectKind::Arguments(state) => {
+            payload.push(9);
+            let map = state.parameter_map();
+            payload.extend_from_slice(&(map.len() as u32).to_le_bytes());
+            for entry in map {
+                match entry {
+                    None => payload.push(0),
+                    Some(cell) => {
+                        payload.push(1);
+                        payload.extend_from_slice(&(cell.index() as u32).to_le_bytes());
+                    }
+                }
+            }
+        }
+        HeapObjectKind::Promise(_) => return Err("a promise"),
+        HeapObjectKind::Proxy(_) => return Err("a proxy"),
+        HeapObjectKind::ArrayBuffer(_) | HeapObjectKind::DataView(_) => {
+            return Err("an array buffer view");
+        }
+        HeapObjectKind::TypedArray(_) => return Err("a typed array"),
+        HeapObjectKind::WeakMap(_) | HeapObjectKind::WeakSet(_) | HeapObjectKind::WeakRef(_) => {
+            return Err("a weak collection");
+        }
+        HeapObjectKind::FinalizationRegistry(_) => return Err("a finalization registry"),
+        HeapObjectKind::ModuleNamespace(_) => return Err("a module namespace"),
+        HeapObjectKind::IntlLocale(_)
+        | HeapObjectKind::IntlCollator(_)
+        | HeapObjectKind::IntlNumberFormat(_)
+        | HeapObjectKind::IntlDateTimeFormat(_)
+        | HeapObjectKind::IntlPluralRules(_)
+        | HeapObjectKind::IntlRelativeTimeFormat(_)
+        | HeapObjectKind::IntlListFormat(_)
+        | HeapObjectKind::IntlDisplayNames(_)
+        | HeapObjectKind::IntlDurationFormat(_)
+        | HeapObjectKind::IntlSegmenter(_)
+        | HeapObjectKind::IntlSegments(_)
+        | HeapObjectKind::IntlSegmentIterator(_) => return Err("an Intl object"),
+        HeapObjectKind::TemporalInstant(_)
+        | HeapObjectKind::TemporalDuration(_)
+        | HeapObjectKind::TemporalPlainDate(_)
+        | HeapObjectKind::TemporalPlainDateTime(_)
+        | HeapObjectKind::TemporalPlainTime(_)
+        | HeapObjectKind::TemporalPlainMonthDay(_)
+        | HeapObjectKind::TemporalPlainYearMonth(_)
+        | HeapObjectKind::TemporalZonedDateTime(_) => return Err("a Temporal object"),
+        HeapObjectKind::ForInIterator(_)
+        | HeapObjectKind::ArrayIterator(_)
+        | HeapObjectKind::IteratorWrapper(_)
+        | HeapObjectKind::StringIterator(_)
+        | HeapObjectKind::RegExpStringIterator(_)
+        | HeapObjectKind::MapIterator(_)
+        | HeapObjectKind::SetIterator(_) => return Err("an iterator"),
+    }
+    Ok(())
+}
+
+/// Encodes one string's UTF-16 units (unit count + units).
+fn encode_string_units(payload: &mut Vec<u8>, value: &JsString) {
+    let units: Vec<u16> = value.code_units().collect();
+    payload.extend_from_slice(&(units.len() as u32).to_le_bytes());
+    for unit in units {
+        payload.extend_from_slice(&unit.to_le_bytes());
+    }
+}
+
+/// Encodes one property key (format above): array indices inline,
+/// predefined atoms (including the well-known symbols, which are
+/// predefined in this engine) by ordinal, content-internable atoms by
+/// kind and description. Identity symbols and private names fail closed
+/// (§8.2).
+fn encode_property_key(buffer: &mut Vec<u8>, key: &PropertyKey) -> Result<(), &'static str> {
     if let Some(index) = key.as_index() {
         buffer.push(0);
         buffer.extend_from_slice(&index.value().to_le_bytes());
-    } else if let Some(atom) = key.as_atom() {
-        buffer.push(1);
-        encode_atom_content(buffer, atom);
+        return Ok(());
+    }
+    let atom = key.as_atom().ok_or("a property key without identity")?;
+    if let Some(predefined) = atom.predefined_atom() {
+        buffer.push(2);
+        buffer.extend_from_slice(&(predefined.ordinal() as u32).to_le_bytes());
+        return Ok(());
+    }
+    match atom.kind() {
+        AtomKind::String | AtomKind::GlobalSymbol => {
+            buffer.push(1);
+            encode_atom_content(buffer, atom);
+            Ok(())
+        }
+        AtomKind::Symbol | AtomKind::Private => Err("an identity symbol key"),
     }
 }
 
@@ -802,16 +1112,139 @@ fn decode_objects(payload: &[u8]) -> Result<Vec<StagedObject>, SnapshotError> {
     let mut staged = Vec::new();
     for _ in 0..count {
         let index = reader.read_u32()? as usize;
-        let kind = reader.read_u8()?;
-        if kind != 0 {
-            return Err(SnapshotError::FormatMismatch { found: u32::from(kind) });
-        }
+        let kind = decode_object_kind(&mut reader)?;
         staged.push(StagedObject {
             index,
+            kind,
             ..decode_object_record_content(&mut reader)?
         });
     }
     Ok(staged)
+}
+
+/// Decodes one exotic-kind tag and payload (format above).
+fn decode_object_kind(reader: &mut codec::Reader<'_>) -> Result<StagedObjectKind, SnapshotError> {
+    Ok(match reader.read_u8()? {
+        0 => StagedObjectKind::Ordinary,
+        1 => {
+            let length = reader.read_u32()?;
+            let storage = match reader.read_u8()? {
+                0 => {
+                    let count = reader.read_u32()?;
+                    let mut elements = Vec::new();
+                    for _ in 0..count {
+                        elements.push(match reader.read_u8()? {
+                            0 => None,
+                            1 => Some(decode_staged_value(reader)?),
+                            other => {
+                                return Err(SnapshotError::FormatMismatch {
+                                    found: u32::from(other),
+                                });
+                            }
+                        });
+                    }
+                    StagedArrayStorage::Dense(elements)
+                }
+                1 => StagedArrayStorage::Sparse,
+                other => {
+                    return Err(SnapshotError::FormatMismatch {
+                        found: u32::from(other),
+                    });
+                }
+            };
+            StagedObjectKind::Array { length, storage }
+        }
+        2 => StagedObjectKind::Error {
+            stack: decode_string_units(reader)?,
+        },
+        3 => StagedObjectKind::Date {
+            value: f64::from_le_bytes(
+                reader
+                    .read_bytes(8)?
+                    .try_into()
+                    .map_err(|_| SnapshotError::Truncated)?,
+            ),
+        },
+        4 => {
+            let boxed = match reader.read_u8()? {
+                0 => StagedBoxed::Boolean(reader.read_u8()? != 0),
+                1 => StagedBoxed::Number(f64::from_le_bytes(
+                    reader
+                        .read_bytes(8)?
+                        .try_into()
+                        .map_err(|_| SnapshotError::Truncated)?,
+                )),
+                2 => {
+                    let count = reader.read_u32()?;
+                    let mut limbs = Vec::new();
+                    for _ in 0..count {
+                        limbs.push(reader.read_u32()?);
+                    }
+                    StagedBoxed::BigInt(limbs)
+                }
+                3 => StagedBoxed::String(decode_string_units(reader)?),
+                4 => StagedBoxed::GlobalSymbol(decode_string_units(reader)?),
+                other => {
+                    return Err(SnapshotError::FormatMismatch {
+                        found: u32::from(other),
+                    });
+                }
+            };
+            StagedObjectKind::Boxed(boxed)
+        }
+        5 => StagedObjectKind::RegExp {
+            source: decode_string_units(reader)?,
+            flags: decode_string_units(reader)?,
+        },
+        6 => {
+            let count = reader.read_u32()?;
+            let mut entries = Vec::new();
+            for _ in 0..count {
+                entries.push((decode_staged_value(reader)?, decode_staged_value(reader)?));
+            }
+            StagedObjectKind::Map(entries)
+        }
+        7 => {
+            let count = reader.read_u32()?;
+            let mut entries = Vec::new();
+            for _ in 0..count {
+                entries.push(decode_staged_value(reader)?);
+            }
+            StagedObjectKind::Set(entries)
+        }
+        8 => StagedObjectKind::RawJson,
+        9 => {
+            let count = reader.read_u32()?;
+            let mut map = Vec::new();
+            for _ in 0..count {
+                map.push(match reader.read_u8()? {
+                    0 => None,
+                    1 => Some(reader.read_u32()?),
+                    other => {
+                        return Err(SnapshotError::FormatMismatch {
+                            found: u32::from(other),
+                        });
+                    }
+                });
+            }
+            StagedObjectKind::Arguments(map)
+        }
+        other => {
+            return Err(SnapshotError::FormatMismatch {
+                found: u32::from(other),
+            });
+        }
+    })
+}
+
+/// Decodes one UTF-16 string (unit count + units).
+fn decode_string_units(reader: &mut codec::Reader<'_>) -> Result<Vec<u16>, SnapshotError> {
+    let count = reader.read_u32()?;
+    let mut units = Vec::new();
+    for _ in 0..count {
+        units.push(reader.read_u16()?);
+    }
+    Ok(units)
 }
 
 /// Decodes one staged slot value (format above).
@@ -984,14 +1417,148 @@ fn resolve_object_records(
     function_ids: &[FunctionId],
 ) -> Result<(), SnapshotError> {
     for (id, staged) in pending {
-        let record = resolve_object_record(runtime, staged, object_ids, function_ids)?;
+        let StagedObject {
+            index: _,
+            kind,
+            prototype,
+            extensible,
+            is_html_dda,
+            shape,
+            slots,
+        } = staged;
+        let record = resolve_object_record_content(
+            runtime,
+            prototype,
+            extensible,
+            is_html_dda,
+            shape,
+            slots,
+            object_ids,
+            function_ids,
+        )?;
+        let kind = resolve_object_kind(runtime, kind, object_ids, function_ids)?;
         let object = runtime
             .objects
             .get_mut(id)
             .ok_or(SnapshotError::IntegrityViolation)?;
-        *object = HeapObject::ordinary(record);
+        *object = HeapObject::restored(record, kind);
     }
     Ok(())
+}
+
+/// Resolves one staged exotic-kind state against the restored
+/// identities (the tag-2 kind payloads). Regexp matchers recompile from
+/// the recorded source and flags.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one exhaustive exotic-kind resolution keeps every kind payload in order"
+)]
+fn resolve_object_kind(
+    runtime: &mut Runtime,
+    staged: StagedObjectKind,
+    object_ids: &[ObjectId],
+    function_ids: &[FunctionId],
+) -> Result<HeapObjectKind, SnapshotError> {
+    Ok(match staged {
+        StagedObjectKind::Ordinary => HeapObjectKind::Ordinary,
+        StagedObjectKind::Array { length, storage } => {
+            let storage = match storage {
+                StagedArrayStorage::Sparse => ArrayStorage::Sparse,
+                StagedArrayStorage::Dense(elements) => {
+                    let mut resolved = Vec::new();
+                    for element in elements {
+                        resolved.push(match element {
+                            None => None,
+                            Some(value) => {
+                                Some(resolve_staged_value(runtime, value, object_ids, function_ids)?)
+                            }
+                        });
+                    }
+                    let present = resolved.iter().filter(|element| element.is_some()).count();
+                    ArrayStorage::Dense {
+                        elements: resolved,
+                        present,
+                    }
+                }
+            };
+            HeapObjectKind::Array(ArrayState { length, storage })
+        }
+        StagedObjectKind::Error { stack } => HeapObjectKind::Error(ErrorState::new(
+            JsString::from_code_units(stack).map_err(SnapshotError::String)?,
+        )),
+        StagedObjectKind::Date { value } => {
+            HeapObjectKind::Date(DateState::new(JsNumber::from_f64(value)))
+        }
+        StagedObjectKind::Boxed(boxed) => HeapObjectKind::BoxedPrimitive(match boxed {
+            StagedBoxed::Boolean(value) => BoxedPrimitive::Boolean(value),
+            StagedBoxed::Number(value) => BoxedPrimitive::Number(JsNumber::from_f64(value)),
+            StagedBoxed::BigInt(limbs) => BoxedPrimitive::BigInt(std::sync::Arc::new(
+                JsBigInt::from_normalized_limbs(limbs),
+            )),
+            StagedBoxed::String(units) => BoxedPrimitive::String(
+                JsString::from_code_units(units).map_err(SnapshotError::String)?,
+            ),
+            StagedBoxed::GlobalSymbol(units) => {
+                let description =
+                    JsString::from_code_units(units).map_err(SnapshotError::String)?;
+                let atom = runtime
+                    .atoms
+                    .intern_global_symbol(&description)
+                    .map_err(SnapshotError::Atom)?;
+                BoxedPrimitive::Symbol(atom)
+            }
+        }),
+        StagedObjectKind::RegExp { source, flags } => {
+            let source = JsString::from_code_units(source).map_err(SnapshotError::String)?;
+            let flags = JsString::from_code_units(flags).map_err(SnapshotError::String)?;
+            let source_units: Vec<u16> = source.code_units().collect();
+            let flags_units: Vec<u16> = flags.code_units().collect();
+            let matcher = fusor_regexp::CompiledRegExp::compile_utf16(
+                &source_units,
+                &flags_units,
+                Default::default(),
+            )
+            .map_err(|error| SnapshotError::RegExp(error.to_string()))?;
+            HeapObjectKind::RegExp(RegExpState::new(source, flags, matcher))
+        }
+        StagedObjectKind::Map(entries) => {
+            let mut resolved = Vec::new();
+            for (key, value) in entries {
+                resolved.push(MapEntry::live(
+                    resolve_staged_value(runtime, key, object_ids, function_ids)?,
+                    resolve_staged_value(runtime, value, object_ids, function_ids)?,
+                ));
+            }
+            HeapObjectKind::Map(MapState::restored(resolved))
+        }
+        StagedObjectKind::Set(entries) => {
+            let mut resolved = Vec::new();
+            for key in entries {
+                resolved.push(MapEntry::live(
+                    resolve_staged_value(runtime, key, object_ids, function_ids)?,
+                    StoredValue::Undefined,
+                ));
+            }
+            HeapObjectKind::Set(SetState::restored(resolved))
+        }
+        StagedObjectKind::RawJson => HeapObjectKind::RawJson,
+        StagedObjectKind::Arguments(map) => {
+            let mut resolved = Vec::new();
+            for entry in map {
+                resolved.push(match entry {
+                    None => None,
+                    Some(index) => {
+                        let cell = runtime.cells.id_from_index(index as usize);
+                        if runtime.cells.get(cell).is_none() {
+                            return Err(SnapshotError::IntegrityViolation);
+                        }
+                        Some(cell)
+                    }
+                });
+            }
+            HeapObjectKind::Arguments(ArgumentsState::mapped(resolved))
+        }
+    })
 }
 
 /// Encodes every binding cell into the cells-section payload: per cell
@@ -1586,7 +2153,7 @@ fn encode_object_record_payload(
     let shape = record.shape();
     buffer.extend_from_slice(&(shape.len() as u32).to_le_bytes());
     for property in shape.iter() {
-        encode_property_key(buffer, property.key());
+        encode_property_key(buffer, property.key())?;
         encode_layout(buffer, property.layout());
     }
     for slot in record.slots() {
@@ -1625,7 +2192,9 @@ fn decode_object_record_content(
                     0 => AtomKind::String,
                     1 => AtomKind::GlobalSymbol,
                     other => {
-                        return Err(SnapshotError::FormatMismatch { found: u32::from(other) });
+                        return Err(SnapshotError::FormatMismatch {
+                            found: u32::from(other)
+                        });
                     }
                 };
                 let unit_count = reader.read_u32()?;
@@ -1635,7 +2204,10 @@ fn decode_object_record_content(
                 }
                 StagedKey::Atom(kind, units)
             }
-            other => return Err(SnapshotError::FormatMismatch { found: u32::from(other) }),
+            2 => StagedKey::Predefined(reader.read_u32()?),
+            other => {
+                return Err(SnapshotError::FormatMismatch { found: u32::from(other) });
+            }
         };
         let layout = match reader.read_u8()? {
             0 => {
@@ -1662,8 +2234,9 @@ fn decode_object_record_content(
     }
     Ok(StagedObject {
         // Filled by the section decoders; the shared record content is
-        // index-agnostic.
+        // index- and kind-agnostic.
         index: 0,
+        kind: StagedObjectKind::Ordinary,
         prototype,
         extensible,
         is_html_dda,
@@ -1894,12 +2467,61 @@ fn resolve_object_record(
     object_ids: &[ObjectId],
     function_ids: &[FunctionId],
 ) -> Result<ObjectRecord, SnapshotError> {
+    let StagedObject {
+        index: _,
+        kind: _,
+        prototype,
+        extensible,
+        is_html_dda,
+        shape,
+        slots,
+    } = staged;
+    resolve_object_record_content(
+        runtime,
+        prototype,
+        extensible,
+        is_html_dda,
+        shape,
+        slots,
+        object_ids,
+        function_ids,
+    )
+}
+
+/// Resolves one staged object record's content (prototype, flags,
+/// shape, slots) — shared by the object and function record paths.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one record content resolver serves every staged record path"
+)]
+fn resolve_object_record_content(
+    runtime: &mut Runtime,
+    prototype: Option<(u8, usize)>,
+    extensible: bool,
+    is_html_dda: bool,
+    shape: Vec<(StagedKey, PropertyLayout)>,
+    slots: Vec<StagedValue>,
+    object_ids: &[ObjectId],
+    function_ids: &[FunctionId],
+) -> Result<ObjectRecord, SnapshotError> {
     let mut shape_properties = Vec::new();
-    for (key, layout) in staged.shape {
+    for (key, layout) in shape {
         let key = match key {
             StagedKey::Index(index) => {
                 let index = ArrayIndex::new(index).ok_or(SnapshotError::IntegrityViolation)?;
                 PropertyKey::from_index(index)
+            }
+            StagedKey::Predefined(ordinal) => {
+                let atom = PredefinedAtom::from_ordinal(ordinal as u16)
+                    .ok_or(SnapshotError::IntegrityViolation)?;
+                let atom = runtime.atoms.predefined(atom);
+                match atom.kind() {
+                    AtomKind::String => PropertyKey::from_validated_atom(atom),
+                    AtomKind::GlobalSymbol | AtomKind::Symbol => {
+                        PropertyKey::from_validated_symbol(atom)
+                    }
+                    AtomKind::Private => return Err(SnapshotError::IntegrityViolation),
+                }
             }
             StagedKey::Atom(kind, units) => {
                 let description = JsString::from_code_units(units).map_err(SnapshotError::String)?;
@@ -1921,8 +2543,8 @@ fn resolve_object_record(
         };
         shape_properties.push(ShapeProperty::from_parts(key, layout));
     }
-    let mut slots = Vec::new();
-    for value in staged.slots {
+    let mut resolved_slots = Vec::new();
+    for value in slots {
         let value = match value {
             StagedValue::Function(index) => {
                 let target = *function_ids
@@ -1935,9 +2557,9 @@ fn resolve_object_record(
             }
             other => resolve_staged_value(runtime, other, object_ids, function_ids)?,
         };
-        slots.push(PropertySlot::Data(value));
+        resolved_slots.push(PropertySlot::Data(value));
     }
-    let prototype = match staged.prototype {
+    let prototype = match prototype {
         None => None,
         Some((1, index)) => {
             let target = *object_ids.get(index).ok_or(SnapshotError::IntegrityViolation)?;
@@ -1959,11 +2581,11 @@ fn resolve_object_record(
     };
     Ok(ObjectRecord::from_parts(
         prototype,
-        staged.extensible,
-        staged.is_html_dda,
+        extensible,
+        is_html_dda,
         std::sync::Arc::new(shape_properties),
         Some(runtime.shape_interner.clone()),
-        slots,
+        resolved_slots,
     ))
 }
 

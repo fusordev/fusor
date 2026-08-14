@@ -7774,7 +7774,7 @@ fn snapshot_round_trips_ordinary_objects_and_shapes() {
         .expect("object");
     // The second object references the first: prototype + a slot value.
     // The shape stays aligned with the slots (engine invariant).
-    runtime
+    let second = runtime
         .objects
         .try_insert(HeapObject::ordinary(ObjectRecord::from_parts(
             Some(HeapReference::Object(first)),
@@ -7788,6 +7788,9 @@ fn snapshot_round_trips_ordinary_objects_and_shapes() {
             vec![PropertySlot::Data(StoredValue::Object(first))],
         )))
         .expect("object");
+    // Root both records so the pre-snapshot collection keeps them alive.
+    runtime.kept_alive.push(StoredValue::Object(first));
+    runtime.kept_alive.push(StoredValue::Object(second));
 
     let blob = runtime.snapshot().expect("snapshot");
     let mut restored = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
@@ -7867,7 +7870,7 @@ fn snapshot_round_trips_binding_cells() {
             forward: None,
         })
         .expect("cell");
-    runtime
+    let cells_second = runtime
         .cells
         .try_insert(crate::runtime::BindingCell {
             value: crate::value::SlotValue::Value(StoredValue::Number(
@@ -7876,20 +7879,69 @@ fn snapshot_round_trips_binding_cells() {
             forward: None,
         })
         .expect("cell");
-    runtime
+    let third = runtime
         .cells
         .try_insert(crate::runtime::BindingCell {
             value: crate::value::SlotValue::Uninitialized,
             forward: None,
         })
         .expect("cell");
-    runtime
+    let fourth = runtime
         .cells
         .try_insert(crate::runtime::BindingCell {
             value: crate::value::SlotValue::Uninitialized,
             forward: Some(first),
         })
         .expect("cell");
+    // Root the cells: a kept-alive function captures all four in its
+    // environment, so the pre-snapshot collection keeps them alive.
+    let authority = compile_test_function("function keeper() { return 0; }", "keeper");
+    let templates = runtime.stage_templates(&authority).expect("templates");
+    let code = runtime
+        .code
+        .try_insert(crate::runtime::InstalledCode {
+            authority: Arc::clone(&authority),
+            realm: crate::ids::RealmId::ZERO,
+            templates,
+            live_functions: 1,
+        })
+        .expect("code");
+    let keeper = runtime
+        .insert_heap_function(crate::runtime::HeapFunction {
+            implementation: crate::runtime::FunctionImplementation::Bytecode(
+                crate::runtime::BytecodeFunction {
+                    code,
+                    template: authority.root_id(),
+                    environment: vec![
+                        crate::runtime::EnvironmentBinding::Captured(first),
+                        crate::runtime::EnvironmentBinding::Captured(cells_second),
+                        crate::runtime::EnvironmentBinding::Captured(third),
+                        crate::runtime::EnvironmentBinding::Captured(fourth),
+                    ],
+                    environment_eval_shadows: Vec::new(),
+                    eval_environment: None,
+                    lexical_receiver: None,
+                    lexical_eval_in_function: false,
+                    lexical_eval_in_class_field_initializer: false,
+                    lexical_new_target: None,
+                    lexical_derived_constructor: None,
+                    lexical_derived_this: None,
+                    has_instance_elements: false,
+                    home_object: None,
+                },
+            ),
+            object: ObjectRecord::from_parts(
+                None,
+                true,
+                false,
+                Arc::new(Vec::new()),
+                None,
+                Vec::new(),
+            ),
+            public_roots: 0,
+        })
+        .expect("keeper");
+    runtime.kept_alive.push(StoredValue::Function(keeper));
 
     let blob = runtime.snapshot().expect("snapshot");
     let mut restored = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
@@ -7947,7 +7999,7 @@ fn snapshot_round_trips_bytecode_functions() {
             forward: None,
         })
         .expect("cell");
-    runtime
+    let function = runtime
         .insert_heap_function(crate::runtime::HeapFunction {
             implementation: crate::runtime::FunctionImplementation::Bytecode(
                 crate::runtime::BytecodeFunction {
@@ -7977,6 +8029,7 @@ fn snapshot_round_trips_bytecode_functions() {
             public_roots: 0,
         })
         .expect("function");
+    runtime.kept_alive.push(StoredValue::Function(function));
 
     let blob = runtime.snapshot().expect("snapshot");
     let mut restored = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
@@ -8019,7 +8072,7 @@ fn snapshot_restore_rebinds_host_functions_by_name() {
         name_key,
         PropertyLayout::data(false, true, false),
     )]);
-    runtime
+    let function = runtime
         .insert_heap_function(crate::runtime::HeapFunction {
             implementation: crate::runtime::FunctionImplementation::Native(
                 crate::runtime::NativeFunction {
@@ -8042,6 +8095,7 @@ fn snapshot_restore_rebinds_host_functions_by_name() {
             public_roots: 0,
         })
         .expect("function");
+    runtime.kept_alive.push(StoredValue::Function(function));
 
     let blob = runtime.snapshot().expect("snapshot");
     let mut restored = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
@@ -8078,7 +8132,7 @@ fn snapshot_restore_fails_closed_on_corrupted_function_bytecode() {
             live_functions: 1,
         })
         .expect("code");
-    runtime
+    let function = runtime
         .insert_heap_function(crate::runtime::HeapFunction {
             implementation: crate::runtime::FunctionImplementation::Bytecode(
                 crate::runtime::BytecodeFunction {
@@ -8108,6 +8162,7 @@ fn snapshot_restore_fails_closed_on_corrupted_function_bytecode() {
             public_roots: 0,
         })
         .expect("function");
+    runtime.kept_alive.push(StoredValue::Function(function));
     let blob = runtime.snapshot().expect("snapshot");
 
     // Corrupt one byte inside the embedded verified-bytecode payload:
@@ -8157,8 +8212,9 @@ fn snapshot_restore_fails_closed_on_corrupted_function_bytecode() {
 #[test]
 fn snapshot_fails_closed_on_unsupported_heap_content() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
-    // An accessor slot is not serializable yet (§8.2 intermediate).
-    runtime
+    // An accessor slot is not serializable yet (§8.2 intermediate). The
+    // record is rooted so the pre-snapshot collection keeps it alive.
+    let object = runtime
         .objects
         .try_insert(HeapObject::ordinary(ObjectRecord::from_parts(
             None,
@@ -8172,6 +8228,7 @@ fn snapshot_fails_closed_on_unsupported_heap_content() {
             }],
         )))
         .expect("object");
+    runtime.kept_alive.push(StoredValue::Object(object));
     assert!(
         matches!(
             runtime.snapshot(),
@@ -8204,13 +8261,146 @@ fn run_snapshot_script(runtime: &mut Runtime, realm: &Realm, source: &str) -> St
         .context(realm)
         .expect("context")
         .execute_global_script(authority, crate::ExecutionLimits::default())
-        .unwrap_or_else(|error| panic!("script {source}: {error:?}"));
+        .unwrap_or_else(|error| {
+            let message = match &error {
+                crate::GlobalScriptError::Execution(crate::ExecutionError::Exception(
+                    exception,
+                )) => {
+                    let message = exception
+                        .message()
+                        .map(|message| message.to_utf8_lossy().unwrap_or_default())
+                        .unwrap_or_default();
+                    format!("{:?} {message}", exception.kind())
+                }
+                other => format!("{other}"),
+            };
+            panic!("script {source}: {message}")
+        });
     value
         .as_string()
         .expect("live value")
         .expect("String completion value")
         .to_utf8_lossy()
         .expect("UTF-8")
+}
+
+#[test]
+fn snapshot_round_trips_exotic_object_instances() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let built = run_snapshot_script(
+        &mut runtime,
+        &realm,
+        "globalThis.collection = new Map([['k', 41], [0, 'zero']]);\
+         globalThis.items = new Set([1, 'two', {}]);\
+         globalThis.day = new Date(1234567890123);\
+         globalThis.arr = [1, , 3];\
+         globalThis.re = /ab+c/gi;\
+         globalThis.err = new TypeError('boom');\
+         globalThis.boxed = new Number(1.5);\
+         globalThis.raw = JSON.rawJSON('1e2');\
+         globalThis.argz = (function (a, b) { arguments[0] = 99; return arguments; })(1, 2);\
+         'built';",
+    );
+    assert_eq!(built, "built");
+
+    let blob = runtime.snapshot().expect("snapshot");
+    // The iterable constructors leave exhausted iterator records behind;
+    // the pre-snapshot collection removes them, so the blob only carries
+    // live heap content (§8.2).
+    assert!(
+        !runtime
+            .objects
+            .iter()
+            .any(|(_, object)| matches!(object.kind(), HeapObjectKind::ArrayIterator(_))),
+        "the pre-snapshot collection reclaimed the exhausted iterators"
+    );
+    let mut restored = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realms = restored.from_snapshot(&blob).expect("restore");
+    let probe = run_snapshot_script(
+        &mut restored,
+        &realms[0],
+        "String(\
+             !(globalThis.collection.get('k') === 41) ? 'map-key' :\
+             !(globalThis.collection.get(0) === 'zero') ? 'map-index' :\
+             !(globalThis.collection.size === 2) ? 'map-size' :\
+             !(globalThis.items.has('two')) ? 'set-has' :\
+             !(globalThis.items.size === 3) ? 'set-size' :\
+             !(globalThis.day.getTime() === 1234567890123) ? 'date' :\
+             !(globalThis.arr.length === 3) ? 'arr-length' :\
+             (1 in globalThis.arr) ? 'arr-hole' :\
+             !(globalThis.arr[2] === 3) ? 'arr-elem' :\
+             !(globalThis.re.test('abc')) ? 'regexp-test' :\
+             !(globalThis.re.lastIndex === 3) ? 'regexp-lastindex' :\
+             !(globalThis.err instanceof TypeError) ? 'error-kind' :\
+             !(globalThis.err.message === 'boom') ? 'error-msg' :\
+             !(globalThis.boxed.valueOf() === 1.5) ? 'boxed' :\
+             !(JSON.isRawJSON(globalThis.raw)) ? 'rawjson' :\
+             !(globalThis.argz[0] === 99) ? 'arguments-mapped' :\
+             !(globalThis.argz[1] === 2) ? 'arguments-elem' :\
+             'ok'\
+         );",
+    );
+    assert_eq!(probe, "ok", "exotic instances round-trip");
+}
+
+#[test]
+fn snapshot_fails_closed_on_uncovered_exotic_and_async_state() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    // Weak collections hold identity-only references (§8.2).
+    run_snapshot_script(&mut runtime, &realm, "globalThis.wm = new WeakMap(); 'x';");
+    assert!(
+        matches!(
+            runtime.snapshot(),
+            Err(crate::snapshot::SnapshotError::Unsupported { what: "a weak collection", .. })
+        ),
+        "weak collections fail closed"
+    );
+    // Promises and proxies are excluded by design (§8.2).
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    run_snapshot_script(
+        &mut runtime,
+        &realm,
+        "globalThis.p = Promise.resolve('x'); 'x';",
+    );
+    assert!(
+        matches!(
+            runtime.snapshot(),
+            Err(crate::snapshot::SnapshotError::Unsupported { what: "a promise", .. })
+        ),
+        "promises fail closed"
+    );
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    run_snapshot_script(
+        &mut runtime,
+        &realm,
+        "globalThis.px = new Proxy({}, {}); 'x';",
+    );
+    assert!(
+        matches!(
+            runtime.snapshot(),
+            Err(crate::snapshot::SnapshotError::Unsupported { what: "a proxy", .. })
+        ),
+        "proxies fail closed"
+    );
+    // Suspended generator state lives outside the arenas.
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    run_snapshot_script(
+        &mut runtime,
+        &realm,
+        "globalThis.gen = (function* () { yield 1; })(); globalThis.gen.next(); 'x';",
+    );
+    assert!(
+        matches!(
+            runtime.snapshot(),
+            Err(crate::snapshot::SnapshotError::Unsupported { what: "a suspended generator", .. })
+        ),
+        "suspended generators fail closed"
+    );
 }
 
 #[test]

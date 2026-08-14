@@ -432,9 +432,17 @@ shutdown 期间不再 drain 微任务(文档化)。
 - **Rust 闭包不可序列化**:堆内 host Function 对象解耦存储——blob 记录"host 槽位 +
   op 元数据",恢复时宿主重建 op 闭包表并重绑定;op 集按序匹配,不匹配 fail closed
   (host Function 即 `Fusor` 命名空间与 `Fusor.ops.*` 各 op 函数;无 process 对象)
-- **异形对象实例**(用户创建的 Map/Set/Date/ArrayBuffer 等实例,2026-08-14 确认
-  需要):其内部表随下一序列化切片落地;当前快照遇异形对象 fail closed
-  (Unsupported)
+- **异形对象实例**(用户创建的 Map/Set 等实例,2026-08-14 确认需要):已落地
+  Array(含洞)、Error、Date、BoxedPrimitive、RegExp(source+flags 记录,matcher
+  恢复时重编译)、Map/Set(有序活条目,墓碑不入 blob,索引重建)、RawJson、
+  Arguments(参数映射含 cells);well-known symbol 属性键(如 arguments 的
+  `@@iterator`)按预定义原子序号编码。**Promise、Proxy、ArrayBuffer/DataView/
+  TypedArray、Weak*、Intl、Temporal、迭代器**不进快照,fail closed(Unsupported,
+  各有明确消息);唯一 Symbol 键 fail closed
+- **快照前卫生**(2026-08-14):`snapshot()` 先排空 promise 任务队列(微任务
+  结算),再强制 mark-and-sweep——不可达记录(耗尽迭代器、被回收环)不进 blob;
+  `Fusor.ops.op_core_gc` 暴露同款强制 GC(host 侧 op,无测试要求);挂起的
+  生成器/async 状态、在途动态 import 等运行时态 fail closed
 - **资源表不可序列化**(fd 等运行时资源):快照中不存资源;overlay init 创建的资源
   必须遵循"启动期惰性重建"约束(Deno 同构,文档化)——warmup 烘焙进快照的部分不得
   依赖运行时资源,依赖资源的初始化放 startup 模式(§8.4)

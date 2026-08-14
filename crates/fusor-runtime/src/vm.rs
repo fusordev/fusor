@@ -151,7 +151,7 @@ mod math;
 mod math_sum_precise;
 mod native;
 mod object_intrinsics;
-mod promise;
+pub(crate) mod promise;
 mod promise_combinators;
 mod properties;
 mod proxy;

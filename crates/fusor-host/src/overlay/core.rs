@@ -5,8 +5,8 @@
 use fusor_ops::register_op;
 
 use crate::ops::{
-    OpRegistry, op_clear_interval, op_clear_timeout, op_core_print, op_queue_microtask,
-    op_set_immediate, op_set_interval, op_set_timeout,
+    OpRegistry, op_clear_interval, op_clear_timeout, op_core_gc, op_core_print,
+    op_queue_microtask, op_set_immediate, op_set_interval, op_set_timeout,
 };
 
 use super::{Overlay, OverlaySource};
@@ -39,6 +39,7 @@ impl Overlay for CoreOverlay {
         register_op!(registry, op_set_immediate);
         register_op!(registry, op_queue_microtask);
         register_op!(registry, op_core_print);
+        register_op!(registry, op_core_gc);
     }
 
     fn init_sources(&self) -> Vec<OverlaySource> {

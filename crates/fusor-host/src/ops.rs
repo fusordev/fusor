@@ -10,7 +10,7 @@ mod state;
 mod timers;
 
 pub use core::set_print_sink;
-pub(crate) use core::op_core_print;
+pub(crate) use core::{op_core_gc, op_core_print};
 pub(crate) use process::install_process;
 pub(crate) use timers::{
     op_clear_interval, op_clear_timeout, op_queue_microtask, op_set_immediate, op_set_interval,

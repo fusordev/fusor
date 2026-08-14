@@ -170,6 +170,21 @@ impl Context<'_> {
         self.runtime.usage()
     }
 
+    /// Runs a full mark-and-sweep garbage collection.
+    ///
+    /// This backs the host `Fusor.ops.op_core_gc` op; snapshot creation
+    /// also collects before serializing (§8.2). ECMA-262 leaves garbage
+    /// collection timing to the implementation, so a forced collection
+    /// is always semantically transparent — only memory is reclaimed.
+    ///
+    /// # Errors
+    ///
+    /// Returns a limit or allocation failure during marking. This
+    /// function never panics.
+    pub fn collect_cycles(&mut self) -> Result<crate::CollectionReport, crate::RuntimeError> {
+        self.runtime.collect_cycles()
+    }
+
     /// Adds Annex B.3.6's `[[IsHTMLDDA]]` internal slot to a host-designated
     /// callable or non-callable object.
     ///

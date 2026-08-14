@@ -96,3 +96,35 @@ pub(crate) mod op_core_print {
         Ok(context.undefined())
     }
 }
+
+/// The core garbage-collection op: `Fusor.ops.op_core_gc` runs a full
+/// mark-and-sweep collection and returns `undefined` (§8.2 snapshot
+/// hygiene: snapshot creation collects first, and this op lets scripts
+/// request a collection directly).
+#[doc(hidden)]
+pub(crate) mod op_core_gc {
+    use fusor_runtime::{Context, HostCall, JsValue};
+
+    use crate::ops::{OpDeclaration, OpError};
+
+    /// The core gc op's declaration.
+    #[must_use]
+    pub(crate) fn declaration() -> OpDeclaration {
+        OpDeclaration {
+            name: "op_core_gc",
+            parameter_types: &[],
+            is_async: false,
+        }
+    }
+
+    /// Runs the forced collection (§5.7 shape).
+    pub(crate) fn call(
+        context: &mut Context<'_>,
+        _call: HostCall,
+    ) -> Result<JsValue, JsValue> {
+        context.collect_cycles().map_err(|error| {
+            ::fusor_host::ops::op_error_value(context, OpError::new(error.to_string()))
+        })?;
+        Ok(context.undefined())
+    }
+}
