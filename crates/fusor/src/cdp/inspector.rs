@@ -108,14 +108,22 @@ impl ScriptCache {
 ///
 /// Each entry holds a public root, so a registered object stays alive until
 /// its objectId is released or the session ends. Repeated registration of the
-/// same identity reuses the existing objectId.
+/// same identity reuses the existing objectId. Synthetic entries views over
+/// Map/Set/WeakMap/WeakSet collections register separately and expand through
+/// `getProperties` (V8's `internal#entries` handles).
 pub struct ObjectRegistry {
     next_id: u64,
     entries: HashMap<u64, RegistryEntry>,
 }
 
+enum RegistryEntryValue {
+    Live(JsValue),
+    /// A synthetic view over one collection, re-inspected on expansion.
+    CollectionEntries(JsValue),
+}
+
 struct RegistryEntry {
-    value: JsValue,
+    value: RegistryEntryValue,
     group: Option<String>,
 }
 
@@ -136,8 +144,23 @@ impl ObjectRegistry {
         self.entries.insert(
             id,
             RegistryEntry {
-                value: value.clone(),
+                value: RegistryEntryValue::Live(value.clone()),
                 group: group.map(str::to_owned),
+            },
+        );
+        object_id(id)
+    }
+
+    /// Registers one expandable entries view over a collection; the view is
+    /// re-inspected on every expansion, so rows stay live.
+    pub(crate) fn register_entries(&mut self, collection: &JsValue) -> String {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.entries.insert(
+            id,
+            RegistryEntry {
+                value: RegistryEntryValue::CollectionEntries(collection.clone()),
+                group: None,
             },
         );
         object_id(id)
@@ -145,7 +168,25 @@ impl ObjectRegistry {
 
     pub(crate) fn get(&self, object_id: &str) -> Option<&JsValue> {
         let id = parse_object_id(object_id)?;
-        self.entries.get(&id).map(|entry| &entry.value)
+        match self.entries.get(&id) {
+            Some(RegistryEntry {
+                value: RegistryEntryValue::Live(value),
+                ..
+            }) => Some(value),
+            _ => None,
+        }
+    }
+
+    /// Returns the collection behind one registered entries view.
+    pub(crate) fn get_entries(&self, object_id: &str) -> Option<JsValue> {
+        let id = parse_object_id(object_id)?;
+        match self.entries.get(&id) {
+            Some(RegistryEntry {
+                value: RegistryEntryValue::CollectionEntries(collection),
+                ..
+            }) => Some(collection.clone()),
+            _ => None,
+        }
     }
 
     pub(crate) fn release(&mut self, object_id: &str) -> bool {
@@ -163,7 +204,12 @@ impl ObjectRegistry {
     fn find(&self, value: &JsValue) -> Option<u64> {
         self.entries
             .iter()
-            .find(|(_, entry)| same_identity(value, &entry.value))
+            .find(|(_, entry)| match &entry.value {
+                RegistryEntryValue::Live(candidate) => {
+                    same_identity(value, candidate)
+                }
+                RegistryEntryValue::CollectionEntries(_) => false,
+            })
             .map(|(id, _)| *id)
     }
 }
@@ -795,6 +841,26 @@ pub fn exception_thrown_event(
     })
 }
 
+/// Builds the `Runtime.exceptionThrown` event for one engine-bound
+/// evaluation whose response carries `exceptionDetails` (a `Runtime.evaluate`
+/// or `Runtime.callFunctionOn` failure), reusing the response's exception
+/// identity so the frontend pairs the console entry with its error.
+///
+/// V8-aligned: console evaluations surface their errors both as the
+/// response's `exceptionDetails` and as an `exceptionThrown` event, which is
+/// what renders the red console error entry. Successful evaluations return
+/// `None`.
+pub fn evaluation_exception_event(response: &Value) -> Option<Value> {
+    let details = response
+        .get("result")?
+        .get("exceptionDetails")?
+        .clone();
+    Some(json!({
+        "method": "Runtime.exceptionThrown",
+        "params": {"timestamp": event_timestamp_ms(), "exceptionDetails": details},
+    }))
+}
+
 /// Renders one execution failure as `(text, line, column, stackTrace)` for
 /// CDP `exceptionDetails`, using the retained exception's own position and
 /// message when the engine kept one.
@@ -1196,6 +1262,14 @@ fn get_properties_request(
     let Some(object_id) = params.get("objectId").and_then(Value::as_str) else {
         return protocol_error(id, -32602, "Runtime.getProperties requires params.objectId");
     };
+    // Synthetic entries views (V8's `internal#entries` handles) expand by
+    // re-inspecting their collection: one row per live entry.
+    if let Some(collection) = state.objects.get_entries(object_id) {
+        return protocol_result(
+            id,
+            json!({"result": collection_entry_rows(context, intrinsics, &collection)}),
+        );
+    }
     let Some(object) = state.objects.get(object_id).cloned() else {
         return protocol_error(id, -32000, "unknown objectId");
     };
@@ -1304,6 +1378,63 @@ fn get_properties_request(
     )
 }
 
+/// Renders the expansion rows of one registered collection entries view:
+/// each live entry becomes a property row whose value is an
+/// `internal#entry` object previewing the key/value pair (values only for
+/// Set/WeakSet), the shape the DevTools frontend renders as `key => value`.
+fn collection_entry_rows(
+    context: &mut Context<'_>,
+    intrinsics: &InspectIntrinsics,
+    collection: &JsValue,
+) -> Vec<Value> {
+    let Ok(Some(inspection)) = context.collection_inspection(collection) else {
+        return Vec::new();
+    };
+    let mut row = |index: usize, key: Option<&JsValue>, value: &JsValue| {
+        let mut properties = Vec::new();
+        if let Some(key) = key
+            && let Some(entry) = preview_entry(context, intrinsics, "key", key, 0)
+        {
+            properties.push(entry);
+        }
+        if let Some(entry) = preview_entry(context, intrinsics, "value", value, 0) {
+            properties.push(entry);
+        }
+        json!({
+            "name": index.to_string(),
+            "value": {
+                "type": "object",
+                "subtype": "internal#entry",
+                "className": "Object",
+                "description": "Object",
+                "preview": {
+                    "type": "object",
+                    "subtype": "internal#entry",
+                    "description": "Object",
+                    "overflow": false,
+                    "properties": properties,
+                },
+            },
+            "configurable": true,
+            "enumerable": true,
+            "writable": true,
+            "isOwn": true,
+        })
+    };
+    match inspection {
+        fusor_runtime::CollectionInspection::Entries(entries) => entries
+            .iter()
+            .enumerate()
+            .map(|(index, (key, value))| row(index, Some(key), value))
+            .collect(),
+        fusor_runtime::CollectionInspection::Values(values) => values
+            .iter()
+            .enumerate()
+            .map(|(index, value)| row(index, None, value))
+            .collect(),
+    }
+}
+
 /// Appends the V8-style internal slot entries (`[[PromiseState]]`,
 /// `[[ProxyHandler]]`, `[[Entries]]`, ...) for one live object, read through
 /// the engine's slot-inspection API. Objects without internal slots
@@ -1386,6 +1517,7 @@ fn internal_slot_entries(
             fusor_runtime::CollectionInspection::Values(values) => values.len(),
         };
         let description = format!("{label}({count})");
+        let entries_id = state.objects.register_entries(object);
         return vec![json!({
             "name": "[[Entries]]",
             "value": {
@@ -1393,6 +1525,7 @@ fn internal_slot_entries(
                 "subtype": "internal#entries",
                 "className": "Object",
                 "description": description,
+                "objectId": entries_id,
                 "preview": {
                     "type": "object",
                     "subtype": "internal#entries",
@@ -3205,6 +3338,61 @@ mod tests {
     }
 
     #[test]
+    fn collection_entries_expand_through_the_registered_view() {
+        with_engine(|context, state, intrinsics| {
+            let internal =
+                internal_properties(context, state, intrinsics, "new Map([['a', 1]])");
+            let entries = &internal_by_name(&internal, "[[Entries]]")["value"];
+            let entries_id = entries["objectId"]
+                .as_str()
+                .expect("the entries value carries an expandable objectId")
+                .to_owned();
+            let response = protocol(
+                context,
+                state,
+                intrinsics,
+                "Runtime.getProperties",
+                serde_json::json!({"objectId": entries_id}),
+            );
+            let rows = response["result"]["result"].as_array().expect("entry rows");
+            assert_eq!(rows.len(), 1, "one row per live entry");
+            assert_eq!(rows[0]["name"], "0");
+            let entry = &rows[0]["value"];
+            assert_eq!(entry["subtype"], "internal#entry");
+            let row_properties = entry["preview"]["properties"].as_array().expect("row preview");
+            assert_eq!(row_properties.len(), 2, "key and value previews");
+            assert_eq!(row_properties[0]["name"], "key");
+            assert_eq!(row_properties[0]["value"], "a");
+            assert_eq!(row_properties[1]["name"], "value");
+            assert_eq!(row_properties[1]["value"], "1");
+            assert!(
+                rows[0]["isOwn"].as_bool().expect("isOwn"),
+                "entry rows present as own properties"
+            );
+
+            let set_internal = internal_properties(context, state, intrinsics, "new Set([7])");
+            let set_entries_id = internal_by_name(&set_internal, "[[Entries]]")["value"]["objectId"]
+                .as_str()
+                .expect("entries objectId")
+                .to_owned();
+            let set_response = protocol(
+                context,
+                state,
+                intrinsics,
+                "Runtime.getProperties",
+                serde_json::json!({"objectId": set_entries_id}),
+            );
+            let set_rows = set_response["result"]["result"].as_array().expect("set rows");
+            let set_row_properties = set_rows[0]["value"]["preview"]["properties"]
+                .as_array()
+                .expect("set row preview");
+            assert_eq!(set_row_properties.len(), 1, "set rows preview the value only");
+            assert_eq!(set_row_properties[0]["name"], "value");
+            assert_eq!(set_row_properties[0]["value"], "7");
+        });
+    }
+
+    #[test]
     fn binary_view_internal_properties_report_the_view_slots() {
         with_engine(|context, state, intrinsics| {
             let internal =
@@ -3369,6 +3557,47 @@ mod tests {
             let details = &event["params"]["exceptionDetails"];
             assert_eq!(details["text"], "module link failed");
             assert_eq!(details["url"], "<repl>:9");
+        });
+    }
+
+    #[test]
+    fn console_evaluations_emit_exception_thrown_events() {
+        with_engine(|context, state, intrinsics| {
+            let response = protocol(
+                context,
+                state,
+                intrinsics,
+                "Runtime.evaluate",
+                serde_json::json!({"expression": "1 +"}),
+            );
+            let details = &response["result"]["exceptionDetails"];
+            assert!(
+                details["text"].as_str().is_some_and(|text| !text.is_empty()),
+                "the response carries the syntax diagnostic"
+            );
+            let event = evaluation_exception_event(&response).expect("exception event");
+            assert_eq!(event["method"], "Runtime.exceptionThrown");
+            assert_eq!(
+                event["params"]["exceptionDetails"]["exceptionId"],
+                details["exceptionId"],
+                "the event reuses the response's exception identity"
+            );
+            assert!(
+                event["params"]["timestamp"].is_u64(),
+                "the event carries the wall-clock timestamp"
+            );
+
+            let clean = protocol(
+                context,
+                state,
+                intrinsics,
+                "Runtime.evaluate",
+                serde_json::json!({"expression": "1 + 1"}),
+            );
+            assert!(
+                evaluation_exception_event(&clean).is_none(),
+                "successful evaluations emit no event"
+            );
         });
     }
 

@@ -225,6 +225,49 @@ fn repl_forwards_syntax_errors_to_the_inspector() {
     );
 }
 
+#[test]
+fn console_evaluations_emit_exception_thrown_events() {
+    // V8-aligned: a DevTools-console evaluation failure surfaces twice —
+    // the response carries exceptionDetails and an exceptionThrown event
+    // renders the red console entry. This is the `Runtime.evaluate` path
+    // the frontend uses, distinct from the terminal REPL path above.
+    let (mut child, port) = spawn_inspected_repl();
+    let mut client = WebSocketClient::connect(port);
+    client.send(&serde_json::json!({"id": 1, "method": "Runtime.enable", "params": {}}));
+    client.recv_until(|message| {
+        message.get("method").and_then(|method| method.as_str())
+            == Some("Runtime.executionContextCreated")
+    });
+
+    client.send(&serde_json::json!({
+        "id": 2,
+        "method": "Runtime.evaluate",
+        "params": {"expression": "1 +", "replMode": true, "userGesture": true},
+    }));
+    let event = client.recv_until(|message| {
+        message.get("method").and_then(|method| method.as_str())
+            == Some("Runtime.exceptionThrown")
+    });
+    let details = &event["params"]["exceptionDetails"];
+    assert!(
+        details["text"].as_str().is_some_and(|text| !text.is_empty()),
+        "the event renders the syntax diagnostic: {details}"
+    );
+
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin")
+        .write_all(b".exit\n")
+        .expect("write exit");
+    let output = child.wait_with_output().expect("wait for repl");
+    assert!(
+        output.status.success(),
+        "repl failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 fn temp_dir(tag: &str) -> PathBuf {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let directory = std::env::temp_dir().join(format!(

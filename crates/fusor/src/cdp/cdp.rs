@@ -290,6 +290,15 @@ impl DebugSession {
         self.servicing_engine_request
             .store(false, Ordering::Release);
         suppress_print.set(previous);
+        // V8-aligned: console evaluations surface their failures both as the
+        // response's exceptionDetails and as an exceptionThrown event, which
+        // is what renders the red console error entry. Eager side-effect
+        // probes stay silent.
+        if !suppress
+            && let Some(event) = super::inspector::evaluation_exception_event(&response)
+        {
+            self.emit_event(event);
+        }
         response
     }
 
