@@ -7578,3 +7578,37 @@ fn jsvalue_same_object_compares_heap_identity() {
         "primitives never compare equal as heap objects"
     );
 }
+
+#[test]
+fn js_stack_frames_expose_their_source_spans() {
+    let frame = JsStackFrame::new(
+        FunctionTemplateId::new(0),
+        BytecodePc::new(3),
+        Arc::from("frame.js"),
+        Arc::from("let x = 1;"),
+        SourceByteSpan::new(4, 9),
+    );
+    assert_eq!(frame.source_span().start(), 4);
+    assert_eq!(frame.source_span().end(), 9);
+}
+
+#[test]
+fn js_exceptions_expose_their_origin_span() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let value = context.number(crate::JsNumber::from_i32(1));
+    let exception = JsException::explicit_throw(
+        value,
+        JsStackFrame::new(
+            FunctionTemplateId::new(0),
+            BytecodePc::new(1),
+            Arc::from("throw.js"),
+            Arc::from("throw 1;"),
+            SourceByteSpan::new(0, 7),
+        ),
+        Vec::new(),
+    );
+    assert_eq!(exception.source_span().start(), 0);
+    assert_eq!(exception.source_span().end(), 7);
+}

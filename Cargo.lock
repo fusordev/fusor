@@ -439,6 +439,7 @@ dependencies = [
  "fusor-frontend",
  "fusor-ops",
  "fusor-runtime",
+ "miette",
  "serde",
  "tokio",
 ]

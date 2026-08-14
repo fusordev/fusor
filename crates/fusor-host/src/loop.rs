@@ -314,7 +314,13 @@ impl HostLoop {
                 .context(&self.realm)
                 .map_err(ExecutionError::from)?;
             let message = value_text(&mut context, &error);
-            eprintln!("Uncaught exception: {message}");
+            // The default path renders through the unified §7.5
+            // pipeline (color policy from the environment).
+            let report = crate::process::render_diagnostic(
+                crate::process::MessageDiagnostic::new(format!("Uncaught exception: {message}")),
+                crate::process::ColorPolicy::from_env(),
+            );
+            eprint!("{report}");
             self.signals.request_exit(1);
             return Ok(());
         };
@@ -373,7 +379,13 @@ impl HostLoop {
                     .context(&self.realm)
                     .map_err(ExecutionError::from)?;
                 let message = value_text(&mut context, &reason);
-                eprintln!("Unhandled promise rejection: {message}");
+                let report = crate::process::render_diagnostic(
+                    crate::process::MessageDiagnostic::new(format!(
+                        "Unhandled promise rejection: {message}"
+                    )),
+                    crate::process::ColorPolicy::from_env(),
+                );
+                eprint!("{report}");
                 self.signals.request_exit(1);
                 continue;
             };
