@@ -7,7 +7,7 @@
       "path": "accept/async-script/for-await-of.js",
       "goal": "async-script",
       "quickjs": "accept",
-      "frontend": "accept",
+      "fusor": "accept",
       "families": [
         "statements"
       ],
@@ -28,7 +28,7 @@
       "path": "accept/async-script/top-level-await.js",
       "goal": "async-script",
       "quickjs": "accept",
-      "frontend": "accept",
+      "fusor": "accept",
       "families": [
         "functions"
       ],
@@ -49,7 +49,7 @@
       "path": "accept/module/export-default-class.mjs",
       "goal": "module",
       "quickjs": "accept",
-      "frontend": "accept",
+      "fusor": "accept",
       "families": [
         "modules"
       ],
@@ -70,7 +70,7 @@
       "path": "accept/module/export-default-expression.mjs",
       "goal": "module",
       "quickjs": "accept",
-      "frontend": "accept",
+      "fusor": "accept",
       "families": [
         "modules"
       ],
@@ -90,7 +90,7 @@
       "path": "accept/module/export-default-function.mjs",
       "goal": "module",
       "quickjs": "accept",
-      "frontend": "accept",
+      "fusor": "accept",
       "families": [
         "modules",
         "functions"
@@ -114,7 +114,7 @@
       "path": "accept/module/export.mjs",
       "goal": "module",
       "quickjs": "accept",
-      "frontend": "accept",
+      "fusor": "accept",
       "families": [
         "modules",
         "bindings"
@@ -136,7 +136,7 @@
       "path": "accept/module/import-attributes.mjs",
       "goal": "module",
       "quickjs": "accept",
-      "frontend": "accept",
+      "fusor": "accept",
       "families": [
         "modules",
         "target-profile"
@@ -159,7 +159,7 @@
       "path": "accept/module/import-export-forms.mjs",
       "goal": "module",
       "quickjs": "accept",
-      "frontend": "accept",
+      "fusor": "accept",
       "families": [
         "modules"
       ],
@@ -181,7 +181,7 @@
       "path": "accept/module/import-meta-and-dynamic-import.mjs",
       "goal": "module",
       "quickjs": "accept",
-      "frontend": "accept",
+      "fusor": "accept",
       "families": [
         "modules",
         "expressions"
@@ -209,7 +209,7 @@
       "path": "accept/module/module-forms-support.mjs",
       "goal": "module",
       "quickjs": "accept",
-      "frontend": "accept",
+      "fusor": "accept",
       "families": [
         "modules"
       ],
@@ -229,7 +229,7 @@
       "path": "accept/module/namespace-import.mjs",
       "goal": "module",
       "quickjs": "accept",
-      "frontend": "accept",
+      "fusor": "accept",
       "families": [
         "modules"
       ],
@@ -249,7 +249,7 @@
       "path": "accept/module/string-names.mjs",
       "goal": "module",
       "quickjs": "accept",
-      "frontend": "accept",
+      "fusor": "accept",
       "families": [
         "modules"
       ],
@@ -271,7 +271,7 @@
       "path": "accept/module/support.mjs",
       "goal": "module",
       "quickjs": "accept",
-      "frontend": "accept",
+      "fusor": "accept",
       "families": [
         "modules"
       ],
@@ -291,7 +291,7 @@
       "path": "accept/module/top-level-await.js",
       "goal": "module",
       "quickjs": "accept",
-      "frontend": "accept",
+      "fusor": "accept",
       "families": [
         "modules"
       ],
@@ -312,7 +312,7 @@
       "path": "accept/module/top-level-await.mjs",
       "goal": "module",
       "quickjs": "accept",
-      "frontend": "accept",
+      "fusor": "accept",
       "families": [
         "modules"
       ],
@@ -333,7 +333,7 @@
       "path": "accept/script/annex-b-block-function.js",
       "goal": "script",
       "quickjs": "accept",
-      "frontend": "accept",
+      "fusor": "accept",
       "families": [
         "annex-b",
         "functions"
@@ -356,7 +356,7 @@
       "path": "accept/script/annex-b-if-function.js",
       "goal": "script",
       "quickjs": "accept",
-      "frontend": "accept",
+      "fusor": "accept",
       "families": [
         "annex-b",
         "functions"
@@ -379,7 +379,7 @@
       "path": "accept/script/asi-and-arrow.js",
       "goal": "script",
       "quickjs": "accept",
-      "frontend": "accept",
+      "fusor": "accept",
       "families": [
         "source-lexical",
         "functions"
@@ -403,7 +403,7 @@
       "path": "accept/script/basic.js",
       "goal": "script",
       "quickjs": "accept",
-      "frontend": "accept",
+      "fusor": "accept",
       "families": [
         "bindings",
         "expressions"
@@ -428,7 +428,7 @@
       "path": "accept/script/class-features.js",
       "goal": "script",
       "quickjs": "accept",
-      "frontend": "accept",
+      "fusor": "accept",
       "families": [
         "classes-objects"
       ],
@@ -453,7 +453,7 @@
       "path": "accept/script/control-flow.js",
       "goal": "script",
       "quickjs": "accept",
-      "frontend": "accept",
+      "fusor": "accept",
       "families": [
         "statements"
       ],
@@ -485,7 +485,7 @@
       "path": "accept/script/expressions.js",
       "goal": "script",
       "quickjs": "accept",
-      "frontend": "accept",
+      "fusor": "accept",
       "families": [
         "expressions"
       ],
@@ -523,7 +523,7 @@
       "path": "accept/script/function-expressions.js",
       "goal": "script",
       "quickjs": "accept",
-      "frontend": "accept",
+      "fusor": "accept",
       "families": [
         "functions"
       ],
@@ -544,7 +544,7 @@
       "path": "accept/script/function-parameters.js",
       "goal": "script",
       "quickjs": "accept",
-      "frontend": "accept",
+      "fusor": "accept",
       "families": [
         "functions",
         "bindings"
@@ -571,7 +571,7 @@
       "path": "accept/script/generators-and-async.js",
       "goal": "script",
       "quickjs": "accept",
-      "frontend": "accept",
+      "fusor": "accept",
       "families": [
         "functions"
       ],
@@ -595,7 +595,7 @@
       "path": "candidate-reject/script/html-comment.js",
       "goal": "script",
       "quickjs": "accept",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "source-lexical",
         "annex-b"
@@ -624,7 +624,7 @@
       "path": "accept/script/lexical-literals.js",
       "goal": "script",
       "quickjs": "accept",
-      "frontend": "accept",
+      "fusor": "accept",
       "families": [
         "source-lexical"
       ],
@@ -655,7 +655,7 @@
       "path": "accept/script/object-literals.js",
       "goal": "script",
       "quickjs": "accept",
-      "frontend": "accept",
+      "fusor": "accept",
       "families": [
         "classes-objects",
         "bindings"
@@ -682,7 +682,7 @@
       "path": "accept/script/private-class.js",
       "goal": "script",
       "quickjs": "accept",
-      "frontend": "accept",
+      "fusor": "accept",
       "families": [
         "classes-objects"
       ],
@@ -704,7 +704,7 @@
       "path": "accept/script/scoped-bindings.js",
       "goal": "script",
       "quickjs": "accept",
-      "frontend": "accept",
+      "fusor": "accept",
       "families": [
         "bindings",
         "statements"
@@ -729,7 +729,7 @@
       "path": "accept/script/sloppy-duplicate-parameters.js",
       "goal": "script",
       "quickjs": "accept",
-      "frontend": "accept",
+      "fusor": "accept",
       "families": [
         "functions"
       ],
@@ -749,7 +749,7 @@
       "path": "accept/script/strict-promise-try.js",
       "goal": "script",
       "quickjs": "accept",
-      "frontend": "accept",
+      "fusor": "accept",
       "families": [
         "expressions"
       ],
@@ -770,7 +770,7 @@
       "path": "accept/script/super-and-new-target.js",
       "goal": "script",
       "quickjs": "accept",
-      "frontend": "accept",
+      "fusor": "accept",
       "families": [
         "classes-objects",
         "functions",
@@ -797,7 +797,7 @@
       "path": "accept/script/update-and-destructuring-assignment.js",
       "goal": "script",
       "quickjs": "accept",
-      "frontend": "accept",
+      "fusor": "accept",
       "families": [
         "expressions"
       ],
@@ -821,7 +821,7 @@
       "path": "accept/script/with-statement.js",
       "goal": "script",
       "quickjs": "accept",
-      "frontend": "accept",
+      "fusor": "accept",
       "families": [
         "statements"
       ],
@@ -841,7 +841,7 @@
       "path": "accept/strict-async-script/hashbang.js",
       "goal": "strict-async-script",
       "quickjs": "accept",
-      "frontend": "accept",
+      "fusor": "accept",
       "families": [
         "source-lexical"
       ],
@@ -862,7 +862,7 @@
       "path": "accept/strict-async-script/top-level-await.js",
       "goal": "strict-async-script",
       "quickjs": "accept",
-      "frontend": "accept",
+      "fusor": "accept",
       "families": [
         "functions"
       ],
@@ -883,7 +883,7 @@
       "path": "candidate-reject/strict-script/html-comment.js",
       "goal": "strict-script",
       "quickjs": "accept",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "source-lexical",
         "annex-b"
@@ -910,7 +910,7 @@
       "path": "candidate-accept/script/chained-label-continue.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "accept",
+      "fusor": "accept",
       "families": [
         "statements"
       ],
@@ -934,7 +934,7 @@
       "path": "candidate-accept/script/invalid-field-name.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "accept",
+      "fusor": "accept",
       "families": [
         "classes-objects"
       ],
@@ -957,7 +957,7 @@
       "path": "candidate-accept/script/parser-stack-overflow.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "accept",
+      "fusor": "accept",
       "families": [
         "target-profile"
       ],
@@ -980,7 +980,7 @@
       "path": "reject/script/regexp-pattern-invalid.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "target-profile"
       ],
@@ -998,7 +998,7 @@
       "path": "reject/async-script/await-binding.js",
       "goal": "async-script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "bindings",
         "functions"
@@ -1020,7 +1020,7 @@
       "path": "reject/async-script/import-meta.js",
       "goal": "async-script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "expressions"
       ],
@@ -1039,7 +1039,7 @@
       "path": "reject/module/await-binding.mjs",
       "goal": "module",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "bindings",
         "modules"
@@ -1060,7 +1060,7 @@
       "path": "reject/module/await-using.mjs",
       "goal": "module",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "source-lexical",
         "target-profile"
@@ -1081,7 +1081,7 @@
       "path": "reject/module/duplicate-default-export.mjs",
       "goal": "module",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "bindings",
         "modules"
@@ -1101,7 +1101,7 @@
       "path": "reject/module/duplicate-export-name.mjs",
       "goal": "module",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "bindings",
         "modules"
@@ -1121,7 +1121,7 @@
       "path": "reject/module/duplicate-import-attribute.mjs",
       "goal": "module",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "modules"
       ],
@@ -1140,7 +1140,7 @@
       "path": "reject/module/duplicate-import-binding.mjs",
       "goal": "module",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "modules"
       ],
@@ -1158,7 +1158,7 @@
       "path": "reject/module/duplicate-parameters.js",
       "goal": "module",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "functions"
       ],
@@ -1177,7 +1177,7 @@
       "path": "reject/module/duplicate-parameters.mjs",
       "goal": "module",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "functions"
       ],
@@ -1196,7 +1196,7 @@
       "path": "reject/module/expecting-as-2.mjs",
       "goal": "module",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "modules"
       ],
@@ -1215,7 +1215,7 @@
       "path": "reject/module/expecting-as.mjs",
       "goal": "module",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "modules"
       ],
@@ -1234,7 +1234,7 @@
       "path": "reject/module/for-await-outside-async.mjs",
       "goal": "module",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "functions"
       ],
@@ -1252,7 +1252,7 @@
       "path": "reject/module/html-comment.mjs",
       "goal": "module",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "annex-b",
         "modules",
@@ -1276,7 +1276,7 @@
       "path": "reject/module/identifier-expected-2.mjs",
       "goal": "module",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "statements"
       ],
@@ -1301,7 +1301,7 @@
       "path": "reject/module/identifier-expected-3.mjs",
       "goal": "module",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "statements"
       ],
@@ -1326,7 +1326,7 @@
       "path": "reject/module/identifier-expected-4.mjs",
       "goal": "module",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "statements"
       ],
@@ -1351,7 +1351,7 @@
       "path": "reject/module/identifier-expected-5.mjs",
       "goal": "module",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "statements"
       ],
@@ -1376,7 +1376,7 @@
       "path": "reject/module/identifier-expected-6.mjs",
       "goal": "module",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "statements"
       ],
@@ -1401,7 +1401,7 @@
       "path": "reject/module/identifier-expected-7.mjs",
       "goal": "module",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "statements"
       ],
@@ -1426,7 +1426,7 @@
       "path": "reject/module/identifier-expected-8.mjs",
       "goal": "module",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "statements"
       ],
@@ -1451,7 +1451,7 @@
       "path": "reject/module/import-assertion.mjs",
       "goal": "module",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "modules",
         "source-lexical",
@@ -1471,31 +1471,33 @@
       "productions": []
     },
     {
-      "path": "reject/module/import-defer.mjs",
+      "path": "accept/module/import-defer.mjs",
       "goal": "module",
-      "quickjs": "reject",
-      "frontend": "reject",
+      "quickjs": "accept",
+      "fusor": "accept",
       "families": [
         "modules",
         "target-profile"
       ],
       "claims": [
         "module.import-export",
-        "profile.rejected-outside-target"
+        "profile.accepted-es2025"
       ],
       "evidence": [
         "test262.conf:124",
         "quickjs.c:31477"
       ],
       "difference": null,
-      "diagnostic": "from-clause-expected",
-      "productions": []
+      "diagnostic": null,
+      "productions": [
+        "module.import-declaration"
+      ]
     },
     {
       "path": "reject/module/import-source.mjs",
       "goal": "module",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "modules",
         "target-profile"
@@ -1516,7 +1518,7 @@
       "path": "reject/module/invalid-export-syntax.mjs",
       "goal": "module",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "modules"
       ],
@@ -1534,7 +1536,7 @@
       "path": "reject/module/invalid-import-binding.mjs",
       "goal": "module",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "modules"
       ],
@@ -1552,7 +1554,7 @@
       "path": "reject/module/lone-surrogate-export-name.mjs",
       "goal": "module",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "modules",
         "source-lexical"
@@ -1573,7 +1575,7 @@
       "path": "reject/module/lone-surrogate-import-name.mjs",
       "goal": "module",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "modules",
         "source-lexical"
@@ -1594,7 +1596,7 @@
       "path": "reject/module/non-string-import-attribute.mjs",
       "goal": "module",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "modules"
       ],
@@ -1613,7 +1615,7 @@
       "path": "reject/module/redefined-global-identifier-in-module.mjs",
       "goal": "module",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "modules"
       ],
@@ -1631,7 +1633,7 @@
       "path": "reject/module/reserved-identifier-5.mjs",
       "goal": "module",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "source-lexical"
       ],
@@ -1657,7 +1659,7 @@
       "path": "reject/module/string-expected-2.mjs",
       "goal": "module",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "modules"
       ],
@@ -1673,56 +1675,58 @@
       "productions": []
     },
     {
-      "path": "reject/module/string-named-reexport.mjs",
+      "path": "accept/module/string-named-reexport.mjs",
       "goal": "module",
-      "quickjs": "reject",
-      "frontend": "reject",
+      "quickjs": "accept",
+      "fusor": "accept",
       "families": [
         "modules",
-        "statements",
         "target-profile"
       ],
       "claims": [
         "module.import-export",
-        "profile.rejected-outside-target",
-        "statement.abrupt-handlers"
+        "profile.accepted-es2025"
       ],
       "evidence": [
         "test262.conf:57",
         "quickjs.c:31477"
       ],
       "difference": null,
-      "diagnostic": "identifier-expected",
-      "productions": []
+      "diagnostic": null,
+      "productions": [
+        "module.string-names",
+        "module.re-export"
+      ]
     },
     {
-      "path": "reject/module/string-namespace-export.mjs",
+      "path": "accept/module/string-namespace-export.mjs",
       "goal": "module",
-      "quickjs": "reject",
-      "frontend": "reject",
+      "quickjs": "accept",
+      "fusor": "accept",
       "families": [
         "modules",
-        "statements",
         "target-profile"
       ],
       "claims": [
         "module.import-export",
-        "profile.rejected-outside-target",
-        "statement.abrupt-handlers"
+        "profile.accepted-es2025"
       ],
       "evidence": [
         "test262.conf:57",
         "quickjs.c:31477"
       ],
       "difference": null,
-      "diagnostic": "identifier-expected",
-      "productions": []
+      "diagnostic": null,
+      "productions": [
+        "module.string-names",
+        "module.re-export"
+      ]
     },
     {
       "path": "reject/module/unexpected-await-keyword.mjs",
       "goal": "module",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "functions"
       ],
@@ -1740,7 +1744,7 @@
       "path": "reject/module/unexpected-yield-keyword.mjs",
       "goal": "module",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "functions"
       ],
@@ -1758,7 +1762,7 @@
       "path": "reject/module/unpaired-surrogate-module-name-2.mjs",
       "goal": "module",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "modules"
       ],
@@ -1777,7 +1781,7 @@
       "path": "reject/module/unresolved-local-export.mjs",
       "goal": "module",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "modules"
       ],
@@ -1795,7 +1799,7 @@
       "path": "reject/module/with-statement.mjs",
       "goal": "module",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "modules",
         "statements"
@@ -1816,7 +1820,7 @@
       "path": "reject/script/arguments-in-class-field-initializer.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "classes-objects"
       ],
@@ -1834,7 +1838,7 @@
       "path": "reject/script/arrow-line-terminator.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "functions",
         "source-lexical"
@@ -1857,7 +1861,7 @@
       "path": "reject/script/assignment-rest-property-not-last.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "bindings"
       ],
@@ -1875,7 +1879,7 @@
       "path": "reject/script/auto-accessor.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "classes-objects",
         "source-lexical",
@@ -1898,7 +1902,7 @@
       "path": "reject/script/await-in-default-expression.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "functions"
       ],
@@ -1916,7 +1920,7 @@
       "path": "reject/script/break-outside-loop.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "statements"
       ],
@@ -1936,7 +1940,7 @@
       "path": "reject/script/catch-binding-collision.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "bindings",
         "statements"
@@ -1957,7 +1961,7 @@
       "path": "reject/script/chained-label-continue-block.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "statements"
       ],
@@ -1976,7 +1980,7 @@
       "path": "reject/script/chained-label-continue-switch.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "statements"
       ],
@@ -1995,7 +1999,7 @@
       "path": "reject/script/class-declaration-single-statement.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "statements"
       ],
@@ -2013,7 +2017,7 @@
       "path": "reject/script/class-statement-requires-name.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "classes-objects"
       ],
@@ -2031,7 +2035,7 @@
       "path": "reject/script/coalesce-mixed-with-logical.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "expressions"
       ],
@@ -2049,7 +2053,7 @@
       "path": "reject/script/const-without-initializer.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "bindings"
       ],
@@ -2067,7 +2071,7 @@
       "path": "reject/script/continue-outside-loop.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "statements"
       ],
@@ -2087,7 +2091,7 @@
       "path": "reject/script/decorator.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "classes-objects",
         "source-lexical",
@@ -2110,7 +2114,7 @@
       "path": "reject/script/delete-private-field.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "classes-objects"
       ],
@@ -2128,7 +2132,7 @@
       "path": "reject/script/duplicate-class-constructor.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "classes-objects"
       ],
@@ -2146,7 +2150,7 @@
       "path": "reject/script/duplicate-label.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "statements"
       ],
@@ -2165,7 +2169,7 @@
       "path": "reject/script/duplicate-lexical-declaration.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "bindings"
       ],
@@ -2183,7 +2187,7 @@
       "path": "reject/script/duplicate-private-name.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "classes-objects"
       ],
@@ -2202,7 +2206,7 @@
       "path": "reject/script/duplicate-proto-data.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "classes-objects"
       ],
@@ -2221,7 +2225,7 @@
       "path": "reject/script/duplicate-regexp-flag.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "source-lexical"
       ],
@@ -2239,7 +2243,7 @@
       "path": "reject/script/duplicate-switch-default.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "statements"
       ],
@@ -2257,7 +2261,7 @@
       "path": "reject/script/expecting-field-name.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "expressions"
       ],
@@ -2275,7 +2279,7 @@
       "path": "reject/script/expecting-token-2.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "source-lexical"
       ],
@@ -2295,7 +2299,7 @@
       "path": "reject/script/for-await-of.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "functions",
         "source-lexical",
@@ -2318,7 +2322,7 @@
       "path": "reject/script/for-await-requires-of.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "statements"
       ],
@@ -2336,7 +2340,7 @@
       "path": "reject/script/for-control-expects-of-or-in.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "statements"
       ],
@@ -2354,7 +2358,7 @@
       "path": "reject/script/for-of-starts-with-async.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "statements"
       ],
@@ -2372,7 +2376,7 @@
       "path": "reject/script/function-name-expected.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "functions"
       ],
@@ -2390,7 +2394,7 @@
       "path": "reject/script/import-meta-expected.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "expressions"
       ],
@@ -2408,7 +2412,7 @@
       "path": "reject/script/import-meta.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "expressions"
       ],
@@ -2427,7 +2431,7 @@
       "path": "reject/script/invalid-accessor-parameter-count.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "functions"
       ],
@@ -2445,7 +2449,7 @@
       "path": "reject/script/invalid-assignment-target.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "expressions"
       ],
@@ -2463,7 +2467,7 @@
       "path": "reject/script/invalid-destructuring-target-2.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "bindings"
       ],
@@ -2483,7 +2487,7 @@
       "path": "reject/script/invalid-destructuring-target.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "bindings"
       ],
@@ -2503,7 +2507,7 @@
       "path": "reject/script/invalid-dynamic-import.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "expressions"
       ],
@@ -2521,7 +2525,7 @@
       "path": "reject/script/invalid-escaped-identifier.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "source-lexical"
       ],
@@ -2541,7 +2545,7 @@
       "path": "reject/script/invalid-for-in-of-target.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "statements"
       ],
@@ -2559,7 +2563,7 @@
       "path": "reject/script/invalid-lexical-variable-name.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "bindings"
       ],
@@ -2577,7 +2581,7 @@
       "path": "reject/script/invalid-method-name.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "classes-objects"
       ],
@@ -2595,7 +2599,7 @@
       "path": "reject/script/invalid-numeric-separator.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "source-lexical"
       ],
@@ -2615,7 +2619,7 @@
       "path": "reject/script/invalid-private-name-start.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "source-lexical"
       ],
@@ -2633,7 +2637,7 @@
       "path": "reject/script/invalid-property-name.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "classes-objects"
       ],
@@ -2651,7 +2655,7 @@
       "path": "reject/script/invalid-super-usage.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "expressions"
       ],
@@ -2669,7 +2673,7 @@
       "path": "reject/script/invalid-switch-statement.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "statements"
       ],
@@ -2687,7 +2691,7 @@
       "path": "reject/script/invalid-update-operand.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "expressions"
       ],
@@ -2705,7 +2709,7 @@
       "path": "reject/script/let-as-lexical-identifier.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "bindings"
       ],
@@ -2723,7 +2727,7 @@
       "path": "reject/script/lexical-single-statement.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "statements"
       ],
@@ -2741,7 +2745,7 @@
       "path": "reject/script/malformed-string-escape.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "source-lexical"
       ],
@@ -2759,7 +2763,7 @@
       "path": "reject/script/missing-binding-pattern.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "bindings"
       ],
@@ -2777,7 +2781,7 @@
       "path": "reject/script/missing-formal-parameter.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "functions"
       ],
@@ -2795,7 +2799,7 @@
       "path": "reject/script/module-declaration.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "modules",
         "target-profile"
@@ -2815,7 +2819,7 @@
       "path": "reject/script/new-in-optional-chain.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "expressions"
       ],
@@ -2833,7 +2837,7 @@
       "path": "reject/script/new-target-expected.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "expressions"
       ],
@@ -2851,7 +2855,7 @@
       "path": "reject/script/non-simple-duplicate-parameters.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "functions"
       ],
@@ -2871,7 +2875,7 @@
       "path": "reject/script/optional-chain-assignment.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "expressions"
       ],
@@ -2891,7 +2895,7 @@
       "path": "reject/script/parameter-after-rest.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "functions",
         "source-lexical"
@@ -2913,7 +2917,7 @@
       "path": "reject/script/private-field-after-super.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "classes-objects"
       ],
@@ -2931,7 +2935,7 @@
       "path": "reject/script/redefined-global-identifier-2.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "bindings"
       ],
@@ -2950,7 +2954,7 @@
       "path": "reject/script/redefined-lexical-identifier-2.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "bindings"
       ],
@@ -2969,7 +2973,7 @@
       "path": "reject/script/redefined-parameter-name.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "bindings"
       ],
@@ -2987,7 +2991,7 @@
       "path": "reject/script/redefined-variable.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "bindings"
       ],
@@ -3005,7 +3009,7 @@
       "path": "reject/script/regexp-line-terminator.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "source-lexical"
       ],
@@ -3023,7 +3027,7 @@
       "path": "reject/script/reserved-identifier-2.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "source-lexical"
       ],
@@ -3049,7 +3053,7 @@
       "path": "reject/script/reserved-identifier-3.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "source-lexical"
       ],
@@ -3075,7 +3079,7 @@
       "path": "reject/script/reserved-identifier-4.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "source-lexical"
       ],
@@ -3101,7 +3105,7 @@
       "path": "reject/script/reserved-identifier-6.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "source-lexical"
       ],
@@ -3127,7 +3131,7 @@
       "path": "reject/script/reserved-identifier-7.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "source-lexical"
       ],
@@ -3153,7 +3157,7 @@
       "path": "reject/script/reserved-identifier-8.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "source-lexical"
       ],
@@ -3179,7 +3183,7 @@
       "path": "reject/script/reserved-identifier.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "source-lexical"
       ],
@@ -3205,7 +3209,7 @@
       "path": "reject/script/rest-element-default-value.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "bindings"
       ],
@@ -3223,7 +3227,7 @@
       "path": "reject/script/rest-element-not-last.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "bindings"
       ],
@@ -3241,7 +3245,7 @@
       "path": "reject/script/rest-parameter-default.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "functions",
         "source-lexical"
@@ -3264,7 +3268,7 @@
       "path": "reject/script/return-in-static-block.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "classes-objects"
       ],
@@ -3282,7 +3286,7 @@
       "path": "reject/script/strict-directive-with-nonsimple-parameters.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "functions"
       ],
@@ -3300,7 +3304,7 @@
       "path": "reject/script/strict-duplicate-parameters.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "functions"
       ],
@@ -3319,7 +3323,7 @@
       "path": "reject/script/strict-with-statement.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "statements"
       ],
@@ -3337,7 +3341,7 @@
       "path": "reject/script/super-call-outside-constructor.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "expressions"
       ],
@@ -3356,7 +3360,7 @@
       "path": "reject/script/super-outside-method.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "classes-objects",
         "expressions"
@@ -3377,7 +3381,7 @@
       "path": "reject/script/switch-lexical-collision.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "bindings",
         "statements"
@@ -3398,7 +3402,7 @@
       "path": "reject/script/template-in-optional-chain.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "expressions"
       ],
@@ -3416,7 +3420,7 @@
       "path": "reject/script/throw-line-terminator.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "source-lexical",
         "statements"
@@ -3437,7 +3441,7 @@
       "path": "reject/script/too-many-call-arguments.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "target-profile"
       ],
@@ -3455,7 +3459,7 @@
       "path": "reject/script/top-level-new-target.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "expressions"
       ],
@@ -3474,7 +3478,7 @@
       "path": "reject/script/top-level-return.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "functions",
         "statements"
@@ -3495,7 +3499,7 @@
       "path": "reject/script/try-without-handler.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "statements"
       ],
@@ -3515,7 +3519,7 @@
       "path": "reject/script/undeclared-private-name.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "classes-objects"
       ],
@@ -3534,7 +3538,7 @@
       "path": "reject/script/unexpected-character.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "source-lexical"
       ],
@@ -3552,7 +3556,7 @@
       "path": "reject/script/unexpected-end-of-regexp.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "source-lexical"
       ],
@@ -3570,7 +3574,7 @@
       "path": "reject/script/unexpected-end-of-string-2.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "source-lexical"
       ],
@@ -3589,7 +3593,7 @@
       "path": "reject/script/unknown-regexp-flag.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "source-lexical"
       ],
@@ -3607,7 +3611,7 @@
       "path": "reject/script/unparenthesized-unary-before-exponentiation.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "expressions"
       ],
@@ -3625,7 +3629,7 @@
       "path": "reject/script/unterminated-block-comment.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "source-lexical"
       ],
@@ -3644,7 +3648,7 @@
       "path": "reject/script/unterminated-string.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "source-lexical"
       ],
@@ -3662,7 +3666,7 @@
       "path": "reject/script/unterminated-template-substitution.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "source-lexical"
       ],
@@ -3680,7 +3684,7 @@
       "path": "reject/script/unterminated-template.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "source-lexical"
       ],
@@ -3699,7 +3703,7 @@
       "path": "reject/script/using-declaration.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "bindings",
         "source-lexical",
@@ -3722,7 +3726,7 @@
       "path": "reject/script/variable-name-expected-2.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "bindings"
       ],
@@ -3741,7 +3745,7 @@
       "path": "reject/script/yield-binding-in-generator.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "bindings",
         "functions"
@@ -3762,7 +3766,7 @@
       "path": "reject/script/yield-in-default-expression.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "functions"
       ],
@@ -3780,7 +3784,7 @@
       "path": "reject/strict-async-script/duplicate-parameters.js",
       "goal": "strict-async-script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "functions"
       ],
@@ -3799,7 +3803,7 @@
       "path": "reject/strict-script/annex-b-if-function.js",
       "goal": "strict-script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "annex-b",
         "functions",
@@ -3822,7 +3826,7 @@
       "path": "reject/strict-script/arguments-binding.js",
       "goal": "strict-script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "bindings"
       ],
@@ -3840,7 +3844,7 @@
       "path": "reject/strict-script/delete-identifier.js",
       "goal": "strict-script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "bindings"
       ],
@@ -3859,7 +3863,7 @@
       "path": "reject/strict-script/duplicate-parameters.js",
       "goal": "strict-script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "bindings",
         "functions"
@@ -3880,7 +3884,7 @@
       "path": "reject/strict-script/for-in-of-declaration-initializer.js",
       "goal": "strict-script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "statements"
       ],
@@ -3898,7 +3902,7 @@
       "path": "reject/strict-script/invalid-destructuring-target-3.js",
       "goal": "strict-script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "bindings"
       ],
@@ -3918,7 +3922,7 @@
       "path": "reject/strict-script/legacy-octal-literal.js",
       "goal": "strict-script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "bindings"
       ],
@@ -3937,7 +3941,7 @@
       "path": "reject/strict-script/legacy-octal-string-escape.js",
       "goal": "strict-script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "bindings"
       ],
@@ -3956,7 +3960,7 @@
       "path": "reject/strict-script/reserved-word-binding.js",
       "goal": "strict-script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "bindings"
       ],
@@ -3975,7 +3979,7 @@
       "path": "reject/strict-script/strict-invalid-argument-name.js",
       "goal": "strict-script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "bindings"
       ],
@@ -3993,7 +3997,7 @@
       "path": "reject/strict-script/strict-invalid-function-name.js",
       "goal": "strict-script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "bindings"
       ],
@@ -4011,7 +4015,7 @@
       "path": "reject/strict-script/strict-invalid-lvalue.js",
       "goal": "strict-script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "bindings"
       ],
@@ -4029,7 +4033,7 @@
       "path": "reject/strict-script/with-statement.js",
       "goal": "strict-script",
       "quickjs": "reject",
-      "frontend": "reject",
+      "fusor": "reject",
       "families": [
         "statements"
       ],

@@ -965,8 +965,8 @@ impl<'fixture> ManifestValidation<'fixture> {
             &[
                 "path",
                 "goal",
+                "quickjs",
                 "fusor",
-                "frontend",
                 "families",
                 "claims",
                 "productions",
@@ -1002,17 +1002,17 @@ impl<'fixture> ManifestValidation<'fixture> {
                 fixture.goal.manifest_name()
             ));
         }
+        let quickjs = Expectation::from_manifest(
+            required_string(case, "quickjs", &location)?,
+            &format!("{location} field `quickjs`"),
+        )?;
         let fusor = Expectation::from_manifest(
             required_string(case, "fusor", &location)?,
             &format!("{location} field `fusor`"),
         )?;
-        let frontend = Expectation::from_manifest(
-            required_string(case, "frontend", &location)?,
-            &format!("{location} field `frontend`"),
-        )?;
-        if fusor != fixture.oracle_expectation || frontend != fixture.candidate_expectation {
+        if quickjs != fixture.oracle_expectation || fusor != fixture.candidate_expectation {
             return Err(format!(
-                "parser manifest case {} expectations ({fusor}/{frontend}) do not match its directory ({}/{})",
+                "parser manifest case {} expectations ({quickjs}/{fusor}) do not match its directory ({}/{})",
                 relative.display(),
                 fixture.oracle_expectation,
                 fixture.candidate_expectation
@@ -1021,12 +1021,12 @@ impl<'fixture> ManifestValidation<'fixture> {
 
         let families = parse_families(case, &location)?;
         let claims = parse_claims(case, &location)?;
-        validate_case_claims(&relative, &families, &claims, fusor, goal)?;
-        let productions = parse_productions(case, &location, goal, fusor, &relative)?;
+        validate_case_claims(&relative, &families, &claims, quickjs, goal)?;
+        let productions = parse_productions(case, &location, goal, quickjs, &relative)?;
         let diagnostic = Self::validate_case_diagnostic(
             case.get("diagnostic")
                 .expect("exact_object checked the diagnostic field"),
-            fusor,
+            quickjs,
             &claims,
             &relative,
             &location,
@@ -1035,20 +1035,20 @@ impl<'fixture> ManifestValidation<'fixture> {
         validate_difference(
             case.get("difference")
                 .expect("exact_object checked the difference field"),
+            quickjs,
             fusor,
-            frontend,
             &relative,
             &location,
             &mut self.difference_ids,
         )?;
-        if fusor != frontend {
+        if quickjs != fusor {
             self.differences += 1;
         }
 
         self.covered_goals.insert(goal);
         self.covered_families.extend(families);
         for claim in &claims {
-            self.covered_claim_polarities.insert((*claim, fusor));
+            self.covered_claim_polarities.insert((*claim, quickjs));
         }
         self.covered_claims.extend(claims);
         for production in productions {
@@ -1069,13 +1069,13 @@ impl<'fixture> ManifestValidation<'fixture> {
     /// claim one early-error surface while provoking another.
     fn validate_case_diagnostic(
         value: &Value,
-        fusor: Expectation,
+        oracle: Expectation,
         claims: &BTreeSet<ParserClaim>,
         relative: &Path,
         location: &str,
     ) -> Result<Option<DeclaredDiagnostic>, String> {
         if value.is_null() {
-            return if matches!(fusor, Expectation::Reject) {
+            return if matches!(oracle, Expectation::Reject) {
                 Err(format!(
                     "parser manifest case {} must declare the pinned QuickJS diagnostic it provokes",
                     relative.display()
@@ -1084,7 +1084,7 @@ impl<'fixture> ManifestValidation<'fixture> {
                 Ok(None)
             };
         }
-        if matches!(fusor, Expectation::Accept) {
+        if matches!(oracle, Expectation::Accept) {
             return Err(format!(
                 "parser manifest case {} must not declare a diagnostic because QuickJS accepts it",
                 relative.display()
@@ -1223,7 +1223,7 @@ fn validate_case_claims(
     relative: &Path,
     families: &BTreeSet<ParserFamily>,
     claims: &BTreeSet<ParserClaim>,
-    fusor: Expectation,
+    oracle: Expectation,
     goal: ParserGoal,
 ) -> Result<(), String> {
     let expected_families = claims
@@ -1239,9 +1239,9 @@ fn validate_case_claims(
         ));
     }
     for claim in claims {
-        if !claim.allows_quickjs_expectation(fusor) {
+        if !claim.allows_quickjs_expectation(oracle) {
             return Err(format!(
-                "parser manifest case {} claim `{}` does not allow QuickJS {fusor} coverage",
+                "parser manifest case {} claim `{}` does not allow QuickJS {oracle} coverage",
                 relative.display(),
                 claim.manifest_name()
             ));
@@ -1383,14 +1383,14 @@ fn parse_productions(
     object: &Map<String, Value>,
     location: &str,
     goal: ParserGoal,
-    fusor: Expectation,
+    oracle: Expectation,
     relative: &Path,
 ) -> Result<BTreeSet<DeclaredProduction>, String> {
     let values = object
         .get("productions")
         .and_then(Value::as_array)
         .ok_or_else(|| format!("{location} field `productions` must be an array"))?;
-    if matches!(fusor, Expectation::Reject) {
+    if matches!(oracle, Expectation::Reject) {
         return if values.is_empty() {
             Ok(BTreeSet::new())
         } else {
@@ -2038,7 +2038,7 @@ mod tests {
             "path".to_owned(),
             json!("candidate-accept/script/source.js"),
         );
-        case.insert("fusor".to_owned(), json!("reject"));
+        case.insert("quickjs".to_owned(), json!("reject"));
         case.insert(
             "diagnostic".to_owned(),
             json!("unexpected-token-in-expression"),
@@ -2872,7 +2872,7 @@ mod tests {
                     "path": "accept/script/source.js",
                     "goal": "script",
                     "quickjs": "accept",
-                    "frontend": "accept",
+                    "fusor": "accept",
                     "families": [
                         "source-lexical",
                         "bindings",
@@ -2910,7 +2910,7 @@ mod tests {
                     "path": "accept/module/source.mjs",
                     "goal": "module",
                     "quickjs": "accept",
-                    "frontend": "accept",
+                    "fusor": "accept",
                     "families": ["modules", "target-profile"],
                     "claims": [
                         "module.import-export",
@@ -2925,7 +2925,7 @@ mod tests {
                     "path": "accept/strict-script/source.js",
                     "goal": "strict-script",
                     "quickjs": "accept",
-                    "frontend": "accept",
+                    "fusor": "accept",
                     "families": ["source-lexical"],
                     "claims": ["lexical.comments-hashbang-html"],
                     "evidence": ["fusor/quickjs.c:36210-36299"],
@@ -2935,7 +2935,7 @@ mod tests {
                     "path": "accept/async-script/source.js",
                     "goal": "async-script",
                     "quickjs": "accept",
-                    "frontend": "accept",
+                    "fusor": "accept",
                     "families": ["functions"],
                     "claims": ["function.contextual-early-errors"],
                     "evidence": ["fusor/quickjs.c:36543-36546"],
@@ -2945,7 +2945,7 @@ mod tests {
                     "path": "accept/strict-async-script/source.js",
                     "goal": "strict-async-script",
                     "quickjs": "accept",
-                    "frontend": "accept",
+                    "fusor": "accept",
                     "families": ["functions"],
                     "claims": ["function.contextual-early-errors"],
                     "evidence": ["fusor/quickjs.c:36543-36546"],
@@ -2955,7 +2955,7 @@ mod tests {
                     "path": "reject/script/rejections.js",
                     "goal": "script",
                     "quickjs": "reject",
-                    "frontend": "reject",
+                    "fusor": "reject",
                     "families": [
                         "source-lexical",
                         "bindings",
@@ -2999,7 +2999,7 @@ mod tests {
                     "path": "reject/module/rejections.mjs",
                     "goal": "module",
                     "quickjs": "reject",
-                    "frontend": "reject",
+                    "fusor": "reject",
                     "families": ["modules"],
                     "claims": [
                         "module.import-export",
@@ -3015,7 +3015,7 @@ mod tests {
                     "path": "reject/strict-script/rejections.js",
                     "goal": "strict-script",
                     "quickjs": "reject",
-                    "frontend": "reject",
+                    "fusor": "reject",
                     "families": ["bindings"],
                     "claims": ["binding.strict-mode-early-errors"],
                     "evidence": ["fusor/quickjs.c:36210"],
@@ -3140,7 +3140,7 @@ mod tests {
             ),
             "goal": goal.manifest_name(),
             "quickjs": "reject",
-            "frontend": "reject",
+            "fusor": "reject",
             "families": families.into_iter().collect::<Vec<_>>(),
             "claims": claims
                 .iter()
