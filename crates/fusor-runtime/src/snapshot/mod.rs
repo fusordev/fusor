@@ -10,7 +10,7 @@
 //! Rust closures (host functions), runtime resources, and unique
 //! symbols/private names (§8.2).
 //!
-//! Format (stamp 1):
+//! Format (stamp 2):
 //!
 //! ```text
 //! magic     8 bytes  "FUSORSNP"
@@ -22,6 +22,8 @@
 //!     description: unit count u32 LE, UTF-16 code units u16 LE
 //!   tag 2 = objects (ordinary objects only in this slice, §8.2):
 //!     count u64 LE, then per object:
+//!       index u32 LE (arena index; records ascend, holes are omitted and
+//!         become reusable vacant slots on restore)
 //!       kind u8 (0 = Ordinary)
 //!       prototype u8 (0 = none, 1 = object, 2 = function) + index u32 LE
 //!       extensible u8, is_html_dda u8
@@ -38,18 +40,32 @@
 //!           8 Function + index u32
 //!   tag 3 = binding cells:
 //!     count u32 LE, then per cell:
+//!       index u32 LE
 //!       value u8 (0 = uninitialized, 1 = value) + [the value encoding],
 //!       forward u8 (0 = none, 1 = target cell index u32 LE)
 //!   tag 4 = functions:
-//!     code count u32 LE, then per code: byte length u32 LE + the
-//!     verified-bytecode payload (FUSRBYTE codec)
+//!     code count u32 LE, then per code: index u32 LE,
+//!       realm u8 (0 = none, 1 = realm index u32 LE),
+//!       byte length u32 LE + the verified-bytecode payload (FUSRBYTE codec)
+//!     env count u32 LE, then per eval-variable environment node
+//!     (shared DAG, parent ordinals precede children):
+//!       kind u8 (0 Function, 1 ParameterInitializer,
+//!                2 ParameterBoundary, 3 FunctionBody)
+//!       parent u8 (0 = none, 1 = env ordinal u32 LE)
+//!       binding count u32 LE, then per binding:
+//!         name (unit count u32 LE + UTF-16 u16 LE), cell index u32 LE,
+//!         deleted u8
 //!     function count u32 LE, then per function:
+//!       index u32 LE
 //!       kind u8 (0 = JS bytecode, 1 = host)
 //!       kind 0: code ordinal u32 LE, template u32 LE,
 //!         environment count u32 LE + per entry:
 //!           tag u8 (0 = Captured cell index u32 LE,
 //!                   1 = RealmGlobal binding index u32 LE)
-//!         eval shadows u8 (always 0 in this slice), eval environment u8,
+//!         eval environment u8 (0 = none, 1 = env ordinal u32 LE)
+//!         eval shadows count u32 LE, then per shadow:
+//!           present u8, head env ordinal u32 LE,
+//!           boundary u8 (0 = none, 1 = env ordinal u32 LE)
 //!         lexical receiver u8 + [the value encoding],
 //!         lexical eval flags u8 u8,
 //!         lexical new target u8 + function index u32 LE,
@@ -59,7 +75,21 @@
 //!         home object u8 (0 none, 1 object index u32 LE,
 //!                         2 function index u32 LE)
 //!         then the object record (same sub-format as tag 2)
-//!       kind 1: host slot index u32 LE + the object record
+//!       kind 1: realm u8 (0 = none, 1 = realm index u32 LE),
+//!         host slot index u32 LE + the object record
+//!   tag 5 = realms: count u32 LE, then per realm (arena order):
+//!       object_prototype u32 LE, global_object u32 LE,
+//!       math_random_state u64 LE,
+//!       objects segment start/end u32 LE u32 LE,
+//!       functions segment start/end u32 LE u32 LE,
+//!       the realm's global-object record (the tag-2 sub-format: prototype,
+//!       flags, shape, slots) — user mutations on `globalThis` restore on
+//!       top of the replayed intrinsic graph
+//!   tag 6 = global bindings: count u32 LE, then per binding:
+//!       index u32 LE, realm index u32 LE,
+//!       atom content (kind u8 + unit count u32 LE + UTF-16 u16 LE),
+//!       state u8 (0 = Unresolved, 1 = Object,
+//!                 2 = Lexical { cell index u32 LE, mutable u8 })
 //! ```
 //!
 //! The atoms section records the live dynamic atoms deterministically;
@@ -70,9 +100,20 @@
 //! only follow the atoms section because restored property keys re-intern
 //! against it.
 //!
+//! The realm section serializes the realm *table* only. The intrinsic
+//! graph on `globalThis` is rebuilt deterministically by replaying
+//! `create_realm` on restore (§8.2): each realm's records must tile a
+//! first-generation prefix of the objects and functions arenas (recorded
+//! as per-realm segments), the prefix is omitted from the heap sections,
+//! and restore validates the replay against the recorded watermarks and
+//! global-object identities. Arena records in the heap sections are
+//! gap-encoded by index, so reclaimed slots keep every surviving
+//! record's identity stable.
+//!
 //! Heap content the current format does not cover yet fails closed with
 //! [`SnapshotError::Unsupported`] (intermediate slices, §8.2): exotic
-//! object kinds, accessor slots, function values, and identity symbols.
+//! object kinds, accessor slots, identity symbols, and module
+//! registries.
 
 mod codec;
 
@@ -83,10 +124,15 @@ use fusor_bytecode::VerifiedBytecode;
 
 use crate::{
     ArrayIndex, AtomError, AtomKind, JsBigInt, JsNumber, JsString, JsStringError, PredefinedAtom,
-    PropertyKey, PropertyLayout, Runtime,
+    PropertyKey, PropertyLayout, Realm, Runtime,
     ids::{FunctionId, ObjectId, RealmId},
     object::{HeapObject, HeapObjectKind, ObjectRecord, PropertySlot, ShapeProperty},
-    runtime::{BindingCell, BytecodeFunction, EnvironmentBinding, FunctionImplementation, HeapFunction, InstalledCode},
+    runtime::{
+        BindingCell, BytecodeFunction, EnvironmentBinding, EvalBindingShadow,
+        EvalVariableEnvironment, EvalVariableEnvironmentKind, FunctionImplementation,
+        HeapFunction, InstalledCode, RealmGlobalBinding, RealmGlobalBindingState,
+        SharedEvalVariableEnvironment,
+    },
     value::{HeapReference, SlotValue, StoredValue},
 };
 
@@ -95,7 +141,7 @@ pub const SNAPSHOT_MAGIC: [u8; 8] = *b"FUSORSNP";
 
 /// The current snapshot format stamp (§8.1: no version compatibility —
 /// any other stamp is rejected).
-pub const SNAPSHOT_FORMAT_STAMP: u32 = 1;
+pub const SNAPSHOT_FORMAT_STAMP: u32 = 2;
 
 /// The atoms section tag.
 const SECTION_ATOMS: u8 = 1;
@@ -108,6 +154,12 @@ const SECTION_CELLS: u8 = 3;
 
 /// The functions section tag.
 const SECTION_FUNCTIONS: u8 = 4;
+
+/// The realm-table section tag.
+const SECTION_REALMS: u8 = 5;
+
+/// The global-bindings section tag.
+const SECTION_BINDINGS: u8 = 6;
 
 /// Snapshot serialization and restoration failures (§8.3, §8.6 negative
 /// matrix). Every failure is typed; none panic.
@@ -146,6 +198,20 @@ pub enum SnapshotError {
     /// A restored verified-bytecode payload failed its load-time
     /// re-verification (§8.3).
     Bytecode(String),
+    /// The deterministic realm replay failed to rebuild one realm
+    /// (§8.2: `create_realm` is replayed on restore).
+    Realm(String),
+    /// The rebuilt intrinsic graph diverged from the recorded realm
+    /// segments — the blob was produced by different realm-build code
+    /// or is structurally corrupt (load-time validation, §8.3).
+    RealmMismatch {
+        /// The realm-record field that did not match.
+        what: &'static str,
+        /// The value recorded in the blob.
+        expected: usize,
+        /// The value the replay produced.
+        found: usize,
+    },
 }
 
 impl fmt::Display for SnapshotError {
@@ -168,21 +234,102 @@ impl fmt::Display for SnapshotError {
             Self::Bytecode(source) => {
                 write!(formatter, "snapshot bytecode re-verification failed: {source}")
             }
+            Self::Realm(source) => {
+                write!(formatter, "snapshot realm reconstruction failed: {source}")
+            }
+            Self::RealmMismatch {
+                what,
+                expected,
+                found,
+            } => write!(
+                formatter,
+                "snapshot realm replay diverged on {what}: recorded {expected}, rebuilt {found}"
+            ),
         }
     }
 }
 
 impl Error for SnapshotError {}
 
+/// One realm-table record (§8.2): the intrinsic graph itself is not
+/// serialized — restore replays `create_realm` and validates the result
+/// against these identities and segment watermarks.
+#[derive(Clone, Copy, Debug)]
+struct RealmRecord {
+    object_prototype: usize,
+    global_object: usize,
+    math_random_state: u64,
+    objects: (usize, usize),
+    functions: (usize, usize),
+}
+
+/// Validates the realm-prefix precondition and collects the realm-table
+/// records (§8.2): every realm's intrinsic graph must tile a contiguous
+/// first-generation prefix of the objects and functions arenas, and the
+/// arena itself must be churn-free. Anything else — user content before
+/// or between realm creations, freed or reused realm records — fails
+/// closed because the deterministic replay could not reproduce it.
+fn validate_realms(runtime: &Runtime) -> Result<Vec<RealmRecord>, SnapshotError> {
+    if !runtime.realms.is_dense_pristine() {
+        return Err(SnapshotError::Unsupported {
+            index: 0,
+            what: "a freed realm record",
+        });
+    }
+    let mut records = Vec::new();
+    let mut objects_end = 0usize;
+    let mut functions_end = 0usize;
+    for (id, state) in runtime.realms.iter() {
+        let segment = state.snapshot_segment;
+        if segment.objects.0 != objects_end || segment.functions.0 != functions_end {
+            return Err(SnapshotError::Unsupported {
+                index: id.index(),
+                what: if objects_end == 0 && functions_end == 0 {
+                    "user heap content before the first realm"
+                } else {
+                    "user heap content between realm creations"
+                },
+            });
+        }
+        objects_end = segment.objects.1;
+        functions_end = segment.functions.1;
+        if !state.module_registry.is_empty() {
+            return Err(SnapshotError::Unsupported {
+                index: id.index(),
+                what: "a module registry",
+            });
+        }
+        records.push(RealmRecord {
+            object_prototype: state.object_prototype.index(),
+            global_object: state.global_object.index(),
+            math_random_state: state.math_random_state,
+            objects: segment.objects,
+            functions: segment.functions,
+        });
+    }
+    if !runtime.objects.is_pristine_prefix(objects_end)
+        || !runtime.functions.is_pristine_prefix(functions_end)
+    {
+        return Err(SnapshotError::Unsupported {
+            index: 0,
+            what: "a freed or reused realm record",
+        });
+    }
+    Ok(records)
+}
+
 impl Runtime {
     /// Serializes the heap into one snapshot blob (§8.1, §8.3).
     ///
-    /// The current format covers the dynamic atoms table and ordinary
+    /// The realm table is serialized; the intrinsic graph on `globalThis`
+    /// is not — restore replays `create_realm` deterministically and
+    /// validates the replay against the recorded segments (§8.2). The
+    /// current format covers the dynamic atoms table and ordinary
     /// objects (shapes, data properties, primitive values, object
     /// references). Heap content beyond that — exotic object kinds,
-    /// accessor slots, function values, identity symbols — fails closed
-    /// with [`SnapshotError::Unsupported`] until its serializer slice
-    /// lands (§8.2).
+    /// accessor slots, function values, identity symbols, module
+    /// registries — fails closed with [`SnapshotError::Unsupported`]
+    /// until its serializer slice lands (§8.2).
     ///
     /// # Errors
     ///
@@ -201,8 +348,11 @@ impl Runtime {
             codec::write_section(&mut buffer, SECTION_ATOMS, &payload);
             sections += 1;
         }
-        if self.objects.iter().next().is_some() {
-            let payload = encode_objects(self)?;
+        let realm_records = validate_realms(self)?;
+        let objects_watermark = realm_records.last().map_or(0, |record| record.objects.1);
+        let functions_watermark = realm_records.last().map_or(0, |record| record.functions.1);
+        if self.objects.len() > objects_watermark {
+            let payload = encode_objects(self, objects_watermark)?;
             codec::write_section(&mut buffer, SECTION_OBJECTS, &payload);
             sections += 1;
         }
@@ -211,9 +361,19 @@ impl Runtime {
             codec::write_section(&mut buffer, SECTION_CELLS, &payload);
             sections += 1;
         }
-        if self.functions.len() > 0 {
-            let payload = encode_functions(self)?;
+        if self.code.len() > 0 || self.functions.len() > functions_watermark {
+            let payload = encode_functions(self, functions_watermark)?;
             codec::write_section(&mut buffer, SECTION_FUNCTIONS, &payload);
+            sections += 1;
+        }
+        if !realm_records.is_empty() {
+            let payload = encode_realms(self, &realm_records)?;
+            codec::write_section(&mut buffer, SECTION_REALMS, &payload);
+            sections += 1;
+        }
+        if self.global_bindings.len() > 0 {
+            let payload = encode_bindings(self)?;
+            codec::write_section(&mut buffer, SECTION_BINDINGS, &payload);
             sections += 1;
         }
         buffer[count_position..count_position + 4].copy_from_slice(&sections.to_le_bytes());
@@ -223,15 +383,17 @@ impl Runtime {
     /// Restores one snapshot blob into this runtime (§8.1, §8.3).
     ///
     /// The target must be a fresh runtime: restoration fills the empty
-    /// skeleton section by section, validating every frame on load. No
+    /// skeleton section by section, validating every frame on load. The
+    /// realm table is restored by replaying `create_realm`; no
     /// microtasks drain and no JavaScript runs during restore.
     ///
     /// # Errors
     ///
     /// Returns a typed [`SnapshotError`] for a magic/stamp mismatch, a
-    /// truncated or tampered blob, or a non-fresh target. This function
-    /// never panics.
-    pub fn from_snapshot(&mut self, blob: &[u8]) -> Result<(), SnapshotError> {
+    /// truncated or tampered blob, a non-fresh target, or a realm replay
+    /// that diverges from the recorded segments. This function never
+    /// panics.
+    pub fn from_snapshot(&mut self, blob: &[u8]) -> Result<Vec<Realm>, SnapshotError> {
         let mut reader = codec::Reader::new(blob);
         if reader.read_bytes(SNAPSHOT_MAGIC.len())? != SNAPSHOT_MAGIC {
             return Err(SnapshotError::MagicMismatch);
@@ -245,12 +407,14 @@ impl Runtime {
         }
         let sections = reader.read_u32()?;
         // Two-phase restore: every section decodes first, then the staged
-        // records resolve in dependency order (objects before cells, cells
-        // before functions once those sections land).
+        // records resolve in dependency order (realms by replay, then
+        // objects, cells, functions, bindings).
         let mut atoms = None;
         let mut staged_objects = None;
         let mut staged_cells = None;
         let mut staged_functions = None;
+        let mut staged_realms = None;
+        let mut staged_bindings = None;
         for _ in 0..sections {
             let tag = reader.read_u8()?;
             let payload = codec::read_section_payload(&mut reader)?;
@@ -259,26 +423,139 @@ impl Runtime {
                 SECTION_OBJECTS => staged_objects = Some(decode_objects(payload)?),
                 SECTION_CELLS => staged_cells = Some(decode_cells(payload)?),
                 SECTION_FUNCTIONS => staged_functions = Some(decode_functions(payload)?),
+                SECTION_REALMS => staged_realms = Some(decode_realms(payload)?),
+                SECTION_BINDINGS => staged_bindings = Some(decode_bindings(payload)?),
                 other => return Err(SnapshotError::FormatMismatch { found: u32::from(other) }),
             }
         }
         if reader.remaining() != 0 {
             return Err(SnapshotError::IntegrityViolation);
         }
+        // Phase 1: replay `create_realm` for every realm record (§8.2).
+        // The rebuilt intrinsic graph must reproduce the recorded
+        // identities and arena watermarks exactly.
+        let (realm_records, staged_globals) = staged_realms.unwrap_or_default();
+        let realm_count = realm_records.len();
+        let mut realms = Vec::new();
+        for (ordinal, record) in realm_records.iter().enumerate() {
+            let realm = self
+                .create_realm()
+                .map_err(|error| SnapshotError::Realm(error.to_string()))?;
+            if realm.id().index() != ordinal {
+                return Err(SnapshotError::IntegrityViolation);
+            }
+            if self.objects.len() != record.objects.1 {
+                return Err(SnapshotError::RealmMismatch {
+                    what: "objects watermark",
+                    expected: record.objects.1,
+                    found: self.objects.len(),
+                });
+            }
+            if self.functions.len() != record.functions.1 {
+                return Err(SnapshotError::RealmMismatch {
+                    what: "functions watermark",
+                    expected: record.functions.1,
+                    found: self.functions.len(),
+                });
+            }
+            let state = self
+                .realms
+                .get(realm.id())
+                .ok_or(SnapshotError::IntegrityViolation)?;
+            if state.global_object.index() != record.global_object
+                || state.object_prototype.index() != record.object_prototype
+            {
+                return Err(SnapshotError::RealmMismatch {
+                    what: "realm intrinsic identity",
+                    expected: record.global_object,
+                    found: state.global_object.index(),
+                });
+            }
+            realms.push(realm);
+        }
+        let objects_watermark = realm_records.last().map_or(0, |record| record.objects.1);
+        let functions_watermark = realm_records.last().map_or(0, |record| record.functions.1);
+        // Phase 2: place every heap record at its recorded arena index
+        // (objects and functions first so cross-references can resolve),
+        // then patch the record contents in dependency order.
         if let Some(atoms) = atoms {
             self.atoms.restore_atoms(&atoms).map_err(SnapshotError::Atom)?;
         }
-        let object_ids = match staged_objects {
-            Some(staged) => restore_objects(self, staged)?,
-            None => Vec::new(),
+        let (object_ids, pending_objects) = match staged_objects {
+            Some(staged) => restore_objects(self, staged, objects_watermark)?,
+            None => (
+                (0..objects_watermark)
+                    .map(|index| self.objects.id_from_index(index))
+                    .collect(),
+                Vec::new(),
+            ),
+        };
+        let (function_ids, pending_functions) = match staged_functions {
+            Some((authorities, environments, staged)) => restore_functions(
+                self,
+                authorities,
+                environments,
+                staged,
+                functions_watermark,
+                &realms,
+            )?,
+            None => (
+                (0..functions_watermark)
+                    .map(|index| self.functions.id_from_index(index))
+                    .collect(),
+                Vec::new(),
+            ),
         };
         if let Some(staged) = staged_cells {
-            restore_cells(self, staged, &object_ids)?;
+            restore_cells(self, staged, &object_ids, &function_ids)?;
         }
-        if let Some((authorities, staged)) = staged_functions {
-            restore_functions(self, authorities, staged, &object_ids)?;
+        resolve_object_records(self, pending_objects, &object_ids, &function_ids)?;
+        resolve_function_records(self, pending_functions, &object_ids, &function_ids)?;
+        if let Some(staged) = staged_bindings {
+            restore_bindings(self, staged, realm_count)?;
         }
-        Ok(())
+        // Phase 3: patch realm-local state (the math-random sequence and
+        // the global binding maps rebuild from the restored bindings),
+        // then lay the serialized global-object records — user mutations
+        // on `globalThis` — over the replayed intrinsic graph.
+        for ((record, staged_global), realm) in
+            realm_records.iter().zip(staged_globals).zip(&realms)
+        {
+            let realm_id = realm.id();
+            {
+                let state = self
+                    .realms
+                    .get_mut(realm_id)
+                    .ok_or(SnapshotError::IntegrityViolation)?;
+                state.math_random_state = record.math_random_state;
+                state.global_bindings.clear();
+            }
+            let resolved =
+                resolve_object_record(self, staged_global, &object_ids, &function_ids)?;
+            let state = self
+                .realms
+                .get(realm_id)
+                .ok_or(SnapshotError::IntegrityViolation)?;
+            let global = self
+                .objects
+                .get_mut(state.global_object)
+                .ok_or(SnapshotError::IntegrityViolation)?;
+            *global = HeapObject::ordinary(resolved);
+        }
+        for (id, binding) in self.global_bindings.iter() {
+            let realm_id = realms
+                .get(binding.realm.index())
+                .map(|realm| realm.id())
+                .ok_or(SnapshotError::IntegrityViolation)?;
+            let state = self
+                .realms
+                .get_mut(realm_id)
+                .ok_or(SnapshotError::IntegrityViolation)?;
+            state
+                .global_bindings
+                .insert(binding.name.clone(), id);
+        }
+        Ok(realms)
     }
 }
 
@@ -352,8 +629,9 @@ enum StagedValue {
     Function(usize),
 }
 
-/// One staged object waiting for its arena slot.
+/// One staged object waiting for its arena slot at the recorded index.
 struct StagedObject {
+    index: usize,
     prototype: Option<(u8, usize)>,
     extensible: bool,
     is_html_dda: bool,
@@ -363,17 +641,29 @@ struct StagedObject {
 
 /// One staged (not yet resolved) binding cell.
 struct StagedCell {
+    index: usize,
     value: Option<StagedValue>,
     forward: Option<usize>,
 }
 
-/// Encodes every object into the objects-section payload (format above);
-/// unsupported content fails closed (§8.2).
-fn encode_objects(runtime: &Runtime) -> Result<Vec<u8>, SnapshotError> {
+/// Encodes every user object (arena index ≥ the realm watermark) into
+/// the objects-section payload (format above); unsupported content fails
+/// closed (§8.2). Records are gap-encoded by index so reclaimed slots do
+/// not shift surviving identities.
+fn encode_objects(runtime: &Runtime, watermark: usize) -> Result<Vec<u8>, SnapshotError> {
     let mut payload = Vec::new();
-    let count = runtime.objects.iter().count();
+    let count = runtime
+        .objects
+        .iter()
+        .filter(|(id, _)| id.index() >= watermark)
+        .count();
     payload.extend_from_slice(&(count as u64).to_le_bytes());
-    for (id, object) in runtime.objects.iter() {
+    for (id, object) in runtime
+        .objects
+        .iter()
+        .filter(|(id, _)| id.index() >= watermark)
+    {
+        payload.extend_from_slice(&(id.index() as u32).to_le_bytes());
         match object.kind() {
             HeapObjectKind::Ordinary => payload.push(0),
             _ => {
@@ -496,7 +786,10 @@ fn encode_stored_value(buffer: &mut Vec<u8>, value: &StoredValue) -> Result<(), 
             buffer.push(7);
             buffer.extend_from_slice(&(target.index() as u32).to_le_bytes());
         }
-        StoredValue::Function(_) => return Err("a function value"),
+        StoredValue::Function(function) => {
+            buffer.push(8);
+            buffer.extend_from_slice(&(function.index() as u32).to_le_bytes());
+        }
     }
     Ok(())
 }
@@ -508,11 +801,15 @@ fn decode_objects(payload: &[u8]) -> Result<Vec<StagedObject>, SnapshotError> {
     let count = reader.read_u64()?;
     let mut staged = Vec::new();
     for _ in 0..count {
+        let index = reader.read_u32()? as usize;
         let kind = reader.read_u8()?;
         if kind != 0 {
             return Err(SnapshotError::FormatMismatch { found: u32::from(kind) });
         }
-        staged.push(decode_object_record_content(&mut reader)?);
+        staged.push(StagedObject {
+            index,
+            ..decode_object_record_content(&mut reader)?
+        });
     }
     Ok(staged)
 }
@@ -558,16 +855,107 @@ fn decode_staged_value(reader: &mut codec::Reader<'_>) -> Result<StagedValue, Sn
     })
 }
 
+/// Decodes the realm-table section (format above); the second vector
+/// carries each realm's staged global-object record in parallel.
+fn decode_realms(payload: &[u8]) -> Result<(Vec<RealmRecord>, Vec<StagedObject>), SnapshotError> {
+    let mut reader = codec::Reader::new(payload);
+    let count = reader.read_u32()?;
+    let mut records = Vec::new();
+    let mut globals = Vec::new();
+    for _ in 0..count {
+        records.push(RealmRecord {
+            object_prototype: reader.read_u32()? as usize,
+            global_object: reader.read_u32()? as usize,
+            math_random_state: reader.read_u64()?,
+            objects: (reader.read_u32()? as usize, reader.read_u32()? as usize),
+            functions: (reader.read_u32()? as usize, reader.read_u32()? as usize),
+        });
+        globals.push(decode_object_record_content(&mut reader)?);
+    }
+    if reader.remaining() != 0 {
+        return Err(SnapshotError::Truncated);
+    }
+    Ok((records, globals))
+}
+
+/// One staged (not yet resolved) global binding.
+struct StagedBinding {
+    index: usize,
+    realm: usize,
+    name: (AtomKind, Vec<u16>),
+    state: u8,
+    cell: Option<u32>,
+    mutable: bool,
+}
+
+/// Decodes the global-bindings section (format above).
+fn decode_bindings(payload: &[u8]) -> Result<Vec<StagedBinding>, SnapshotError> {
+    let mut reader = codec::Reader::new(payload);
+    let count = reader.read_u32()?;
+    let mut staged = Vec::new();
+    for _ in 0..count {
+        let index = reader.read_u32()? as usize;
+        let realm = reader.read_u32()? as usize;
+        let kind = match reader.read_u8()? {
+            0 => AtomKind::String,
+            1 => AtomKind::GlobalSymbol,
+            other => return Err(SnapshotError::FormatMismatch { found: u32::from(other) }),
+        };
+        let unit_count = reader.read_u32()?;
+        let mut units = Vec::new();
+        for _ in 0..unit_count {
+            units.push(reader.read_u16()?);
+        }
+        let (state, cell, mutable) = match reader.read_u8()? {
+            0 => (0, None, false),
+            1 => (1, None, false),
+            2 => (2, Some(reader.read_u32()?), reader.read_u8()? != 0),
+            other => return Err(SnapshotError::FormatMismatch { found: u32::from(other) }),
+        };
+        staged.push(StagedBinding {
+            index,
+            realm,
+            name: (kind, units),
+            state,
+            cell,
+            mutable,
+        });
+    }
+    if reader.remaining() != 0 {
+        return Err(SnapshotError::Truncated);
+    }
+    Ok(staged)
+}
+
 /// Resolves the staged objects into the object arena (§8.3): objects
-/// insert in decode order so their restored identities match the encoded
-/// indices, then each record fills with its resolved shape, slots, and
-/// prototype.
+/// insert at their recorded indices (holes become reusable vacant
+/// slots), so restored identities match the encoded arena exactly; each
+/// record then fills with its resolved shape, slots, and prototype. The
+/// returned vector maps arena indices to identities: the realm prefix
+/// resolves to the replayed realm records, holes to `Id::ZERO`.
+/// Inserts placeholder objects at their recorded indices (§8.3): holes
+/// become reusable vacant slots, so restored identities match the
+/// encoded arena exactly. The returned vector maps arena indices to
+/// identities (realm prefix resolved, holes `Id::ZERO`); record contents
+/// resolve once every function id exists in
+/// [`resolve_object_records`].
 fn restore_objects(
     runtime: &mut Runtime,
     staged: Vec<StagedObject>,
-) -> Result<Vec<ObjectId>, SnapshotError> {
-    let mut ids = Vec::new();
-    for _ in &staged {
+    watermark: usize,
+) -> Result<(Vec<ObjectId>, Vec<(ObjectId, StagedObject)>), SnapshotError> {
+    let mut ids: Vec<ObjectId> = (0..watermark)
+        .map(|index| runtime.objects.id_from_index(index))
+        .collect();
+    let mut pending = Vec::new();
+    for staged in staged {
+        let index = staged.index;
+        if index < watermark || index < ids.len() {
+            return Err(SnapshotError::IntegrityViolation);
+        }
+        while ids.len() < index {
+            ids.push(ObjectId::ZERO);
+        }
         let placeholder = HeapObject::ordinary(ObjectRecord::from_parts(
             None,
             true,
@@ -578,28 +966,42 @@ fn restore_objects(
         ));
         let id = runtime
             .objects
-            .try_insert(placeholder)
-            .map_err(|_| SnapshotError::IntegrityViolation)?;
+            .restore_insert(index, placeholder)
+            .ok_or(SnapshotError::IntegrityViolation)?;
         ids.push(id);
+        pending.push((id, staged));
     }
-    for (staged, id) in staged.into_iter().zip(ids.iter().copied()) {
-        let record = resolve_object_record(runtime, staged, &ids, &[])?;
+    Ok((ids, pending))
+}
+
+/// Resolves staged object-record contents against the restored object
+/// and function identities (the shared record content used by both
+/// sections).
+fn resolve_object_records(
+    runtime: &mut Runtime,
+    pending: Vec<(ObjectId, StagedObject)>,
+    object_ids: &[ObjectId],
+    function_ids: &[FunctionId],
+) -> Result<(), SnapshotError> {
+    for (id, staged) in pending {
+        let record = resolve_object_record(runtime, staged, object_ids, function_ids)?;
         let object = runtime
             .objects
             .get_mut(id)
             .ok_or(SnapshotError::IntegrityViolation)?;
         *object = HeapObject::ordinary(record);
     }
-    Ok(ids)
+    Ok(())
 }
 
-/// Encodes every binding cell into the cells-section payload: per cell a
-/// value tag (uninitialized or a stored value) and an optional forwarding
-/// target.
+/// Encodes every binding cell into the cells-section payload: per cell
+/// an arena index, a value tag (uninitialized or a stored value) and an
+/// optional forwarding target.
 fn encode_cells(runtime: &Runtime) -> Result<Vec<u8>, SnapshotError> {
     let mut payload = Vec::new();
     payload.extend_from_slice(&(runtime.cells.len() as u32).to_le_bytes());
     for (id, cell) in runtime.cells.iter() {
+        payload.extend_from_slice(&(id.index() as u32).to_le_bytes());
         match &cell.value {
             SlotValue::Uninitialized => payload.push(0),
             SlotValue::Value(value) => {
@@ -629,6 +1031,7 @@ fn decode_cells(payload: &[u8]) -> Result<Vec<StagedCell>, SnapshotError> {
     let count = reader.read_u32()?;
     let mut staged = Vec::new();
     for _ in 0..count {
+        let index = reader.read_u32()? as usize;
         let value = match reader.read_u8()? {
             0 => None,
             1 => Some(decode_staged_value(&mut reader)?),
@@ -639,7 +1042,11 @@ fn decode_cells(payload: &[u8]) -> Result<Vec<StagedCell>, SnapshotError> {
             1 => Some(reader.read_u32()? as usize),
             other => return Err(SnapshotError::FormatMismatch { found: u32::from(other) }),
         };
-        staged.push(StagedCell { value, forward });
+        staged.push(StagedCell {
+            index,
+            value,
+            forward,
+        });
     }
     if reader.remaining() != 0 {
         return Err(SnapshotError::Truncated);
@@ -647,33 +1054,46 @@ fn decode_cells(payload: &[u8]) -> Result<Vec<StagedCell>, SnapshotError> {
     Ok(staged)
 }
 
-/// Resolves the staged cells into the cell arena: cells insert in decode
-/// order so their restored identities match the encoded indices, values
-/// resolve against the restored objects, then forwarding targets patch
-/// once every cell exists.
+/// Resolves the staged cells into the cell arena: cells insert at their
+/// recorded indices (holes become reusable vacant slots), values resolve
+/// against the restored objects and functions, then forwarding targets
+/// patch once every cell exists.
 fn restore_cells(
     runtime: &mut Runtime,
     staged: Vec<StagedCell>,
     object_ids: &[ObjectId],
+    function_ids: &[FunctionId],
 ) -> Result<(), SnapshotError> {
     let mut forwards = Vec::new();
-    let mut ids = Vec::new();
+    let mut ids: Vec<crate::ids::BindingCellId> = Vec::new();
     for cell in staged {
+        let index = cell.index;
+        if index < ids.len() {
+            return Err(SnapshotError::IntegrityViolation);
+        }
+        while ids.len() < index {
+            ids.push(crate::ids::BindingCellId::ZERO);
+        }
         if let Some(target) = cell.forward {
-            forwards.push((ids.len(), target));
+            forwards.push((index, target));
         }
         let value = match cell.value {
             None => SlotValue::Uninitialized,
-            Some(value) => SlotValue::Value(resolve_staged_value(runtime, value, object_ids)?),
+            Some(value) => {
+                SlotValue::Value(resolve_staged_value(runtime, value, object_ids, function_ids)?)
+            }
         };
         let id = runtime
             .cells
-            .try_insert(BindingCell { value, forward: None })
-            .map_err(|_| SnapshotError::IntegrityViolation)?;
+            .restore_insert(index, BindingCell { value, forward: None })
+            .ok_or(SnapshotError::IntegrityViolation)?;
         ids.push(id);
     }
     for (index, forward) in forwards {
         let target = *ids.get(forward).ok_or(SnapshotError::IntegrityViolation)?;
+        if target == crate::ids::BindingCellId::ZERO {
+            return Err(SnapshotError::IntegrityViolation);
+        }
         let cell = runtime
             .cells
             .get_mut(ids[index])
@@ -683,13 +1103,77 @@ fn restore_cells(
     Ok(())
 }
 
-/// Resolves one staged slot value into a heap value, mapping object
-/// references through the restored object identities. Function references
-/// resolve once the functions section lands (fail closed until then).
+/// Resolves the staged global bindings into the bindings arena: bindings
+/// insert at their recorded indices (holes become reusable vacant
+/// slots), names re-intern by content, and lexical cells resolve against
+/// the restored cell arena. The owning realm maps rebuild afterwards in
+/// [`Runtime::from_snapshot`].
+fn restore_bindings(
+    runtime: &mut Runtime,
+    staged: Vec<StagedBinding>,
+    realm_count: usize,
+) -> Result<(), SnapshotError> {
+    let mut ids: Vec<crate::ids::RealmGlobalBindingId> = Vec::new();
+    for binding in staged {
+        let index = binding.index;
+        if binding.realm >= realm_count || index < ids.len() {
+            return Err(SnapshotError::IntegrityViolation);
+        }
+        while ids.len() < index {
+            ids.push(crate::ids::RealmGlobalBindingId::ZERO);
+        }
+        let description =
+            JsString::from_code_units(binding.name.1).map_err(SnapshotError::String)?;
+        let name = match binding.name.0 {
+            AtomKind::String => runtime
+                .atoms
+                .intern_string(&description)
+                .map_err(SnapshotError::Atom)?,
+            AtomKind::GlobalSymbol => runtime
+                .atoms
+                .intern_global_symbol(&description)
+                .map_err(SnapshotError::Atom)?,
+            AtomKind::Symbol | AtomKind::Private => {
+                return Err(SnapshotError::IntegrityViolation);
+            }
+        };
+        let realm = runtime.realms.id_from_index(binding.realm);
+        let state = match binding.state {
+            0 => RealmGlobalBindingState::Unresolved,
+            1 => RealmGlobalBindingState::Object,
+            2 => {
+                let index = binding.cell.ok_or(SnapshotError::IntegrityViolation)? as usize;
+                let cell = runtime.cells.id_from_index(index);
+                if runtime.cells.get(cell).is_none() {
+                    return Err(SnapshotError::IntegrityViolation);
+                }
+                RealmGlobalBindingState::Lexical {
+                    cell,
+                    mutable: binding.mutable,
+                }
+            }
+            other => return Err(SnapshotError::FormatMismatch { found: u32::from(other) }),
+        };
+        let id = runtime
+            .global_bindings
+            .restore_insert(
+                index,
+                RealmGlobalBinding { realm, name, state },
+            )
+            .ok_or(SnapshotError::IntegrityViolation)?;
+        ids.push(id);
+    }
+    Ok(())
+}
+
+/// Resolves one staged slot value into a heap value, mapping object and
+/// function references through the restored identities. References into
+/// reclaimed holes (`Id::ZERO` padding) fail closed.
 fn resolve_staged_value(
     runtime: &mut Runtime,
     value: StagedValue,
     object_ids: &[ObjectId],
+    function_ids: &[FunctionId],
 ) -> Result<StoredValue, SnapshotError> {
     Ok(match value {
         StagedValue::Undefined => StoredValue::Undefined,
@@ -713,15 +1197,25 @@ fn resolve_staged_value(
         }
         StagedValue::Object(index) => {
             let target = *object_ids.get(index).ok_or(SnapshotError::IntegrityViolation)?;
+            if target == ObjectId::ZERO {
+                return Err(SnapshotError::IntegrityViolation);
+            }
             StoredValue::Object(target)
         }
-        StagedValue::Function(_) => return Err(SnapshotError::IntegrityViolation),
+        StagedValue::Function(index) => {
+            let target = *function_ids.get(index).ok_or(SnapshotError::IntegrityViolation)?;
+            if target == FunctionId::ZERO {
+                return Err(SnapshotError::IntegrityViolation);
+            }
+            StoredValue::Function(target)
+        }
     })
 }
 
 
 /// One staged (not yet resolved) function from the functions section.
 struct StagedFunction {
+    index: usize,
     kind: StagedFunctionKind,
     record: StagedObject,
 }
@@ -731,6 +1225,8 @@ enum StagedFunctionKind {
         code: usize,
         template: u32,
         environment: Vec<(u8, u32)>,
+        eval_environment: Option<u32>,
+        environment_eval_shadows: Vec<Option<(u32, Option<u32>)>>,
         lexical_receiver: Option<StagedValue>,
         lexical_eval_in_function: bool,
         lexical_eval_in_class_field_initializer: bool,
@@ -741,16 +1237,47 @@ enum StagedFunctionKind {
         home_object: Option<(u8, u32)>,
     },
     Host {
+        realm: Option<usize>,
         slot: u32,
     },
 }
 
-/// Encodes every heap function and the distinct installed-code
-/// authorities they reference (format above). Direct-eval machinery,
-/// engine intrinsics, and non-bytecode implementation kinds fail closed
-/// (§8.2).
-fn encode_functions(runtime: &Runtime) -> Result<Vec<u8>, SnapshotError> {
-    let mut code_payloads: Vec<(usize, Vec<u8>)> = Vec::new();
+/// Interns one shared eval-variable environment into the ordinal map,
+/// interning parents first so parent ordinals precede children (decode
+/// rebuilds topologically). Nodes deduplicate by `Rc` identity — the
+/// graph is shared across functions by construction.
+fn intern_environment(
+    environment: &SharedEvalVariableEnvironment,
+    ordinals: &mut std::collections::HashMap<usize, u32>,
+    nodes: &mut Vec<SharedEvalVariableEnvironment>,
+) -> Result<u32, SnapshotError> {
+    let pointer = std::rc::Rc::as_ptr(environment) as usize;
+    if let Some(ordinal) = ordinals.get(&pointer) {
+        return Ok(*ordinal);
+    }
+    if nodes.len() > 1_000_000 {
+        return Err(SnapshotError::IntegrityViolation);
+    }
+    if let Some(parent) = environment.borrow().parent.clone() {
+        intern_environment(&parent, ordinals, nodes)?;
+    }
+    let ordinal = nodes.len() as u32;
+    ordinals.insert(pointer, ordinal);
+    nodes.push(std::rc::Rc::clone(environment));
+    Ok(ordinal)
+}
+
+/// Encodes every user function (arena index ≥ the realm watermark) and
+/// the distinct installed-code authorities they reference (format above),
+/// gap-encoded by index. Each code record carries its installing realm;
+/// host functions carry their realm explicitly. The shared eval-variable
+/// environment DAG rides along as a node list. Engine intrinsics and
+/// non-bytecode implementation kinds fail closed (§8.2).
+fn encode_functions(
+    runtime: &Runtime,
+    watermark: usize,
+) -> Result<Vec<u8>, SnapshotError> {
+    let mut code_payloads: Vec<(usize, RealmId, Vec<u8>)> = Vec::new();
     for (code_id, code) in runtime.code.iter() {
         let encoded = fusor_bytecode::encode_verified_bytecode(&code.authority).map_err(|error| {
             SnapshotError::Unsupported {
@@ -760,21 +1287,83 @@ fn encode_functions(runtime: &Runtime) -> Result<Vec<u8>, SnapshotError> {
                 },
             }
         })?;
-        code_payloads.push((code_id.index(), encoded));
+        code_payloads.push((code_id.index(), code.realm, encoded));
     }
     let code_ordinals: std::collections::HashMap<usize, u32> = code_payloads
         .iter()
         .enumerate()
-        .map(|(ordinal, (index, _))| (*index, ordinal as u32))
+        .map(|(ordinal, (index, _, _))| (*index, ordinal as u32))
         .collect();
     let mut payload = Vec::new();
     payload.extend_from_slice(&(code_payloads.len() as u32).to_le_bytes());
-    for (_, encoded) in &code_payloads {
+    for (index, realm, encoded) in &code_payloads {
+        payload.extend_from_slice(&(*index as u32).to_le_bytes());
+        if *realm == RealmId::ZERO {
+            payload.push(0);
+        } else {
+            payload.push(1);
+            payload.extend_from_slice(&(realm.index() as u32).to_le_bytes());
+        }
         payload.extend_from_slice(&(encoded.len() as u32).to_le_bytes());
         payload.extend_from_slice(encoded);
     }
-    payload.extend_from_slice(&(runtime.functions.len() as u32).to_le_bytes());
-    for (function_id, function) in runtime.functions.iter() {
+    let user_functions: Vec<_> = runtime
+        .functions
+        .iter()
+        .filter(|(id, _)| id.index() >= watermark)
+        .collect();
+    // Collect the shared eval-variable environment DAG across every
+    // bytecode function (pre-pass: the node list precedes the function
+    // records in the payload).
+    let mut env_ordinals = std::collections::HashMap::new();
+    let mut env_nodes: Vec<SharedEvalVariableEnvironment> = Vec::new();
+    for (_, function) in &user_functions {
+        let FunctionImplementation::Bytecode(bytecode) = &function.implementation else {
+            continue;
+        };
+        if let Some(environment) = &bytecode.eval_environment {
+            intern_environment(environment, &mut env_ordinals, &mut env_nodes)?;
+        }
+        for shadow in bytecode.environment_eval_shadows.iter().flatten() {
+            intern_environment(&shadow.head, &mut env_ordinals, &mut env_nodes)?;
+            if let Some(boundary) = &shadow.boundary {
+                intern_environment(boundary, &mut env_ordinals, &mut env_nodes)?;
+            }
+        }
+    }
+    payload.extend_from_slice(&(env_nodes.len() as u32).to_le_bytes());
+    for node in &env_nodes {
+        let record = node.borrow();
+        payload.push(match record.kind {
+            EvalVariableEnvironmentKind::Function => 0,
+            EvalVariableEnvironmentKind::ParameterInitializer => 1,
+            EvalVariableEnvironmentKind::ParameterBoundary => 2,
+            EvalVariableEnvironmentKind::FunctionBody => 3,
+        });
+        match &record.parent {
+            None => payload.push(0),
+            Some(parent) => {
+                payload.push(1);
+                let ordinal = *env_ordinals
+                    .get(&(std::rc::Rc::as_ptr(parent) as usize))
+                    .ok_or(SnapshotError::IntegrityViolation)?;
+                payload.extend_from_slice(&ordinal.to_le_bytes());
+            }
+        }
+        payload.extend_from_slice(&(record.bindings.len() as u32).to_le_bytes());
+        for binding in &record.bindings {
+            let units: Vec<u16> = binding.name.code_units().collect();
+            payload.extend_from_slice(&(units.len() as u32).to_le_bytes());
+            for unit in units {
+                payload.extend_from_slice(&unit.to_le_bytes());
+            }
+            payload.extend_from_slice(&(binding.cell.index() as u32).to_le_bytes());
+            payload.push(u8::from(binding.deleted));
+        }
+    }
+    payload.extend_from_slice(&(user_functions.len() as u32).to_le_bytes());
+    for (function_id, function) in user_functions {
+        payload.extend_from_slice(&(function_id.index() as u32).to_le_bytes());
         match &function.implementation {
             FunctionImplementation::Bytecode(bytecode) => {
                 payload.push(0);
@@ -796,16 +1385,47 @@ fn encode_functions(runtime: &Runtime) -> Result<Vec<u8>, SnapshotError> {
                         }
                     }
                 }
-                if !bytecode.environment_eval_shadows.is_empty()
-                    || bytecode.eval_environment.is_some()
-                {
-                    return Err(SnapshotError::Unsupported {
-                        index: function_id.index(),
-                        what: "a direct-eval environment",
-                    });
+                match &bytecode.eval_environment {
+                    None => payload.push(0),
+                    Some(environment) => {
+                        payload.push(1);
+                        let ordinal = intern_environment(
+                            environment,
+                            &mut env_ordinals,
+                            &mut env_nodes,
+                        )?;
+                        payload.extend_from_slice(&ordinal.to_le_bytes());
+                    }
                 }
-                payload.push(0);
-                payload.push(0);
+                payload.extend_from_slice(
+                    &(bytecode.environment_eval_shadows.len() as u32).to_le_bytes(),
+                );
+                for shadow in &bytecode.environment_eval_shadows {
+                    match shadow {
+                        None => payload.push(0),
+                        Some(shadow) => {
+                            payload.push(1);
+                            let head = intern_environment(
+                                &shadow.head,
+                                &mut env_ordinals,
+                                &mut env_nodes,
+                            )?;
+                            payload.extend_from_slice(&head.to_le_bytes());
+                            match &shadow.boundary {
+                                None => payload.push(0),
+                                Some(boundary) => {
+                                    payload.push(1);
+                                    let boundary = intern_environment(
+                                        boundary,
+                                        &mut env_ordinals,
+                                        &mut env_nodes,
+                                    )?;
+                                    payload.extend_from_slice(&boundary.to_le_bytes());
+                                }
+                            }
+                        }
+                    }
+                }
                 match &bytecode.lexical_receiver {
                     Some(value) => {
                         payload.push(1);
@@ -850,6 +1470,12 @@ fn encode_functions(runtime: &Runtime) -> Result<Vec<u8>, SnapshotError> {
             FunctionImplementation::Native(native) => match native.kind {
                 crate::runtime::NativeFunctionKind::Host(slot) => {
                     payload.push(1);
+                    if native.realm == RealmId::ZERO {
+                        payload.push(0);
+                    } else {
+                        payload.push(1);
+                        payload.extend_from_slice(&(native.realm.index() as u32).to_le_bytes());
+                    }
                     payload.extend_from_slice(&(slot.index() as u32).to_le_bytes());
                     encode_object_record_payload(&mut payload, &function.object).map_err(|what| {
                         SnapshotError::Unsupported {
@@ -870,6 +1496,57 @@ fn encode_functions(runtime: &Runtime) -> Result<Vec<u8>, SnapshotError> {
                     index: function_id.index(),
                     what: "a non-bytecode function kind",
                 });
+            }
+        }
+    }
+    Ok(payload)
+}
+
+/// Encodes the realm table (format above): identities and segment
+/// watermarks per realm, plus the realm's global-object record so user
+/// mutations on `globalThis` restore on top of the replayed intrinsic
+/// graph — the rest of the intrinsic graph is never serialized (§8.2).
+fn encode_realms(runtime: &Runtime, records: &[RealmRecord]) -> Result<Vec<u8>, SnapshotError> {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&(records.len() as u32).to_le_bytes());
+    for record in records {
+        payload.extend_from_slice(&(record.object_prototype as u32).to_le_bytes());
+        payload.extend_from_slice(&(record.global_object as u32).to_le_bytes());
+        payload.extend_from_slice(&record.math_random_state.to_le_bytes());
+        payload.extend_from_slice(&(record.objects.0 as u32).to_le_bytes());
+        payload.extend_from_slice(&(record.objects.1 as u32).to_le_bytes());
+        payload.extend_from_slice(&(record.functions.0 as u32).to_le_bytes());
+        payload.extend_from_slice(&(record.functions.1 as u32).to_le_bytes());
+        let global = runtime
+            .objects
+            .get(runtime.objects.id_from_index(record.global_object))
+            .ok_or(SnapshotError::IntegrityViolation)?;
+        encode_object_record_payload(&mut payload, &global.record).map_err(|what| {
+            SnapshotError::Unsupported {
+                index: record.global_object,
+                what,
+            }
+        })?;
+    }
+    Ok(payload)
+}
+
+/// Encodes the global-bindings arena (format above): per binding the
+/// arena index, owning realm index, name atom content, and state.
+fn encode_bindings(runtime: &Runtime) -> Result<Vec<u8>, SnapshotError> {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&(runtime.global_bindings.len() as u32).to_le_bytes());
+    for (id, binding) in runtime.global_bindings.iter() {
+        payload.extend_from_slice(&(id.index() as u32).to_le_bytes());
+        payload.extend_from_slice(&(binding.realm.index() as u32).to_le_bytes());
+        encode_atom_content(&mut payload, &binding.name);
+        match &binding.state {
+            RealmGlobalBindingState::Unresolved => payload.push(0),
+            RealmGlobalBindingState::Object => payload.push(1),
+            RealmGlobalBindingState::Lexical { cell, mutable } => {
+                payload.push(2);
+                payload.extend_from_slice(&(cell.index() as u32).to_le_bytes());
+                payload.push(u8::from(*mutable));
             }
         }
     }
@@ -899,8 +1576,9 @@ fn encode_object_record_payload(
             buffer.push(1);
             buffer.extend_from_slice(&(target.index() as u32).to_le_bytes());
         }
-        Some(HeapReference::Function(_)) => {
-            return Err("a function prototype");
+        Some(HeapReference::Function(target)) => {
+            buffer.push(2);
+            buffer.extend_from_slice(&(target.index() as u32).to_le_bytes());
         }
     }
     buffer.push(u8::from(record.is_extensible()));
@@ -983,6 +1661,9 @@ fn decode_object_record_content(
         slots.push(decode_staged_value(reader)?);
     }
     Ok(StagedObject {
+        // Filled by the section decoders; the shared record content is
+        // index-agnostic.
+        index: 0,
         prototype,
         extensible,
         is_html_dda,
@@ -991,24 +1672,77 @@ fn decode_object_record_content(
     })
 }
 
-/// Decodes the functions-section payload into the distinct authorities
-/// and the staged functions.
+/// One staged (not yet resolved) eval-variable environment node.
+struct StagedEnvironment {
+    kind: u8,
+    parent: Option<u32>,
+    bindings: Vec<(Vec<u16>, u32, bool)>,
+}
+
+/// Decodes the functions-section payload into the distinct authorities,
+/// the shared environment DAG, and the staged functions.
 fn decode_functions(
     payload: &[u8],
-) -> Result<(Vec<Arc<VerifiedBytecode>>, Vec<StagedFunction>), SnapshotError> {
+) -> Result<
+    (
+        Vec<(usize, Option<usize>, Arc<VerifiedBytecode>)>,
+        Vec<StagedEnvironment>,
+        Vec<StagedFunction>,
+    ),
+    SnapshotError,
+> {
     let mut reader = codec::Reader::new(payload);
     let code_count = reader.read_u32()?;
     let mut authorities = Vec::new();
     for _ in 0..code_count {
+        let code_index = reader.read_u32()? as usize;
+        let realm = match reader.read_u8()? {
+            0 => None,
+            1 => Some(reader.read_u32()? as usize),
+            other => return Err(SnapshotError::FormatMismatch { found: u32::from(other) }),
+        };
         let length = reader.read_u32()? as usize;
         let encoded = reader.read_bytes(length)?;
         let authority = fusor_bytecode::decode_verified_bytecode(encoded)
             .map_err(|error| SnapshotError::Bytecode(error.to_string()))?;
-        authorities.push(Arc::new(authority));
+        authorities.push((code_index, realm, Arc::new(authority)));
+    }
+    let env_count = reader.read_u32()?;
+    let mut environments = Vec::new();
+    for _ in 0..env_count {
+        let kind = match reader.read_u8()? {
+            kind @ 0..=3 => kind,
+            other => return Err(SnapshotError::FormatMismatch { found: u32::from(other) }),
+        };
+        let parent = match reader.read_u8()? {
+            0 => None,
+            1 => {
+                let parent = reader.read_u32()?;
+                if parent as usize >= environments.len() {
+                    return Err(SnapshotError::IntegrityViolation);
+                }
+                Some(parent)
+            }
+            other => return Err(SnapshotError::FormatMismatch { found: u32::from(other) }),
+        };
+        let binding_count = reader.read_u32()?;
+        let mut bindings = Vec::new();
+        for _ in 0..binding_count {
+            let unit_count = reader.read_u32()?;
+            let mut units = Vec::new();
+            for _ in 0..unit_count {
+                units.push(reader.read_u16()?);
+            }
+            let cell = reader.read_u32()?;
+            let deleted = reader.read_u8()? != 0;
+            bindings.push((units, cell, deleted));
+        }
+        environments.push(StagedEnvironment { kind, parent, bindings });
     }
     let function_count = reader.read_u32()?;
     let mut functions = Vec::new();
     for _ in 0..function_count {
+        let index = reader.read_u32()? as usize;
         let kind = reader.read_u8()?;
         match kind {
             0 => {
@@ -1026,10 +1760,50 @@ fn decode_functions(
                         }
                     }
                 }
-                let eval_shadows = reader.read_u8()?;
-                let eval_environment = reader.read_u8()?;
-                if eval_shadows != 0 || eval_environment != 0 {
-                    return Err(SnapshotError::IntegrityViolation);
+                let eval_environment = match reader.read_u8()? {
+                    0 => None,
+                    1 => {
+                        let ordinal = reader.read_u32()?;
+                        if ordinal as usize >= environments.len() {
+                            return Err(SnapshotError::IntegrityViolation);
+                        }
+                        Some(ordinal)
+                    }
+                    other => {
+                        return Err(SnapshotError::FormatMismatch { found: u32::from(other) });
+                    }
+                };
+                let shadow_count = reader.read_u32()?;
+                let mut environment_eval_shadows = Vec::new();
+                for _ in 0..shadow_count {
+                    environment_eval_shadows.push(match reader.read_u8()? {
+                        0 => None,
+                        1 => {
+                            let head = reader.read_u32()?;
+                            if head as usize >= environments.len() {
+                                return Err(SnapshotError::IntegrityViolation);
+                            }
+                            let boundary = match reader.read_u8()? {
+                                0 => None,
+                                1 => {
+                                    let boundary = reader.read_u32()?;
+                                    if boundary as usize >= environments.len() {
+                                        return Err(SnapshotError::IntegrityViolation);
+                                    }
+                                    Some(boundary)
+                                }
+                                other => {
+                                    return Err(SnapshotError::FormatMismatch {
+                                        found: u32::from(other),
+                                    });
+                                }
+                            };
+                            Some((head, boundary))
+                        }
+                        other => {
+                            return Err(SnapshotError::FormatMismatch { found: u32::from(other) });
+                        }
+                    });
                 }
                 let lexical_receiver = match reader.read_u8()? {
                     0 => None,
@@ -1060,10 +1834,13 @@ fn decode_functions(
                 };
                 let record = decode_object_record_content(&mut reader)?;
                 functions.push(StagedFunction {
+                    index,
                     kind: StagedFunctionKind::Bytecode {
                         code,
                         template,
                         environment,
+                        eval_environment,
+                        environment_eval_shadows,
                         lexical_receiver,
                         lexical_eval_in_function,
                         lexical_eval_in_class_field_initializer,
@@ -1077,10 +1854,18 @@ fn decode_functions(
                 });
             }
             1 => {
+                let realm = match reader.read_u8()? {
+                    0 => None,
+                    1 => Some(reader.read_u32()? as usize),
+                    other => {
+                        return Err(SnapshotError::FormatMismatch { found: u32::from(other) });
+                    }
+                };
                 let slot = reader.read_u32()?;
                 let record = decode_object_record_content(&mut reader)?;
                 functions.push(StagedFunction {
-                    kind: StagedFunctionKind::Host { slot },
+                    index,
+                    kind: StagedFunctionKind::Host { realm, slot },
                     record,
                 });
             }
@@ -1090,7 +1875,7 @@ fn decode_functions(
     if reader.remaining() != 0 {
         return Err(SnapshotError::Truncated);
     }
-    Ok((authorities, functions))
+    Ok((authorities, environments, functions))
 }
 
 fn read_function_ref(reader: &mut codec::Reader<'_>) -> Result<Option<usize>, SnapshotError> {
@@ -1143,9 +1928,12 @@ fn resolve_object_record(
                 let target = *function_ids
                     .get(index)
                     .ok_or(SnapshotError::IntegrityViolation)?;
+                if target == FunctionId::ZERO {
+                    return Err(SnapshotError::IntegrityViolation);
+                }
                 StoredValue::Function(target)
             }
-            other => resolve_staged_value(runtime, other, object_ids)?,
+            other => resolve_staged_value(runtime, other, object_ids, function_ids)?,
         };
         slots.push(PropertySlot::Data(value));
     }
@@ -1153,12 +1941,18 @@ fn resolve_object_record(
         None => None,
         Some((1, index)) => {
             let target = *object_ids.get(index).ok_or(SnapshotError::IntegrityViolation)?;
+            if target == ObjectId::ZERO {
+                return Err(SnapshotError::IntegrityViolation);
+            }
             Some(HeapReference::Object(target))
         }
         Some((2, index)) => {
             let target = *function_ids
                 .get(index)
                 .ok_or(SnapshotError::IntegrityViolation)?;
+            if target == FunctionId::ZERO {
+                return Err(SnapshotError::IntegrityViolation);
+            }
             Some(HeapReference::Function(target))
         }
         Some(_) => return Err(SnapshotError::IntegrityViolation),
@@ -1178,42 +1972,123 @@ struct PendingFunction {
     home_object: Option<(u8, u32)>,
     lexical_new_target: Option<usize>,
     lexical_derived_constructor: Option<usize>,
+    lexical_receiver: Option<StagedValue>,
 }
 
-/// Restores the staged functions: authorities re-install (load-time
-/// verification, §8.3), functions insert in decode order so their
-/// identities match the encoded indices, then record contents and
-/// cross-references patch once every id exists.
+/// Restores the staged functions: authorities re-install at their
+/// recorded arena indices (load-time verification, §8.3) and functions
+/// insert at their recorded indices with the realm prefix resolved to
+/// the replayed realms. Returns the arena-index → identity mapping and
+/// the record contents waiting on every function id (patched by
+/// [`resolve_function_records`]).
+#[allow(
+    clippy::too_many_lines,
+    reason = "one exhaustive staged-function placement keeps every arena index in order"
+)]
 fn restore_functions(
     runtime: &mut Runtime,
-    authorities: Vec<Arc<VerifiedBytecode>>,
+    authorities: Vec<(usize, Option<usize>, Arc<VerifiedBytecode>)>,
+    environments: Vec<StagedEnvironment>,
     staged: Vec<StagedFunction>,
-    object_ids: &[ObjectId],
-) -> Result<(), SnapshotError> {
-    let mut code_ids = Vec::new();
-    for authority in authorities {
+    watermark: usize,
+    realms: &[Realm],
+) -> Result<(Vec<FunctionId>, Vec<(FunctionId, PendingFunction)>), SnapshotError> {
+    let realm_id = |index: usize| -> Result<RealmId, SnapshotError> {
+        realms
+            .get(index)
+            .map(crate::Realm::id)
+            .ok_or(SnapshotError::IntegrityViolation)
+    };
+    // Rebuild the shared eval-variable environment DAG first (parent
+    // ordinals precede children by construction, so child links resolve
+    // topologically).
+    let mut environment_ids: Vec<SharedEvalVariableEnvironment> = Vec::new();
+    for environment in environments {
+        let parent = match environment.parent {
+            None => None,
+            Some(ordinal) => Some(std::rc::Rc::clone(
+                environment_ids
+                    .get(ordinal as usize)
+                    .ok_or(SnapshotError::IntegrityViolation)?,
+            )),
+        };
+        let record = EvalVariableEnvironment {
+            kind: match environment.kind {
+                0 => EvalVariableEnvironmentKind::Function,
+                1 => EvalVariableEnvironmentKind::ParameterInitializer,
+                2 => EvalVariableEnvironmentKind::ParameterBoundary,
+                3 => EvalVariableEnvironmentKind::FunctionBody,
+                other => {
+                    return Err(SnapshotError::FormatMismatch { found: u32::from(other) });
+                }
+            },
+            parent,
+            bindings: Vec::new(),
+        };
+        let node = std::rc::Rc::new(std::cell::RefCell::new(record));
+        {
+            let mut node = node.borrow_mut();
+            for (units, cell, deleted) in environment.bindings {
+                let name = JsString::from_code_units(units).map_err(SnapshotError::String)?;
+                node.bindings.push(crate::runtime::EvalVariableBinding {
+                    name,
+                    cell: runtime.cells.id_from_index(cell as usize),
+                    deleted,
+                });
+            }
+        }
+        environment_ids.push(node);
+    }
+    let mut code_ids: Vec<crate::ids::InstalledCodeId> = Vec::new();
+    let mut code_ordinal_ids: Vec<crate::ids::InstalledCodeId> = Vec::new();
+    for (index, realm, authority) in authorities {
+        if index < code_ids.len() {
+            return Err(SnapshotError::IntegrityViolation);
+        }
+        while code_ids.len() < index {
+            code_ids.push(crate::ids::InstalledCodeId::ZERO);
+        }
+        let realm = match realm {
+            None => RealmId::ZERO,
+            Some(index) => realm_id(index)?,
+        };
         let templates = runtime
             .stage_templates(&authority)
             .map_err(|_| SnapshotError::IntegrityViolation)?;
         let id = runtime
             .code
-            .try_insert(InstalledCode {
-                authority,
-                realm: RealmId::ZERO,
-                templates,
-                live_functions: 0,
-            })
-            .map_err(|_| SnapshotError::IntegrityViolation)?;
+            .restore_insert(
+                index,
+                InstalledCode {
+                    authority,
+                    realm,
+                    templates,
+                    live_functions: 0,
+                },
+            )
+            .ok_or(SnapshotError::IntegrityViolation)?;
         code_ids.push(id);
+        code_ordinal_ids.push(id);
     }
-    let mut function_ids = Vec::new();
+    let mut function_ids: Vec<FunctionId> = (0..watermark)
+        .map(|index| runtime.functions.id_from_index(index))
+        .collect();
     let mut pending = Vec::new();
     for function in staged {
+        let index = function.index;
+        if index < watermark || index < function_ids.len() {
+            return Err(SnapshotError::IntegrityViolation);
+        }
+        while function_ids.len() < index {
+            function_ids.push(FunctionId::ZERO);
+        }
         let implementation = match function.kind {
             StagedFunctionKind::Bytecode {
                 code,
                 template,
                 environment,
+                eval_environment,
+                environment_eval_shadows,
                 lexical_receiver,
                 lexical_eval_in_function,
                 lexical_eval_in_class_field_initializer,
@@ -1223,7 +2098,9 @@ fn restore_functions(
                 has_instance_elements,
                 home_object,
             } => {
-                let code = *code_ids.get(code).ok_or(SnapshotError::IntegrityViolation)?;
+                let code = *code_ordinal_ids
+                    .get(code)
+                    .ok_or(SnapshotError::IntegrityViolation)?;
                 let mut bindings = Vec::new();
                 for (tag, index) in environment {
                     match tag {
@@ -1236,23 +2113,49 @@ fn restore_functions(
                         _ => return Err(SnapshotError::IntegrityViolation),
                     }
                 }
-                let lexical_receiver = match lexical_receiver {
-                    Some(value) => Some(resolve_staged_value(runtime, value, object_ids)?),
+                let eval_environment = match eval_environment {
                     None => None,
+                    Some(ordinal) => Some(std::rc::Rc::clone(
+                        environment_ids
+                            .get(ordinal as usize)
+                            .ok_or(SnapshotError::IntegrityViolation)?,
+                    )),
                 };
+                let mut eval_shadows = Vec::new();
+                for shadow in environment_eval_shadows {
+                    eval_shadows.push(match shadow {
+                        None => None,
+                        Some((head, boundary)) => Some(EvalBindingShadow {
+                            head: std::rc::Rc::clone(
+                                environment_ids
+                                    .get(head as usize)
+                                    .ok_or(SnapshotError::IntegrityViolation)?,
+                            ),
+                            boundary: match boundary {
+                                None => None,
+                                Some(boundary) => Some(std::rc::Rc::clone(
+                                    environment_ids
+                                        .get(boundary as usize)
+                                        .ok_or(SnapshotError::IntegrityViolation)?,
+                                )),
+                            },
+                        }),
+                    });
+                }
                 pending.push(PendingFunction {
                     record: function.record,
                     home_object,
                     lexical_new_target,
                     lexical_derived_constructor,
+                    lexical_receiver,
                 });
                 FunctionImplementation::Bytecode(BytecodeFunction {
                     code,
                     template: fusor_bytecode::FunctionTemplateId::new(template),
                     environment: bindings,
-                    environment_eval_shadows: Vec::new(),
-                    eval_environment: None,
-                    lexical_receiver,
+                    environment_eval_shadows: eval_shadows,
+                    eval_environment,
+                    lexical_receiver: None,
                     lexical_eval_in_function,
                     lexical_eval_in_class_field_initializer,
                     lexical_new_target: None,
@@ -1263,15 +2166,20 @@ fn restore_functions(
                     home_object: None,
                 })
             }
-            StagedFunctionKind::Host { slot } => {
+            StagedFunctionKind::Host { realm, slot } => {
+                let realm = match realm {
+                    None => RealmId::ZERO,
+                    Some(index) => realm_id(index)?,
+                };
                 pending.push(PendingFunction {
                     record: function.record,
                     home_object: None,
                     lexical_new_target: None,
                     lexical_derived_constructor: None,
+                    lexical_receiver: None,
                 });
                 FunctionImplementation::Native(crate::runtime::NativeFunction {
-                    realm: RealmId::ZERO,
+                    realm,
                     kind: crate::runtime::NativeFunctionKind::Host(
                         crate::HostFunctionId::new(slot as usize),
                     ),
@@ -1279,27 +2187,84 @@ fn restore_functions(
             }
         };
         let id = runtime
-            .insert_heap_function(HeapFunction {
-                implementation,
-                object: ObjectRecord::from_parts(
-                    None,
-                    true,
-                    false,
-                    std::sync::Arc::new(Vec::new()),
-                    Some(runtime.shape_interner.clone()),
-                    Vec::new(),
-                ),
-                public_roots: 0,
-            })
-            .map_err(|_| SnapshotError::IntegrityViolation)?;
+            .functions
+            .restore_insert(
+                index,
+                HeapFunction {
+                    implementation,
+                    object: ObjectRecord::from_parts(
+                        None,
+                        true,
+                        false,
+                        std::sync::Arc::new(Vec::new()),
+                        Some(runtime.shape_interner.clone()),
+                        Vec::new(),
+                    ),
+                    public_roots: 0,
+                },
+            )
+            .ok_or(SnapshotError::IntegrityViolation)?;
         function_ids.push(id);
     }
-    for (function_id, pending) in function_ids.iter().copied().zip(pending) {
-        let record = resolve_object_record(runtime, pending.record, object_ids, &function_ids)?;
+    let pending: Vec<_> = function_ids
+        .iter()
+        .skip(watermark)
+        .copied()
+        .filter(|id| *id != FunctionId::ZERO)
+        .zip(pending)
+        .collect();
+    Ok((function_ids, pending))
+}
+
+/// Patches the staged function records once every object and function id
+/// exists: record contents (shapes, slots, prototypes) resolve, then the
+/// deferred cross-references (`home_object`, `new.target` links, lexical
+/// receivers) attach.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one exhaustive cross-reference patch keeps every deferred edge in order"
+)]
+fn resolve_function_records(
+    runtime: &mut Runtime,
+    pending: Vec<(FunctionId, PendingFunction)>,
+    object_ids: &[ObjectId],
+    function_ids: &[FunctionId],
+) -> Result<(), SnapshotError> {
+    // The cells arena restores after the function placeholders: validate
+    // every eval-environment cell reference now (fail closed, §8.3).
+    let mut referenced_cells = std::collections::HashSet::new();
+    for (_, function) in runtime.functions.iter() {
+        let FunctionImplementation::Bytecode(bytecode) = &function.implementation else {
+            continue;
+        };
+        if let Some(environment) = &bytecode.eval_environment {
+            EvalVariableEnvironment::trace_cells(environment, |cell| {
+                referenced_cells.insert(cell);
+            });
+        }
+        for shadow in bytecode.environment_eval_shadows.iter().flatten() {
+            EvalVariableEnvironment::trace_cells(&shadow.head, |cell| {
+                referenced_cells.insert(cell);
+            });
+            if let Some(boundary) = &shadow.boundary {
+                EvalVariableEnvironment::trace_cells(boundary, |cell| {
+                    referenced_cells.insert(cell);
+                });
+            }
+        }
+    }
+    for cell in referenced_cells {
+        if runtime.cells.get(cell).is_none() {
+            return Err(SnapshotError::IntegrityViolation);
+        }
+    }
+    for (function_id, pending) in pending {
+        let record = resolve_object_record(runtime, pending.record, object_ids, function_ids)?;
         let lexical_new_target = match pending.lexical_new_target {
             Some(index) => Some(
                 *function_ids
                     .get(index as usize)
+                    .filter(|id| **id != FunctionId::ZERO)
                     .ok_or(SnapshotError::IntegrityViolation)?,
             ),
             None => None,
@@ -1308,8 +2273,13 @@ fn restore_functions(
             Some(index) => Some(
                 *function_ids
                     .get(index as usize)
+                    .filter(|id| **id != FunctionId::ZERO)
                     .ok_or(SnapshotError::IntegrityViolation)?,
             ),
+            None => None,
+        };
+        let lexical_receiver = match pending.lexical_receiver {
+            Some(value) => Some(resolve_staged_value(runtime, value, object_ids, function_ids)?),
             None => None,
         };
         let home_object = match pending.home_object {
@@ -1317,12 +2287,14 @@ fn restore_functions(
             Some((1, index)) => {
                 let target = *object_ids
                     .get(index as usize)
+                    .filter(|id| **id != ObjectId::ZERO)
                     .ok_or(SnapshotError::IntegrityViolation)?;
                 Some(HeapReference::Object(target))
             }
             Some((2, index)) => {
                 let target = *function_ids
                     .get(index as usize)
+                    .filter(|id| **id != FunctionId::ZERO)
                     .ok_or(SnapshotError::IntegrityViolation)?;
                 Some(HeapReference::Function(target))
             }
@@ -1339,6 +2311,7 @@ fn restore_functions(
         bytecode.home_object = home_object;
         bytecode.lexical_new_target = lexical_new_target;
         bytecode.lexical_derived_constructor = lexical_derived_constructor;
+        bytecode.lexical_receiver = lexical_receiver;
     }
     // live_functions accounting: count bytecode functions per code.
     let live_counts: Vec<(crate::ids::InstalledCodeId, u64)> = {

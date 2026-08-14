@@ -96,6 +96,10 @@ impl RealmBuildTransaction<'_> {
                 global_bindings: HashMap::new(),
                 math_random_state: 1,
                 module_registry: HashMap::new(),
+                snapshot_segment: crate::runtime::RealmSnapshotSegment {
+                    objects: (0, 0),
+                    functions: (0, 0),
+                },
             })
             .expect("the realm transaction reserved its realm slot");
         self.record_realm(realm);

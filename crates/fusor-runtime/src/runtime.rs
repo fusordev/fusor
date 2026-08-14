@@ -89,16 +89,28 @@ pub(crate) use typed_arrays::{
     typed_array_write_element,
 };
 
-struct RealmState {
-    object_prototype: ObjectId,
-    global_object: ObjectId,
+/// The per-realm arena segments captured at realm creation (snapshot
+/// §8.2): the intrinsic graph's records occupy these contiguous
+/// first-generation spans and are rebuilt deterministically on restore
+/// instead of being serialized as heap records.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct RealmSnapshotSegment {
+    pub(crate) objects: (usize, usize),
+    pub(crate) functions: (usize, usize),
+}
+
+pub(crate) struct RealmState {
+    pub(crate) object_prototype: ObjectId,
+    pub(crate) global_object: ObjectId,
     intrinsics: RealmIntrinsics,
-    global_bindings: HashMap<Atom, RealmGlobalBindingId>,
+    pub(crate) global_bindings: HashMap<Atom, RealmGlobalBindingId>,
     /// Realm-local state for the implementation-defined `%Math.random%`
     /// pseudorandom sequence. Xorshift64* requires a non-zero state.
-    math_random_state: u64,
+    pub(crate) math_random_state: u64,
     /// Per-realm module registry: canonical key → module record id.
-    module_registry: HashMap<ModuleKey, ModuleRecordId>,
+    pub(crate) module_registry: HashMap<ModuleKey, ModuleRecordId>,
+    /// Arena segments this realm's intrinsic graph occupies (§8.2).
+    pub(crate) snapshot_segment: RealmSnapshotSegment,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -556,6 +568,12 @@ impl std::fmt::Debug for Realm {
             .field("generation", &self.0.id.generation())
             .field("orphaned", &self.0.owner.upgrade().is_none())
             .finish()
+    }
+}
+
+impl Realm {
+    pub(crate) fn id(&self) -> RealmId {
+        self.0.id
     }
 }
 
@@ -5527,7 +5545,7 @@ pub(crate) fn global_declaration_error(
 pub struct Runtime {
     pub(crate) mailbox: Arc<ReleaseMailbox>,
     pub(crate) atoms: AtomTable,
-    realms: Arena<crate::ids::RealmMarker, RealmState>,
+    pub(crate) realms: Arena<crate::ids::RealmMarker, RealmState>,
     pub(crate) code: Arena<crate::ids::InstalledCodeMarker, InstalledCode>,
     pub(crate) functions: Arena<crate::ids::FunctionMarker, HeapFunction>,
     pub(crate) objects: Arena<crate::ids::ObjectMarker, HeapObject>,

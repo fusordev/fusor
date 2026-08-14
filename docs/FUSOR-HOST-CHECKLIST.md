@@ -99,11 +99,11 @@
 
 ## 子项目 5:Snapshot 与初始化脚本(fusor-runtime + fusor-host)§8
 
-- [ ] 序列化:全部 heap records、shapes、atoms 表、模块注册表、realm 表、binding cells
-- [ ] host Function 解耦:blob 记录槽位 + op 元数据;恢复时重建 op 闭包表并重绑定(不匹配 fail closed)
-- [ ] 资源不进快照:文档化约束 + 启动期惰性重建模式
-- [ ] 自写紧凑二进制 codec(零新依赖);magic + 格式戳 + 结构校验,加载即校验
-- [ ] 失败路径:截断/篡改/格式戳/op 集不匹配 → `SnapshotError`,无 panic、干净 drop
+- [ ] 序列化:全部 heap records、shapes、atoms 表、模块注册表、realm 表、binding cells(atoms/对象/cells/函数/realm 表/全局 binding 表已落地;剩模块注册表 + Map/Set 等异形对象实例切片)
+- [x] host Function 解耦:blob 记录槽位 + op 元数据;恢复时重建 op 闭包表并重绑定(不匹配 fail closed)
+- [x] 资源不进快照:文档化约束 + 启动期惰性重建模式(§8.2 已文档化;startup 模式随条目 107)
+- [x] 自写紧凑二进制 codec(零新依赖);magic + 格式戳 + 结构校验,加载即校验
+- [x] 失败路径:截断/篡改/格式戳/op 集不匹配 → `SnapshotError`,无 panic、干净 drop
 - [ ] init ESM 双模式:warmup(默认,创建期烘焙)/ startup(显式,恢复后前置)
 - [ ] `fusor snapshot -o blob` 子命令 + builder `build_snapshot()` / `from_snapshot(blob, overlays)`
 - [ ] 测试:往返一致性(全局形状、`Fusor.ops`、init 导出、行为等价)、负例矩阵

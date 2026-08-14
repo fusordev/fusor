@@ -27,7 +27,7 @@ use std::error::Error;
 
 use super::*;
 use crate::{
-    RuntimeLimits,
+    Realm, RuntimeLimits,
     object::{HeapObject, HeapObjectKind, ObjectRecord, PropertySlot, ShapeProperty},
     value::StoredValue,
 };
@@ -8179,4 +8179,227 @@ fn snapshot_fails_closed_on_unsupported_heap_content() {
         ),
         "unsupported content fails closed"
     );
+}
+
+/// Compiles and executes one Global Script on the realm, rendering the
+/// completion value with `String()` (scripts end in an expression).
+fn run_snapshot_script(runtime: &mut Runtime, realm: &Realm, source: &str) -> String {
+    let authority = with_parsed_program(
+        source,
+        FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
+        |unit| {
+            let context = CompilationContext::new_with_source_name(
+                unit,
+                Arc::from("<snapshot realm test>"),
+            )
+            .expect("storage plan");
+            let tree = context
+                .compile_global_script(fusor_bytecode::VerificationLimits::default())
+                .expect("verified Global Script");
+            Arc::new(tree.verified_bytecode().clone())
+        },
+    )
+    .expect("frontend");
+    let value = runtime
+        .context(realm)
+        .expect("context")
+        .execute_global_script(authority, crate::ExecutionLimits::default())
+        .unwrap_or_else(|error| panic!("script {source}: {error:?}"));
+    value
+        .as_string()
+        .expect("live value")
+        .expect("String completion value")
+        .to_utf8_lossy()
+        .expect("UTF-8")
+}
+
+#[test]
+fn snapshot_round_trips_a_realm_with_user_heap_content() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let built = run_snapshot_script(
+        &mut runtime,
+        &realm,
+        "let secret = 21;\
+         globalThis.holder = {\
+             builtin: Object.prototype,\
+             add: function (x) { return secret + x; },\
+             firstRandom: Math.random(),\
+             secondRandom: Math.random(),\
+         };\
+         'built';",
+    );
+    assert_eq!(built, "built");
+
+    let blob = runtime.snapshot().expect("snapshot");
+    // The blob freezes the math-random state after two calls; the next
+    // call on the encode side continues the sequence, and the restored
+    // realm must produce exactly that value on its first call.
+    let recorded_state = runtime
+        .realms
+        .get(realm.id())
+        .expect("realm state")
+        .math_random_state;
+    let third_random = run_snapshot_script(&mut runtime, &realm, "String(Math.random());");
+    let mut restored = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let restored_realms = restored.from_snapshot(&blob).expect("restore");
+    assert_eq!(restored_realms.len(), 1, "one realm restored");
+    let restored_realm = restored_realms[0].clone();
+    assert_eq!(
+        restored
+            .realms
+            .get(restored_realm.id())
+            .expect("restored realm state")
+            .math_random_state,
+        recorded_state,
+        "the math-random sequence continues exactly where it froze"
+    );
+    assert_eq!(
+        run_snapshot_script(&mut restored, &restored_realm, "String(Math.random());"),
+        third_random,
+        "the restored sequence produces the frozen continuation"
+    );
+
+    // The intrinsic graph was rebuilt deterministically (§8.2), so builtin
+    // identities hold; the user heap (closure over the global lexical
+    // binding, the builtin reference) round-tripped.
+    let probe = run_snapshot_script(
+        &mut restored,
+        &restored_realm,
+        "String(\
+             !(holder.add(1) === 22) ? 'add' :\
+             !(holder.builtin === Object.prototype) ? 'builtin' :\
+             !Array.isArray([]) ? 'isArray' :\
+             !(JSON.stringify({ a: [1] }) === '{\"a\":[1]}') ? 'json' :\
+             'ok'\
+         );",
+    );
+    assert_eq!(probe, "ok", "the restored heap behaves identically");
+}
+
+#[test]
+fn snapshot_round_trips_multiple_realms_created_up_front() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let first = runtime.create_realm().expect("first realm");
+    let second = runtime.create_realm().expect("second realm");
+    run_snapshot_script(&mut runtime, &first, "globalThis.firstTag = 'alpha'; 'a';");
+    run_snapshot_script(&mut runtime, &second, "globalThis.secondTag = 42; 'b';");
+
+    let blob = runtime.snapshot().expect("snapshot");
+    let mut restored = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realms = restored.from_snapshot(&blob).expect("restore");
+    assert_eq!(realms.len(), 2, "both realms restored");
+
+    assert_eq!(
+        run_snapshot_script(&mut restored, &realms[0], "String(globalThis.firstTag);"),
+        "alpha",
+        "first realm keeps its globals"
+    );
+    assert_eq!(
+        run_snapshot_script(&mut restored, &realms[1], "String(globalThis.secondTag);"),
+        "42",
+        "second realm keeps its globals"
+    );
+    assert_eq!(
+        run_snapshot_script(
+            &mut restored,
+            &realms[0],
+            "String(globalThis.secondTag === undefined);",
+        ),
+        "true",
+        "realm globals stay independent"
+    );
+}
+
+#[test]
+fn snapshot_fails_closed_when_a_realm_is_created_after_user_content() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let first = runtime.create_realm().expect("first realm");
+    // A live user record (an object) breaks the realm prefix: realm 2's
+    // segment no longer tiles with realm 1's, so the deterministic replay
+    // cannot reproduce the heap layout.
+    run_snapshot_script(&mut runtime, &first, "globalThis.early = {}; 'ok';");
+    let _second = runtime.create_realm().expect("second realm");
+    assert!(
+        matches!(
+            runtime.snapshot(),
+            Err(crate::snapshot::SnapshotError::Unsupported { what: "user heap content between realm creations", .. })
+        ),
+        "interleaved realm creation fails closed"
+    );
+}
+
+#[test]
+fn snapshot_fails_closed_on_a_module_registry() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let (syntax, authority) = with_parsed_program(
+        "export const answer = 42;",
+        FrontendOptions::for_goal(CompilationGoal::Module),
+        |unit| {
+            let syntax = unit.module_syntax().clone();
+            let compiler =
+                CompilationContext::new_with_source_name(unit, Arc::from("<snapshot module>"))
+                    .expect("storage plan");
+            let tree = compiler
+                .compile_module_with_all_limits(
+                    fusor_bytecode::VerificationLimits::default(),
+                    fusor_bytecode::FunctionGraphVerificationLimits::default(),
+                    fusor_bytecode::BytecodeGraphVerificationLimits::default(),
+                )
+                .expect("verified Module");
+            (syntax, Arc::new(tree.verified_bytecode().clone()))
+        },
+    )
+    .expect("frontend");
+    let mut context = runtime.context(&realm).expect("context");
+    context
+        .register_module(
+            crate::ModuleKey::new(Arc::from("pkg")),
+            syntax,
+            authority,
+        )
+        .expect("registered module");
+    drop(context);
+    assert!(
+        matches!(
+            runtime.snapshot(),
+            Err(crate::snapshot::SnapshotError::Unsupported { what: "a module registry", .. })
+        ),
+        "module registries fail closed until their serializer slice lands"
+    );
+}
+
+#[test]
+fn snapshot_restores_reclaimed_heap_slots_with_stable_identities() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    run_snapshot_script(
+        &mut runtime,
+        &realm,
+        "(function () {\
+             let a = {}; let b = {}; a.peer = b; b.peer = a;\
+         })();\
+         globalThis.live = { tag: 'keep' };\
+         'ok';",
+    );
+    runtime.collect_cycles().expect("collect");
+    // The collected cycle left holes in the heap arenas; the gap encoding
+    // must keep every surviving record's identity stable across restore.
+    let blob = runtime.snapshot().expect("snapshot");
+    let mut restored = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realms = restored.from_snapshot(&blob).expect("restore");
+    let probe = run_snapshot_script(
+        &mut restored,
+        &realms[0],
+        "globalThis.live.tag === 'keep' ? 'kept' : 'lost';",
+    );
+    assert_eq!(probe, "kept", "surviving records keep their identities");
+    // The restored arena accepts further collection and allocation.
+    run_snapshot_script(
+        &mut restored,
+        &realms[0],
+        "(function () { let c = {}; c.self = c; })(); globalThis.extra = [1, 2]; 'again';",
+    );
+    restored.collect_cycles().expect("collect after restore");
 }

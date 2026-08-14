@@ -408,17 +408,36 @@ shutdown 期间不再 drain 微任务(文档化)。
 ### 8.2 序列化内容与不可序列化项
 
 - 序列化:全部 heap records(objects + shapes + 属性表、functions、strings、atoms
-  表、模块注册表、realm 表、binding cells)
+  表、模块注册表、realm 表、binding cells)。当前切片已落地:atoms 表、用户对象
+  (含 shape/属性表)、binding cells、函数(字节码 + host 槽位)、realm 表 + 全局
+  binding 表;模块注册表与异形对象实例(§8.2 下述)尚未落地,fail closed
+- **内置对象不序列化**(2026-08-14 决策):`globalThis` 上的固有对象图不进 blob——
+  realm 段只记录 realm 表(每 realm 的全局对象/对象原型身份、math-random 状态、
+  各 arena 的段边界水位线、全局对象的完整对象记录);恢复时逐 realm 重放
+  `create_realm` 确定性重建固有图,并以水位线与全局对象身份校验重放结果(不一致
+  → fail closed)。**用户对全局对象本身的修改**(`globalThis.x = ...`、全局对象
+  属性增删改)随全局对象记录保留;**对其他内置对象**(`Object.prototype` 等)的
+  修改不跨快照保留(alpha 语义:需要保留的初始化放 startup 模式 init ESM)
+- **realm 前缀约束**:固有图必须占据 objects/functions 两个 arena 的连续首段
+  (全部 realm 先于用户堆创建、无释放/复用)。不满足 → snapshot 时 fail closed
+  (Unsupported:用户堆在 realm 之间创建 / realm 记录被释放复用)。快照编码跳过
+  前缀段;恢复时前缀由重放重建,用户记录按记录的 arena index 落位
+- **gap 编码**:各 arena 记录带 index 编码,回收槽(GC 洞)不编码、恢复时补为可复用
+  空槽——存活记录的 identity 跨快照稳定,不因 churn 位移
 - **函数按字节码序列化**:JS Function 的 blob 记录其 verified bytecode
-  (InstalledCode),恢复时重建函数对象与闭包环境;host/native Function 不序列化
-  Rust 闭包——blob 记录"host 槽位 + op 元数据"并以 `[native code]` 标记占位,恢复
-  时宿主重建 op 闭包表并重绑定(不匹配 fail closed);native 函数
-  `Function.prototype.toString` 显示 `[native code]`
+  (InstalledCode,含安装 realm 与共享 eval 环境 DAG),恢复时重建函数对象与闭包
+  环境;host/native Function 不序列化 Rust 闭包——blob 记录"host 槽位 + op 元数据"
+  并以 `[native code]` 标记占位,恢复时宿主重建 op 闭包表并重绑定(不匹配 fail
+  closed);native 函数 `Function.prototype.toString` 显示 `[native code]`
 - **Rust 闭包不可序列化**:堆内 host Function 对象解耦存储——blob 记录"host 槽位 +
   op 元数据",恢复时宿主重建 op 闭包表并重绑定;op 集按序匹配,不匹配 fail closed
   (host Function 即 `Fusor` 命名空间与 `Fusor.ops.*` 各 op 函数;无 process 对象)
+- **异形对象实例**(用户创建的 Map/Set/Date/ArrayBuffer 等实例,2026-08-14 确认
+  需要):其内部表随下一序列化切片落地;当前快照遇异形对象 fail closed
+  (Unsupported)
 - **资源表不可序列化**(fd 等运行时资源):快照中不存资源;overlay init 创建的资源
-  必须遵循"启动期惰性重建"约束(Deno 同构,文档化)
+  必须遵循"启动期惰性重建"约束(Deno 同构,文档化)——warmup 烘焙进快照的部分不得
+  依赖运行时资源,依赖资源的初始化放 startup 模式(§8.4)
 - GC 状态不序列化:恢复后从干净标记状态开始;finalization registry 对象保留、
   待清理队列清空
 
