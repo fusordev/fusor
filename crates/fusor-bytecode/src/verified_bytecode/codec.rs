@@ -31,15 +31,17 @@ use crate::{
 use crate::{
     BytecodeGraphVerificationLimits, BytecodePc, ClosureVariableDefinition, CompilerBindingKind,
     CompilerBindingPolicy, CompilerClosureBinding, CompilerExecutableKind,
-    CompilerInitializationPolicy, CompilerWritePolicy, CompilerSource, PcSourceSpan, ScopeLink,
-    SourceByteSpan, UnverifiedCompilerBytecodeGraph, UnverifiedFunctionMetadata,
-    VariableDefinition, VerifiedBytecode, VerifiedFunctionMetadata, verify_compiler_bytecode_graph,
+    CompilerInitializationPolicy, CompilerWritePolicy, CompilerSource, ModuleBindingOrigin, ModuleImportName, ModuleRequestDescriptor, PcSourceSpan, ScopeLink, SourceByteSpan, UnverifiedCompilerBytecodeGraph,
+    UnverifiedFunctionMetadata, UnverifiedModuleBindingDescriptor,
+    UnverifiedModuleDeclarationRecord, VariableDefinition, VerifiedBytecode,
+    VerifiedFunctionMetadata, verify_compiler_bytecode_graph,
 };
 use crate::compiler_graph::{
     UnverifiedCompilerFunction, UnverifiedCompilerFunctionGraph, VerifiedCompilerFunction,
     VerifiedCompilerFunctionGraph, verify_compiler_function_graph,
 };
 use crate::function::UnverifiedFunctionHeader;
+use super::ModuleImportNameKind;
 use crate::verifier::{
     CompilerCapturedBinding, CompilerCaptureLayout, CompilerConstantKind, CompilerConstantLayout,
     FunctionIndexDomains, UnverifiedCompilerFunctionBody, VerificationLimits,
@@ -70,9 +72,6 @@ pub enum BytecodeCodecError {
     String(String),
     /// The load-time re-verification (§8.3) rejected the decoded payload.
     Verification(String),
-    /// The bytecode carries a module declaration record, whose codec lands
-    /// with the module slice (fail closed until then).
-    UnsupportedModule,
 }
 
 impl fmt::Display for BytecodeCodecError {
@@ -87,9 +86,6 @@ impl fmt::Display for BytecodeCodecError {
             Self::Verification(message) => {
                 write!(formatter, "bytecode re-verification failed: {message}")
             }
-            Self::UnsupportedModule => formatter.write_str(
-                "module declaration records are not serializable yet (module slice pending)",
-            ),
         }
     }
 }
@@ -1058,13 +1054,14 @@ pub fn decode_metadata(
 pub fn encode_verified_bytecode(
     bytecode: &VerifiedBytecode,
 ) -> Result<Vec<u8>, BytecodeCodecError> {
-    if bytecode.module().is_some() {
-        return Err(BytecodeCodecError::UnsupportedModule);
-    }
-    frame_sections(&[
+    let mut sections = vec![
         (1, encode_graph(bytecode.compiler_graph())),
         (2, encode_metadata(bytecode.metadata())),
-    ])
+    ];
+    if let Some(module) = bytecode.module() {
+        sections.push((4, encode_module(module)));
+    }
+    frame_sections(&sections)
 }
 
 /// Decodes one complete verified-bytecode payload, re-verifying the graph
@@ -1079,6 +1076,7 @@ pub fn decode_verified_bytecode(payload: &[u8]) -> Result<VerifiedBytecode, Byte
     let sections = read_sections(payload)?;
     let mut graph = None;
     let mut metadata = None;
+    let mut module = None;
     for (tag, section_payload) in sections {
         match tag {
             1 => {
@@ -1087,7 +1085,9 @@ pub fn decode_verified_bytecode(payload: &[u8]) -> Result<VerifiedBytecode, Byte
             2 => {
                 metadata = Some(decode_metadata(section_payload)?);
             }
-            4 => return Err(BytecodeCodecError::UnsupportedModule),
+            4 => {
+                module = Some(Arc::new(decode_module(section_payload)?));
+            }
             other => {
                 return Err(BytecodeCodecError::FormatMismatch {
                     found: u32::from(other),
@@ -1097,11 +1097,141 @@ pub fn decode_verified_bytecode(payload: &[u8]) -> Result<VerifiedBytecode, Byte
     }
     let graph = graph.ok_or(BytecodeCodecError::Truncated)?;
     let metadata = metadata.ok_or(BytecodeCodecError::Truncated)?;
-    verify_compiler_bytecode_graph(
-        UnverifiedCompilerBytecodeGraph::new(Arc::new(graph), metadata),
-        BytecodeGraphVerificationLimits::default(),
-    )
-    .map_err(|error| BytecodeCodecError::Verification(error.to_string()))
+    let input = UnverifiedCompilerBytecodeGraph::new(Arc::new(graph), metadata);
+    let input = match module {
+        Some(module) => input.with_module(module),
+        None => input,
+    };
+    verify_compiler_bytecode_graph(input, BytecodeGraphVerificationLimits::default())
+        .map_err(|error| BytecodeCodecError::Verification(error.to_string()))
+}
+
+// ---- Module section codec (section 4) ----
+
+/// Encodes one verified module declaration record: binding descriptors
+/// (name, slot, policy, origin, initializer, import name) and static
+/// request descriptors.
+pub fn encode_module(module: &crate::ModuleDeclarationRecord) -> Vec<u8> {
+    let mut buffer = Vec::new();
+    let bindings = module.bindings();
+    write_u32(&mut buffer, bindings.len() as u32);
+    for binding in bindings {
+        write_u32(&mut buffer, binding.name().get());
+        write_u32(&mut buffer, binding.slot());
+        write_policy(&mut buffer, binding.policy());
+        buffer.push(match binding.origin() {
+            ModuleBindingOrigin::Local => 0,
+            ModuleBindingOrigin::Import => 1,
+            ModuleBindingOrigin::Namespace => 2,
+        });
+        write_option_u32(&mut buffer, binding.initializer());
+        match binding.import() {
+            Some(import) => {
+                buffer.push(1);
+                write_u32(&mut buffer, import.request());
+                match import.kind {
+                    ModuleImportNameKind::Named(name) => {
+                        buffer.push(0);
+                        write_u32(&mut buffer, name.get());
+                    }
+                    ModuleImportNameKind::Default => buffer.push(1),
+                    ModuleImportNameKind::Namespace => buffer.push(2),
+                    ModuleImportNameKind::DeferredNamespace => buffer.push(3),
+                }
+            }
+            None => buffer.push(0),
+        }
+    }
+    let requests = module.requests();
+    write_u32(&mut buffer, requests.len() as u32);
+    for request in requests.iter().cloned() {
+        let specifier = request.clone().specifier();
+        let has_assertions = request.has_assertions();
+        write_u32(&mut buffer, specifier.get());
+        buffer.push(u8::from(has_assertions));
+    }
+    buffer
+}
+
+/// Decodes one module-section payload.
+///
+/// # Errors
+///
+/// Returns a typed [BytecodeCodecError] for truncation, unknown tags,
+/// or trailing bytes.
+pub fn decode_module(
+    payload: &[u8],
+) -> Result<UnverifiedModuleDeclarationRecord, BytecodeCodecError> {
+    let mut reader = Reader::new(payload);
+    let binding_count = read_count(&mut reader)?;
+    let mut bindings = Vec::new();
+    bindings.try_reserve_exact(binding_count).map_err(|_| {
+        BytecodeCodecError::String("module binding allocation failed".to_owned())
+    })?;
+    for _ in 0..binding_count {
+        let name = AtomPoolIndex::new(reader.read_u32()?);
+        let slot = reader.read_u32()?;
+        let policy = read_policy(&mut reader)?;
+        let origin = match reader.read_u8()? {
+            0 => ModuleBindingOrigin::Local,
+            1 => ModuleBindingOrigin::Import,
+            2 => ModuleBindingOrigin::Namespace,
+            other => {
+                return Err(BytecodeCodecError::FormatMismatch {
+                    found: u32::from(other),
+                });
+            }
+        };
+        let initializer = read_option_u32(&mut reader)?;
+        let import = match reader.read_u8()? {
+            0 => None,
+            1 => {
+                let request = reader.read_u32()?;
+                Some(match reader.read_u8()? {
+                    0 => ModuleImportName::named(request, AtomPoolIndex::new(reader.read_u32()?)),
+                    1 => ModuleImportName::default(request),
+                    2 => ModuleImportName::namespace(request),
+                    3 => ModuleImportName::deferred_namespace(request),
+                    other => {
+                        return Err(BytecodeCodecError::FormatMismatch {
+                            found: u32::from(other),
+                        });
+                    }
+                })
+            }
+            other => {
+                return Err(BytecodeCodecError::FormatMismatch {
+                    found: u32::from(other),
+                });
+            }
+        };
+        let mut binding =
+            UnverifiedModuleBindingDescriptor::new(name, slot, policy, origin);
+        if let Some(constant) = initializer {
+            binding = binding.with_initializer(constant);
+        }
+        if let Some(import) = import {
+            binding = binding.with_import(import);
+        }
+        bindings.push(binding);
+    }
+    let request_count = read_count(&mut reader)?;
+    let mut requests = Vec::new();
+    requests.try_reserve_exact(request_count).map_err(|_| {
+        BytecodeCodecError::String("module request allocation failed".to_owned())
+    })?;
+    for _ in 0..request_count {
+        let specifier = AtomPoolIndex::new(reader.read_u32()?);
+        let has_assertions = reader.read_u8()? != 0;
+        requests.push(ModuleRequestDescriptor::new(specifier, has_assertions));
+    }
+    if reader.remaining() != 0 {
+        return Err(BytecodeCodecError::Truncated);
+    }
+    Ok(UnverifiedModuleDeclarationRecord::new(
+        Arc::from(bindings),
+        Arc::from(requests),
+    ))
 }
 
 fn executable_kind_tag(kind: CompilerExecutableKind) -> u8 {

@@ -29,6 +29,28 @@ fn compile(source: &str) -> Arc<fusor_bytecode::VerifiedBytecode> {
     .expect("frontend")
 }
 
+/// Compiles one Module into its verified bytecode authority.
+fn compile_module(source: &str) -> Arc<fusor_bytecode::VerifiedBytecode> {
+    with_parsed_program(
+        source,
+        FrontendOptions::for_goal(CompilationGoal::Module),
+        |unit| {
+            let context =
+                CompilationContext::new_with_source_name(unit, Arc::from("codec-module.js"))
+                    .expect("storage plan");
+            let tree = context
+                .compile_module_with_all_limits(
+                    fusor_bytecode::VerificationLimits::default(),
+                    fusor_bytecode::FunctionGraphVerificationLimits::default(),
+                    fusor_bytecode::BytecodeGraphVerificationLimits::default(),
+                )
+                .expect("verified Module");
+            Arc::new(tree.verified_bytecode().clone())
+        },
+    )
+    .expect("frontend")
+}
+
 const RICH_SCRIPT: &str = "\
 function tag(site) { return site.raw[0]; }\
 function outer(x) {\
@@ -112,6 +134,17 @@ fn a_verified_graph_round_trips_through_the_codec() {
         authority.compiler_graph().root().control_flow().bytecode(),
         "the root bytecode is bit-identical"
     );
+}
+
+#[test]
+fn a_module_authority_round_trips_with_its_declaration_record() {
+    let authority = compile_module(
+        "import defaultExport, { named as alias } from 'pkg';         import * as ns from 'other';         import defer * as deferred from 'lazy';         export let local = 1;         export { alias };         export default function main() { return ns.value + alias + defaultExport + local; }",
+    );
+    assert!(authority.module().is_some(), "the module record exists");
+    let payload = encode_verified_bytecode(&authority).expect("encode");
+    let decoded = decode_verified_bytecode(&payload).expect("decode");
+    assert_eq!(&decoded, authority.as_ref(), "the module authority is identical");
 }
 
 #[test]
