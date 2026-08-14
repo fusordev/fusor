@@ -1,4 +1,4 @@
-//! Chrome DevTools Protocol transport: loopback HTTP discovery, WebSocket
+//! Chrome `DevTools` Protocol transport: loopback HTTP discovery, WebSocket
 //! framing, and the shared debugger session.
 //!
 //! The engine is runtime-local and synchronous. This module consequently keeps
@@ -176,7 +176,8 @@ impl DebugSession {
             .and_then(Value::as_str)
             .unwrap_or_default();
         let params = message.get("params").cloned().unwrap_or_else(|| json!({}));
-        let response = match method {
+        
+        match method {
             "Runtime.enable" => {
                 self.emit(json!({
                     "method": "Runtime.executionContextCreated",
@@ -252,8 +253,7 @@ impl DebugSession {
             "Runtime.compileScript" => self.compile_script_request(id, &params),
             method if is_engine_bound_method(method) => return self.forward_to_engine(id, message),
             _ => protocol_error(id, -32601, &format!("unsupported CDP method: {method}")),
-        };
-        response
+        }
     }
 
     /// Handles one engine-bound protocol request on the runtime-owning task.
@@ -464,11 +464,10 @@ impl DebuggerHook for DebugSession {
         let is_new_script = !state.scripts.contains_key(&script.id);
         if is_new_script {
             state.scripts.insert(script.id.clone(), script.clone());
-            if state.debugger_enabled {
-                if let Some(sender) = &state.event_sender {
+            if state.debugger_enabled
+                && let Some(sender) = &state.event_sender {
                     let _ = sender.send(OutboundFrame::Json(script_parsed(&script)));
                 }
-            }
         }
         // Line and column computation only runs when a breakpoint could
         // match; console evaluation crosses thousands of instruction
@@ -498,24 +497,22 @@ impl DebuggerHook for DebugSession {
         state.paused_depth = stack_depth;
         state.step_mode = None;
         state.pending_pause = Some(snapshot.clone());
-        if state.debugger_enabled {
-            if let Some(sender) = &state.event_sender {
+        if state.debugger_enabled
+            && let Some(sender) = &state.event_sender {
                 let _ = sender.send(OutboundFrame::Json(paused_event(snapshot)));
             }
-        }
         while state.paused {
             state = match self.resume.wait(state) {
                 Ok(state) => state,
                 Err(error) => error.into_inner(),
             };
         }
-        if state.debugger_enabled {
-            if let Some(sender) = &state.event_sender {
+        if state.debugger_enabled
+            && let Some(sender) = &state.event_sender {
                 let _ = sender.send(OutboundFrame::Json(
                     json!({"method": "Debugger.resumed", "params": {}}),
                 ));
             }
-        }
     }
 }
 
@@ -617,9 +614,7 @@ fn parse_http_request(request: &[u8]) -> Option<(&str, &str, HashMap<String, Str
     let mut parts = first.split_whitespace();
     let method = parts.next()?;
     let path = parts.next()?.split('?').next()?;
-    if parts.next().is_none() {
-        return None;
-    }
+    parts.next()?;
     let mut headers = HashMap::new();
     for line in lines {
         if line.is_empty() {
@@ -674,7 +669,7 @@ fn upgrade_websocket(stream: &mut TcpStream, headers: &HashMap<String, String>) 
 /// Reports whether the CDP frame trace is enabled (`FUSOR_CDP_TRACE=1`).
 ///
 /// The trace prints every inbound and outbound protocol frame to stderr,
-/// prefixed `[cdp]`, so a real DevTools session can be diagnosed against the
+/// prefixed `[cdp]`, so a real `DevTools` session can be diagnosed against the
 /// wire protocol it produces.
 fn cdp_trace_enabled() -> bool {
     static TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -969,7 +964,7 @@ fn write_websocket_frame(stream: &mut TcpStream, opcode: u8, payload: &[u8]) -> 
 }
 
 fn lock_state(state: &Mutex<DebugState>) -> std::sync::MutexGuard<'_, DebugState> {
-    state.lock().unwrap_or_else(|error| error.into_inner())
+    state.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 #[cfg(test)]

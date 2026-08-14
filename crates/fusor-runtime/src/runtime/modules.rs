@@ -99,13 +99,13 @@ pub struct ModuleError {
     pub(crate) message: String,
     pub(crate) exception: Option<crate::JsException>,
     /// The original ECMAScript rejection value of an asynchronous evaluation
-    /// failure (ECMA-262 [[EvaluationError]] of an async module). A heap value
+    /// failure (ECMA-262 [[`EvaluationError`]] of an async module). A heap value
     /// stays rooted by this public root until the error is dropped.
     pub(crate) rejection_value: Option<crate::JsValue>,
     /// The original typed engine failure of a synchronous evaluation that
     /// did not produce a JavaScript exception (limits, allocation, engine
     /// fault). Never flattened into the message only.
-    pub(crate) execution_error: Option<std::sync::Arc<crate::ExecutionError>>,
+    pub(crate) execution_error: Option<Arc<crate::ExecutionError>>,
 }
 
 impl ModuleError {
@@ -139,7 +139,7 @@ impl ModuleError {
             message,
             exception: None,
             rejection_value: None,
-            execution_error: Some(std::sync::Arc::new(error)),
+            execution_error: Some(Arc::new(error)),
         }
     }
 
@@ -285,13 +285,13 @@ fn rejection_value_message(runtime: &Runtime, value: &crate::runtime::StoredValu
 /// A resolved export target (ECMA-262 `ResolvedBinding`).
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum ResolvedExport {
-    /// A binding cell in the module's environment ([[BindingName]] is a name).
+    /// A binding cell in the module's environment ([[`BindingName`]] is a name).
     Binding {
         module: ModuleRecordId,
         cell: BindingCellId,
     },
-    /// The module namespace object of `module` (ResolveExport of an
-    /// `export * as name` entry; [[BindingName]] is ~namespace~).
+    /// The module namespace object of `module` (`ResolveExport` of an
+    /// `export * as name` entry; [[`BindingName`]] is ~namespace~).
     Namespace { module: ModuleRecordId },
 }
 
@@ -314,14 +314,14 @@ pub(crate) struct SourceTextModuleRecord {
     pub(crate) cycle_root: Option<ModuleRecordId>,
     pub(crate) evaluation_error: Option<ModuleError>,
     /// Modules whose async evaluation this module waits on
-    /// (ECMA-262 [[PendingAsyncDependencies]]).
+    /// (ECMA-262 [[`PendingAsyncDependencies`]]).
     pub(crate) pending_async_dependencies: u32,
-    /// ECMA-262 [[AsyncEvaluationOrder]]: `None` is ~empty~.
+    /// ECMA-262 [[`AsyncEvaluationOrder`]]: `None` is ~empty~.
     pub(crate) async_evaluation_order: Option<u32>,
     /// Modules waiting on this module's async evaluation
-    /// (ECMA-262 [[AsyncParentModules]]).
+    /// (ECMA-262 [[`AsyncParentModules`]]).
     pub(crate) async_parent_modules: Vec<ModuleRecordId>,
-    /// ECMA-262 [[TopLevelCapability]] promise for `Evaluate()`.
+    /// ECMA-262 [[`TopLevelCapability`]] promise for `Evaluate()`.
     pub(crate) top_level_capability: Option<ObjectId>,
     /// Persisted module environment: one cell per declaration-record binding
     /// in declaration order.
@@ -329,7 +329,7 @@ pub(crate) struct SourceTextModuleRecord {
     /// Lazily materialized namespace object.
     pub(crate) namespace_object: Option<ObjectId>,
     /// Lazily materialized deferred namespace object (ECMA-262
-    /// [[DeferredNamespace]], cached separately from [[Namespace]]).
+    /// [[`DeferredNamespace`]], cached separately from [[Namespace]]).
     pub(crate) deferred_namespace: Option<ObjectId>,
     /// Lazily materialized `import.meta` object.
     pub(crate) meta_object: Option<ObjectId>,

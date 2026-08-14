@@ -103,7 +103,7 @@ impl HostDiagnostic {
     pub fn new(error: ExecutionError) -> Self {
         let source = match &error {
             ExecutionError::Exception(exception) => Some(NamedSource::new(
-                exception.source_name().to_owned(),
+                exception.source_name(),
                 exception.source_text().to_owned(),
             )),
             _ => None,

@@ -250,7 +250,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                             && binding.policy().initialization()
                                 == InitializationPolicy::FunctionAtInstantiation
                     })
-                    .map(|binding| binding.id());
+                    .map(super::storage::BindingStorage::id);
                 if let Some(synthetic) = synthetic {
                     let target = function_declarations.get_mut(synthetic.index()).ok_or(
                         LeafCompilationError::SemanticInvariant {

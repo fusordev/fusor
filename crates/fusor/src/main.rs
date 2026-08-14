@@ -1,7 +1,7 @@
 //! `fusor`: Node-like module runner and ESM REPL for the Experimental JavaScript Engine.
 //!
 //! The binary target of the `fusor` package; the CLI modules (module loader,
-//! builtin table, REPL) live in [`cli`](crate::cli) and the DevTools CDP
+//! builtin table, REPL) live in [`cli`](crate::cli) and the `DevTools` CDP
 //! server in [`cdp`](crate::cdp), kept out of the facade library (`fusor`).
 
 #![forbid(unsafe_code)]

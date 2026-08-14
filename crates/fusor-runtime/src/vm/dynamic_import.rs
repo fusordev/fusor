@@ -275,7 +275,7 @@ fn finish_dynamic_import_attributes(
         matches!(key.to_utf8_lossy().ok().as_deref(), Some("type"))
             && matches!(
                 value.to_utf8_lossy().ok().as_deref(),
-                Some("json") | Some("text")
+                Some("json" | "text")
             )
     });
     if supported {
@@ -377,7 +377,7 @@ fn reject_dynamic_import_pending(
 /// link errors with a `SyntaxError`, and a successful evaluation fulfills with
 /// the module namespace exotic object. A root left in the evaluating-async
 /// status (top-level await) instead attaches reactions to its
-/// [[TopLevelCapability]] and settles the import Promise when the asynchronous
+/// [[`TopLevelCapability`]] and settles the import Promise when the asynchronous
 /// evaluation completes. Promise reactions queue as ordinary Promise jobs and
 /// drain at the next host-job checkpoint; they never run inline here.
 ///

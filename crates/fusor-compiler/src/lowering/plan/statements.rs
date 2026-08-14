@@ -812,7 +812,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 }
                 // Anonymous default function: hoisted through the synthetic
                 // `*default*` cell's function-initializer prefix.
-                return Ok(());
+                Ok(())
             }
             ExportDefaultDeclarationKind::ClassDeclaration(class) => {
                 if class.id.is_some() {

@@ -2701,7 +2701,7 @@ fn call_host_callback(
         }));
     };
 
-    let mut context = crate::Context { runtime, realm };
+    let mut context = Context { runtime, realm };
     let result = callback(
         &mut context,
         crate::HostCall::new(this, arguments, new_target),

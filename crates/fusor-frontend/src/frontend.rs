@@ -3588,9 +3588,9 @@ where
 /// # Errors
 ///
 /// Returns the exact frontend rejection for an unparseable source.
-pub fn has_top_level_declarations<'scope, 'arena>(
+pub fn has_top_level_declarations(
     source_text: &str,
-    options: FrontendOptions<'scope>,
+    options: FrontendOptions<'_>,
 ) -> Result<bool, FrontendError> {
     with_parsed_program(source_text, options, |unit| {
         unit.program().body.iter().any(|statement| {

@@ -32,7 +32,7 @@ fn namespace_uninitialized_error(
 }
 
 /// Converts an ECMA-262 `EvaluateModuleSync` failure into the abrupt
-/// completion a deferred namespace property access surfaces: a TypeError when
+/// completion a deferred namespace property access surfaces: a `TypeError` when
 /// the module cannot complete synchronously, or the module's original
 /// evaluation rejection value.
 pub(super) fn deferred_namespace_evaluation_abrupt(

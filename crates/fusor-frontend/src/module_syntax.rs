@@ -315,7 +315,7 @@ impl StaticModuleRequest {
     }
 
     /// Returns whether the request was introduced by an `import defer`
-    /// declaration (ECMA-262 ModuleRequest [[Phase]] ~defer~).
+    /// declaration (ECMA-262 `ModuleRequest` [[Phase]] ~defer~).
     #[must_use]
     pub const fn is_deferred(&self) -> bool {
         self.deferred

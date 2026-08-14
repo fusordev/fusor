@@ -191,7 +191,7 @@ pub struct ProxyInspection {
     pub revoked: bool,
 }
 
-/// The ordered internal-slot contents of one Map, Set, WeakMap, or WeakSet
+/// The ordered internal-slot contents of one Map, Set, `WeakMap`, or `WeakSet`
 /// object, returned by [`Context::collection_inspection`] for host
 /// inspection.
 #[derive(Debug)]
@@ -326,7 +326,7 @@ impl Context<'_> {
             return Ok(None);
         };
         if !self.runtime.objects.contains(*object) {
-            return Err(crate::HandleError::Stale {
+            return Err(HandleError::Stale {
                 kind: HandleKind::Value,
                 index: object.index(),
                 generation: object.generation(),
@@ -534,7 +534,7 @@ impl Context<'_> {
     pub fn promise_inspection(
         &mut self,
         value: &JsValue,
-    ) -> Result<Option<crate::PromiseInspection>, crate::ExecutionError> {
+    ) -> Result<Option<PromiseInspection>, crate::ExecutionError> {
         let owner = value.owner()?;
         self.runtime.validate_owner(&owner, HandleKind::Value)?;
         let StoredValue::Object(object) = value.stored()? else {
@@ -567,11 +567,11 @@ impl Context<'_> {
         };
         Ok(match settled {
             Settled::NotAPromise => None,
-            Settled::Pending => Some(crate::PromiseInspection::Pending),
-            Settled::Fulfilled(value) => Some(crate::PromiseInspection::Fulfilled(
+            Settled::Pending => Some(PromiseInspection::Pending),
+            Settled::Fulfilled(value) => Some(PromiseInspection::Fulfilled(
                 self.runtime.public_value(value)?,
             )),
-            Settled::Rejected(reason) => Some(crate::PromiseInspection::Rejected(
+            Settled::Rejected(reason) => Some(PromiseInspection::Rejected(
                 self.runtime.public_value(reason)?,
             )),
         })
@@ -593,7 +593,7 @@ impl Context<'_> {
     pub fn proxy_inspection(
         &mut self,
         value: &JsValue,
-    ) -> Result<Option<crate::ProxyInspection>, crate::ExecutionError> {
+    ) -> Result<Option<ProxyInspection>, crate::ExecutionError> {
         let owner = value.owner()?;
         self.runtime.validate_owner(&owner, HandleKind::Value)?;
         let StoredValue::Object(object) = value.stored()? else {
@@ -622,14 +622,14 @@ impl Context<'_> {
                 self.runtime.public_value(stored).map(Some)
             })
         };
-        Ok(Some(crate::ProxyInspection {
+        Ok(Some(ProxyInspection {
             handler: root(state.handler)?,
             target: root(state.target)?,
             revoked: state.handler.is_none() && state.target.is_none(),
         }))
     }
 
-    /// Returns the ordered entries of one Map, Set, WeakMap, or WeakSet
+    /// Returns the ordered entries of one Map, Set, `WeakMap`, or `WeakSet`
     /// object for host inspection, rooting every key and value as a fresh
     /// public root.
     ///
@@ -646,7 +646,7 @@ impl Context<'_> {
     pub fn collection_inspection(
         &mut self,
         value: &JsValue,
-    ) -> Result<Option<crate::CollectionInspection>, crate::ExecutionError> {
+    ) -> Result<Option<CollectionInspection>, crate::ExecutionError> {
         let owner = value.owner()?;
         self.runtime.validate_owner(&owner, HandleKind::Value)?;
         let StoredValue::Object(object) = value.stored()? else {
@@ -720,14 +720,14 @@ impl Context<'_> {
                 for (key, value) in stored_entries {
                     entries.push(self.runtime.public_value_pair(key, value)?);
                 }
-                Ok(Some(crate::CollectionInspection::Entries(entries)))
+                Ok(Some(CollectionInspection::Entries(entries)))
             }
             Shape::Set | Shape::WeakSet => {
                 let mut values = Vec::with_capacity(stored_entries.len());
                 for (key, _) in stored_entries {
                     values.push(self.runtime.public_value(key)?);
                 }
-                Ok(Some(crate::CollectionInspection::Values(values)))
+                Ok(Some(CollectionInspection::Values(values)))
             }
             Shape::None => unreachable!("handled above"),
         }
@@ -758,7 +758,7 @@ impl Context<'_> {
     pub fn array_buffer_inspection(
         &self,
         value: &JsValue,
-    ) -> Result<Option<crate::ArrayBufferInspection>, crate::ExecutionError> {
+    ) -> Result<Option<ArrayBufferInspection>, crate::ExecutionError> {
         let owner = value.owner()?;
         self.runtime.validate_owner(&owner, HandleKind::Value)?;
         let StoredValue::Object(object) = value.stored()? else {
@@ -777,7 +777,7 @@ impl Context<'_> {
         else {
             return Ok(None);
         };
-        Ok(Some(crate::ArrayBufferInspection {
+        Ok(Some(ArrayBufferInspection {
             byte_length: state.byte_length(),
             max_byte_length: state.resizable_max_byte_length(),
             detached: state.is_detached(),
@@ -839,7 +839,7 @@ impl Context<'_> {
     pub fn data_view_inspection(
         &mut self,
         value: &JsValue,
-    ) -> Result<Option<crate::DataViewInspection>, crate::ExecutionError> {
+    ) -> Result<Option<DataViewInspection>, crate::ExecutionError> {
         let owner = value.owner()?;
         self.runtime.validate_owner(&owner, HandleKind::Value)?;
         let StoredValue::Object(object) = value.stored()? else {
@@ -862,7 +862,7 @@ impl Context<'_> {
         let buffer = self
             .runtime
             .public_value(StoredValue::Object(state.buffer()))?;
-        Ok(Some(crate::DataViewInspection {
+        Ok(Some(DataViewInspection {
             buffer,
             byte_offset: state.byte_offset(),
             byte_length: match state.byte_length() {
@@ -887,7 +887,7 @@ impl Context<'_> {
     pub fn typed_array_inspection(
         &mut self,
         value: &JsValue,
-    ) -> Result<Option<crate::TypedArrayInspection>, crate::ExecutionError> {
+    ) -> Result<Option<TypedArrayInspection>, crate::ExecutionError> {
         let owner = value.owner()?;
         self.runtime.validate_owner(&owner, HandleKind::Value)?;
         let StoredValue::Object(object) = value.stored()? else {
@@ -911,7 +911,7 @@ impl Context<'_> {
             .runtime
             .public_value(StoredValue::Object(state.buffer()))?;
         let element = state.element();
-        Ok(Some(crate::TypedArrayInspection {
+        Ok(Some(TypedArrayInspection {
             buffer,
             byte_offset: state.byte_offset(),
             length: match state.length() {
@@ -958,7 +958,7 @@ impl Context<'_> {
     }
 
     /// Returns the `[[PrimitiveValue]]` slot of one Number, Boolean, String,
-    /// Symbol, or BigInt wrapper object, rooted as a fresh public root.
+    /// Symbol, or `BigInt` wrapper object, rooted as a fresh public root.
     ///
     /// Non-wrapper values return `None`. This reads internal slots only and
     /// runs no observable JavaScript.
@@ -2009,7 +2009,7 @@ impl Context<'_> {
     /// materialized.
     pub fn error(
         &mut self,
-        kind: crate::ErrorObjectKind,
+        kind: ErrorObjectKind,
         message: &str,
     ) -> Result<JsValue, crate::ExecutionError> {
         self.error_with_stack(kind, message, "")
@@ -2022,7 +2022,7 @@ impl Context<'_> {
     /// The object carries the family's prototype (`%SyntaxError.prototype%`
     /// for [`crate::ErrorObjectKind::SyntaxError`]) and the observable
     /// `stack` property renders from the supplied text, so hosts (for
-    /// example a DevTools console) can display engine-created errors with
+    /// example a `DevTools` console) can display engine-created errors with
     /// the V8-shaped `Name: message` header.
     ///
     /// # Errors
@@ -2032,7 +2032,7 @@ impl Context<'_> {
     /// materialized.
     pub fn error_with_stack(
         &mut self,
-        kind: crate::ErrorObjectKind,
+        kind: ErrorObjectKind,
         message: &str,
         stack: &str,
     ) -> Result<JsValue, crate::ExecutionError> {
@@ -2302,7 +2302,7 @@ impl Context<'_> {
 
     /// Returns the recorded evaluation error of the module registered under
     /// `key` in this context's realm, if its evaluation failed (ECMA-262
-    /// [[EvaluationError]]).
+    /// [[`EvaluationError`]]).
     ///
     /// For a graph with top-level await the failure settles asynchronously:
     /// [`Self::evaluate_module`] returns once evaluation *starts*, and the
@@ -2368,7 +2368,7 @@ impl Context<'_> {
         crate::vm::reject_dynamic_import_load_kind(
             self.runtime,
             import,
-            crate::ExceptionKind::SyntaxError,
+            ExceptionKind::SyntaxError,
             message,
         )
     }

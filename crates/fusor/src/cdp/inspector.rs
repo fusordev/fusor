@@ -1,4 +1,4 @@
-//! Engine-side Chrome DevTools Protocol inspection: the objectId registry,
+//! Engine-side Chrome `DevTools` Protocol inspection: the objectId registry,
 //! intrinsic-function handles, and the `Runtime` domain handlers.
 //!
 //! The `Runtime` domain's inspection methods (property listing, object
@@ -6,7 +6,7 @@
 //! the runtime-owning REPL task through the engine request channel. This
 //! module keeps the objectId registry and the rooted intrinsic-function
 //! handles used to inspect values through the engine's own builtins — the
-//! same technique V8's InjectedScript uses.
+//! same technique V8's `InjectedScript` uses.
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -481,7 +481,7 @@ fn constructor_name(
     .ok()?;
     if !matches!(
         prototype.kind(),
-        Ok(ValueKind::Object) | Ok(ValueKind::Function)
+        Ok(ValueKind::Object | ValueKind::Function)
     ) {
         return None;
     }
@@ -643,13 +643,13 @@ fn object_class(
         if let Some(length) = reflect_number(context, intrinsics, value, "length") {
             label = format!("{label}({length})");
         }
-    } else if matches!(subtype, Some("arraybuffer") | Some("dataview"))
+    } else if matches!(subtype, Some("arraybuffer" | "dataview"))
         && let Some(length) = reflect_number(context, intrinsics, value, "byteLength")
     {
         label = format!("{label}({length})");
     } else if matches!(
         subtype,
-        Some("map") | Some("set") | Some("weakmap") | Some("weakset")
+        Some("map" | "set" | "weakmap" | "weakset")
     ) && let Some(size) = reflect_number(context, intrinsics, value, "size")
     {
         // V8 labels collections with their live entry count: `Map(2)`.
@@ -695,7 +695,7 @@ fn object_class(
 }
 
 /// Renders one `Runtime.consoleAPICalled` event for host `print` output, so
-/// printed values also appear in the DevTools console.
+/// printed values also appear in the `DevTools` console.
 pub fn console_api_event(
     context: &mut Context<'_>,
     registry: &mut ObjectRegistry,
@@ -739,7 +739,7 @@ fn event_timestamp_ms() -> u64 {
 /// One uncaught CLI evaluation failure, classified for CDP rendering.
 ///
 /// The REPL and the module runner map their typed facade errors onto this
-/// shape before emitting `Runtime.exceptionThrown`, so DevTools renders
+/// shape before emitting `Runtime.exceptionThrown`, so `DevTools` renders
 /// terminal entries and uncaught script failures the way it renders console
 /// exceptions.
 #[derive(Debug)]
@@ -1092,9 +1092,7 @@ pub(crate) fn remote_object(
                 .ok()
                 .flatten()
                 .and_then(|atom| atom.description())
-                .and_then(|description| description.to_utf8_lossy().ok())
-                .map(|description| format!("Symbol({description})"))
-                .unwrap_or_else(|| "[symbol]".to_owned()),
+                .and_then(|description| description.to_utf8_lossy().ok()).map_or_else(|| "[symbol]".to_owned(), |description| format!("Symbol({description})")),
         }),
         ValueKind::Function => {
             // V8's function descriptions come from Function.prototype.toString
@@ -1441,8 +1439,8 @@ fn get_properties_request(
         if non_indexed_only && is_array_index_key(&name) {
             continue;
         }
-        if let Ok(key) = JsString::from_utf8(&name) {
-            if let Some(entry) = descriptor_entry(
+        if let Ok(key) = JsString::from_utf8(&name)
+            && let Some(entry) = descriptor_entry(
                 context,
                 state,
                 intrinsics,
@@ -1454,7 +1452,6 @@ fn get_properties_request(
             ) {
                 result.push(entry);
             }
-        }
     }
     for name in intrinsics.symbol_keys(context, &object).unwrap_or_default() {
         if let Ok(symbol) = intrinsics.symbol_by_name(context, &object, &name)
@@ -1484,7 +1481,7 @@ fn get_properties_request(
         ) && matches!(
             prototype.kind(),
             // Prototypes may be ordinary objects or callable functions.
-            Ok(ValueKind::Object) | Ok(ValueKind::Function)
+            Ok(ValueKind::Object | ValueKind::Function)
         ) {
             if !own_only {
                 result.push(json!({
@@ -1526,7 +1523,7 @@ fn get_properties_request(
 /// Renders the expansion rows of one registered collection entries view:
 /// each live entry becomes a property row whose value is an
 /// `internal#entry` object previewing the key/value pair (values only for
-/// Set/WeakSet), the shape the DevTools frontend renders as `key => value`.
+/// Set/WeakSet), the shape the `DevTools` frontend renders as `key => value`.
 fn collection_entry_rows(
     context: &mut Context<'_>,
     intrinsics: &InspectIntrinsics,
@@ -1641,9 +1638,7 @@ fn internal_slot_entries(
     }
     if let Some(inspection) = context.collection_inspection(object).ok().flatten() {
         let label = intrinsics
-            .class_tag(context, object)
-            .map(|tag| tag_label(&tag))
-            .unwrap_or_else(|_| "Object".to_owned());
+            .class_tag(context, object).map_or_else(|_| "Object".to_owned(), |tag| tag_label(&tag));
         const ENTRY_PREVIEW_CAP: usize = 100;
         let mut rows = Vec::new();
         let overflow = match &inspection {
@@ -1923,18 +1918,13 @@ fn evaluate_request(
     let source_name = params
         .get("sourceURL")
         .and_then(Value::as_str)
-        .filter(|name| !name.is_empty())
-        .map(ToOwned::to_owned)
-        // User-entered console entries get Chrome-style `VM<n>` script
-        // names; eager and completion probes share the stable `console`
-        // name so the debugger's script list does not churn per keystroke.
-        .unwrap_or_else(|| {
+        .filter(|name| !name.is_empty()).map_or_else(|| {
             if params.get("userGesture").and_then(Value::as_bool) == Some(true) {
                 format!("VM{}", state.next_vm())
             } else {
                 "console".to_owned()
             }
-        });
+        }, ToOwned::to_owned);
     let compiled = match state.script_cache.get(expression) {
         Some(compiled) => compiled,
         None => match fusor::compile_script(expression, &source_name, limits) {
@@ -2037,11 +2027,11 @@ fn object_preview(
     let keys = intrinsics
         .own_string_keys(context, value)
         .unwrap_or_default();
-    let array_like = matches!(class.subtype, Some("array") | Some("typedarray"));
+    let array_like = matches!(class.subtype, Some("array" | "typedarray"));
     let cap = if array_like { 100 } else { 5 };
     let collection = matches!(
         class.subtype,
-        Some("map") | Some("set") | Some("weakmap") | Some("weakset")
+        Some("map" | "set" | "weakmap" | "weakset")
     );
     let promise = class.subtype == Some("promise");
     // Collection previews render their live entries (V8 shows
@@ -2220,7 +2210,7 @@ fn promise_preview_rows(
 }
 
 /// The V8 entry preview rows of one collection: alternating
-/// `key`/`value` PropertyPreviews for Maps, bare `value` rows for Sets.
+/// `key`/`value` `PropertyPreviews` for Maps, bare `value` rows for Sets.
 fn collection_preview_rows(
     context: &mut Context<'_>,
     intrinsics: &InspectIntrinsics,
@@ -2339,9 +2329,7 @@ fn preview_entry(
                 .ok()
                 .flatten()
                 .and_then(|atom| atom.description())
-                .and_then(|description| description.to_utf8_lossy().ok())
-                .map(|description| format!("Symbol({description})"))
-                .unwrap_or_else(|| "[symbol]".to_owned()),
+                .and_then(|description| description.to_utf8_lossy().ok()).map_or_else(|| "[symbol]".to_owned(), |description| format!("Symbol({description})")),
         }),
         ValueKind::Function => json!({
             "name": key,
@@ -2395,7 +2383,7 @@ fn serialize_value(
             .as_number()
             .ok()
             .flatten()
-            .map(|number| number.as_f64())
+            .map(fusor_runtime::JsNumber::as_f64)
             .filter(|number| number.is_finite())
             .map(Value::from),
         ValueKind::String => value
@@ -2584,7 +2572,7 @@ fn script_error_position(
     }
 }
 
-/// Renders a thrown exception like DevTools does: `Name: message` followed by
+/// Renders a thrown exception like `DevTools` does: `Name: message` followed by
 /// the retained stack text when the engine installed one.
 fn exception_text(
     context: &mut Context<'_>,

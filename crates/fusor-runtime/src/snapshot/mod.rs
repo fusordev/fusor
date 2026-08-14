@@ -641,7 +641,7 @@ impl Runtime {
         for (id, binding) in self.global_bindings.iter() {
             let realm_id = realms
                 .get(binding.realm.index())
-                .map(|realm| realm.id())
+                .map(super::runtime::Realm::id)
                 .ok_or(SnapshotError::IntegrityViolation)?;
             let state = self
                 .realms
@@ -994,7 +994,7 @@ fn encode_property_key(buffer: &mut Vec<u8>, key: &PropertyKey) -> Result<(), &'
     let atom = key.as_atom().ok_or("a property key without identity")?;
     if let Some(predefined) = atom.predefined_atom() {
         buffer.push(2);
-        buffer.extend_from_slice(&(predefined.ordinal() as u32).to_le_bytes());
+        buffer.extend_from_slice(&u32::from(predefined.ordinal()).to_le_bytes());
         return Ok(());
     }
     match atom.kind() {
@@ -1407,7 +1407,7 @@ fn restore_objects(
             None,
             true,
             false,
-            std::sync::Arc::new(Vec::new()),
+            Arc::new(Vec::new()),
             Some(runtime.shape_interner.clone()),
             Vec::new(),
         ));
@@ -1510,7 +1510,7 @@ fn resolve_object_kind(
             StagedBoxed::Boolean(value) => BoxedPrimitive::Boolean(value),
             StagedBoxed::Number(value) => BoxedPrimitive::Number(JsNumber::from_f64(value)),
             StagedBoxed::BigInt(limbs) => {
-                BoxedPrimitive::BigInt(std::sync::Arc::new(JsBigInt::from_normalized_limbs(limbs)))
+                BoxedPrimitive::BigInt(Arc::new(JsBigInt::from_normalized_limbs(limbs)))
             }
             StagedBoxed::String(units) => BoxedPrimitive::String(
                 JsString::from_code_units(units).map_err(SnapshotError::String)?,
@@ -1783,7 +1783,7 @@ fn resolve_staged_value(
         StagedValue::Boolean(value) => StoredValue::Boolean(value),
         StagedValue::Number(value) => StoredValue::Number(JsNumber::from_f64(value)),
         StagedValue::BigInt(limbs) => {
-            StoredValue::BigInt(std::sync::Arc::new(JsBigInt::from_normalized_limbs(limbs)))
+            StoredValue::BigInt(Arc::new(JsBigInt::from_normalized_limbs(limbs)))
         }
         StagedValue::String(units) => {
             let string = JsString::from_code_units(units).map_err(SnapshotError::String)?;
@@ -1885,9 +1885,7 @@ fn encode_functions(runtime: &Runtime, watermark: usize) -> Result<Vec<u8>, Snap
             fusor_bytecode::encode_verified_bytecode(&code.authority).map_err(|error| {
                 SnapshotError::Unsupported {
                     index: code_id.index(),
-                    what: match error {
-                        _ => "a verified bytecode authority",
-                    },
+                    what: "a verified bytecode authority",
                 }
             })?;
         code_payloads.push((code_id.index(), code.realm, encoded));
@@ -2666,7 +2664,7 @@ fn resolve_object_record_content(
         prototype,
         extensible,
         is_html_dda,
-        std::sync::Arc::new(shape_properties),
+        Arc::new(shape_properties),
         Some(runtime.shape_interner.clone()),
         resolved_slots,
     ))
@@ -2701,7 +2699,7 @@ fn restore_functions(
     let realm_id = |index: usize| -> Result<RealmId, SnapshotError> {
         realms
             .get(index)
-            .map(crate::Realm::id)
+            .map(Realm::id)
             .ok_or(SnapshotError::IntegrityViolation)
     };
     // Rebuild the shared eval-variable environment DAG first (parent
@@ -2903,7 +2901,7 @@ fn restore_functions(
                         None,
                         true,
                         false,
-                        std::sync::Arc::new(Vec::new()),
+                        Arc::new(Vec::new()),
                         Some(runtime.shape_interner.clone()),
                         Vec::new(),
                     ),
@@ -2970,7 +2968,7 @@ fn resolve_function_records(
         let lexical_new_target = match pending.lexical_new_target {
             Some(index) => Some(
                 *function_ids
-                    .get(index as usize)
+                    .get(index)
                     .filter(|id| **id != FunctionId::ZERO)
                     .ok_or(SnapshotError::IntegrityViolation)?,
             ),
@@ -2979,7 +2977,7 @@ fn resolve_function_records(
         let lexical_derived_constructor = match pending.lexical_derived_constructor {
             Some(index) => Some(
                 *function_ids
-                    .get(index as usize)
+                    .get(index)
                     .filter(|id| **id != FunctionId::ZERO)
                     .ok_or(SnapshotError::IntegrityViolation)?,
             ),

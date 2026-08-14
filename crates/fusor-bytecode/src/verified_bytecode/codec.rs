@@ -236,7 +236,7 @@ fn read_count(reader: &mut Reader<'_>) -> Result<usize, BytecodeCodecError> {
 /// [`CompilerString::try_from_code_units`], whose equality is logical, so
 /// Latin-1 and wide storage round-trip regardless of the original width.
 fn encode_string(buffer: &mut Vec<u8>, string: &CompilerString) {
-    let units: Vec<u16> = string.code_units().map(u16::from).collect();
+    let units: Vec<u16> = string.code_units().collect();
     write_u32(buffer, units.len() as u32);
     for unit in units {
         buffer.extend_from_slice(&unit.to_le_bytes());
@@ -261,6 +261,7 @@ fn decode_string(reader: &mut Reader<'_>) -> Result<CompilerString, BytecodeCode
 
 /// Encodes one compiler atom pool: `count`, then per atom a
 /// static-property-only flag byte and the exact string units.
+#[must_use]
 pub fn encode_atom_pool(atoms: &[CompilerAtom]) -> Vec<u8> {
     let mut buffer = Vec::new();
     write_u32(&mut buffer, atoms.len() as u32);
@@ -313,8 +314,9 @@ fn decode_atom_pool_from(reader: &mut Reader<'_>) -> Result<Vec<CompilerAtom>, B
 
 /// Encodes one heterogeneous constant pool: `count`, then per constant a
 /// kind byte (`1` = nested function, `0` = value), then the payload —
-/// numbers as exact binary64 bits, strings and BigInt decimals as UTF-16
+/// numbers as exact binary64 bits, strings and `BigInt` decimals as UTF-16
 /// units, template objects as cooked/raw element pairs.
+#[must_use]
 pub fn encode_constant_pool(constants: &[CompilerConstant]) -> Vec<u8> {
     let mut buffer = Vec::new();
     write_u32(&mut buffer, constants.len() as u32);
@@ -446,6 +448,7 @@ fn decode_constant_pool_from(
 
 /// Encodes one closure-source pool: `count`, then per entry a variant tag
 /// and its dense payload.
+#[must_use]
 pub fn encode_closure_sources(sources: &[CompilerClosureSource]) -> Vec<u8> {
     let mut buffer = Vec::new();
     write_u32(&mut buffer, sources.len() as u32);
@@ -553,6 +556,7 @@ fn decode_closure_sources_from(
 /// capture/constant layouts, the three pools, and the scalar markers.
 /// Derived aggregates (usage, nesting depth) are recomputed by the
 /// verifier on decode.
+#[must_use]
 pub fn encode_graph(graph: &VerifiedCompilerFunctionGraph) -> Vec<u8> {
     let mut buffer = Vec::new();
     write_u32(&mut buffer, graph.functions().len() as u32);
@@ -822,6 +826,7 @@ fn decode_function_record(
 /// Encodes the verified per-function metadata as the metadata-section
 /// payload: executable kinds, names, variable definitions, closure
 /// descriptors, and source records (exact text, spans, and PC mappings).
+#[must_use]
 pub fn encode_metadata(metadata: &[VerifiedFunctionMetadata]) -> Vec<u8> {
     let mut buffer = Vec::new();
     write_u32(&mut buffer, metadata.len() as u32);
@@ -1126,6 +1131,7 @@ pub fn decode_verified_bytecode(payload: &[u8]) -> Result<VerifiedBytecode, Byte
 /// Encodes one verified module declaration record: binding descriptors
 /// (name, slot, policy, origin, initializer, import name) and static
 /// request descriptors.
+#[must_use]
 pub fn encode_module(module: &crate::ModuleDeclarationRecord) -> Vec<u8> {
     let mut buffer = Vec::new();
     let bindings = module.bindings();
@@ -1172,7 +1178,7 @@ pub fn encode_module(module: &crate::ModuleDeclarationRecord) -> Vec<u8> {
 ///
 /// # Errors
 ///
-/// Returns a typed [BytecodeCodecError] for truncation, unknown tags,
+/// Returns a typed [`BytecodeCodecError`] for truncation, unknown tags,
 /// or trailing bytes.
 pub fn decode_module(
     payload: &[u8],

@@ -2402,7 +2402,7 @@ pub(super) fn drain_ready_atomics_jobs_before_host_turn(
     Ok(())
 }
 
-/// Enqueues one host callback job (ECMA-262 HostEnqueuePromiseJob) into
+/// Enqueues one host callback job (ECMA-262 `HostEnqueuePromiseJob`) into
 /// the promise-job queue: the callback runs at the next microtask
 /// checkpoint in FIFO order with Promise reactions, under the same
 /// pending-job limit.
@@ -2413,7 +2413,7 @@ pub(crate) fn enqueue_host_job(
     match enqueue_promise_job(runtime, PromiseJob::HostCallback { function }) {
         Ok(()) => Ok(()),
         Err(NativeFailure::Execution(error)) => Err(error),
-        Err(_) => Err(ExecutionError::from(crate::EngineFault::RuntimeInvariant {
+        Err(_) => Err(ExecutionError::from(EngineFault::RuntimeInvariant {
             message: "the promise-job reserve path is execution-only",
         })),
     }

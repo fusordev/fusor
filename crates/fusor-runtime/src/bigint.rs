@@ -127,7 +127,7 @@ impl JsBigInt {
         &self.limbs
     }
 
-    /// Rebuilds a BigInt from normalized two's-complement limbs (the
+    /// Rebuilds a `BigInt` from normalized two's-complement limbs (the
     /// snapshot restore path; the blob's checksum guards the invariant).
     pub(crate) fn from_normalized_limbs(limbs: Vec<u32>) -> Self {
         Self { limbs }

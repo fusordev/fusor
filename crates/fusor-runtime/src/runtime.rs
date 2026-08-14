@@ -5578,7 +5578,7 @@ pub struct Runtime {
     pub(crate) atomics_timer: Option<atomics_waiters::AtomicsTimerDriver>,
     pub(crate) pending_dynamic_imports: VecDeque<dynamic_imports::PendingDynamicImportRecord>,
     /// Remaining async-dependency count per in-flight `import.defer()` promise
-    /// (SafePerformPromiseAll bookkeeping).
+    /// (`SafePerformPromiseAll` bookkeeping).
     pub(crate) deferred_import_waiters: HashMap<ObjectId, u32>,
     /// Host-installed callbacks backing `FunctionImplementation::Native`
     /// `Host` functions; a slot is reserved on registration and the closure is
@@ -5588,7 +5588,7 @@ pub struct Runtime {
     pub(crate) kept_alive: Vec<StoredValue>,
     pub(crate) generator_states: HashMap<ObjectId, crate::vm::GeneratorRecord>,
     pub(crate) async_function_states: HashMap<ObjectId, crate::vm::AsyncFunctionRecord>,
-    /// ECMA-262 IncrementModuleAsyncEvaluationCount (global monotonic counter).
+    /// ECMA-262 `IncrementModuleAsyncEvaluationCount` (global monotonic counter).
     pub(crate) module_async_evaluation_count: u32,
     pub(crate) async_generator_states: HashMap<ObjectId, crate::vm::AsyncGeneratorRecord>,
     pub(crate) array_from_async_states: HashMap<ObjectId, crate::vm::ArrayFromAsyncRecord>,

@@ -142,7 +142,7 @@ impl<'de, 'a, 'c, 'ctx> de::Deserializer<'de> for JsValueDeserializer<'a, 'c, 'c
         let kind = self
             .value
             .kind()
-            .map_err(|error| de::Error::custom(error))?;
+            .map_err(de::Error::custom)?;
         match kind {
             fusor_runtime::ValueKind::Undefined | fusor_runtime::ValueKind::Null => {
                 visitor.visit_unit()
@@ -151,7 +151,7 @@ impl<'de, 'a, 'c, 'ctx> de::Deserializer<'de> for JsValueDeserializer<'a, 'c, 'c
             fusor_runtime::ValueKind::Number => visitor.visit_f64(
                 self.value
                     .as_number()
-                    .map_err(|error| de::Error::custom(error))?
+                    .map_err(de::Error::custom)?
                     .expect("Number kind")
                     .as_f64(),
             ),
@@ -177,7 +177,7 @@ impl<'de, 'a, 'c, 'ctx> de::Deserializer<'de> for JsValueDeserializer<'a, 'c, 'c
         let Some(value) = self
             .value
             .as_boolean()
-            .map_err(|error| de::Error::custom(error))?
+            .map_err(de::Error::custom)?
         else {
             return Err(self.invalid("a Boolean"));
         };
@@ -200,7 +200,7 @@ impl<'de, 'a, 'c, 'ctx> de::Deserializer<'de> for JsValueDeserializer<'a, 'c, 'c
         let Some(number) = self
             .value
             .as_number()
-            .map_err(|error| de::Error::custom(error))?
+            .map_err(de::Error::custom)?
         else {
             return Err(self.invalid("a Number"));
         };
@@ -214,7 +214,7 @@ impl<'de, 'a, 'c, 'ctx> de::Deserializer<'de> for JsValueDeserializer<'a, 'c, 'c
         let Some(number) = self
             .value
             .as_number()
-            .map_err(|error| de::Error::custom(error))?
+            .map_err(de::Error::custom)?
         else {
             return Err(self.invalid("a Number"));
         };
@@ -242,7 +242,7 @@ impl<'de, 'a, 'c, 'ctx> de::Deserializer<'de> for JsValueDeserializer<'a, 'c, 'c
         let Some(value) = self
             .value
             .as_string()
-            .map_err(|error| de::Error::custom(error))?
+            .map_err(de::Error::custom)?
         else {
             return Err(self.invalid("a String"));
         };
@@ -270,7 +270,7 @@ impl<'de, 'a, 'c, 'ctx> de::Deserializer<'de> for JsValueDeserializer<'a, 'c, 'c
         if matches!(
             self.value
                 .kind()
-                .map_err(|error| de::Error::custom(error))?,
+                .map_err(de::Error::custom)?,
             fusor_runtime::ValueKind::Undefined | fusor_runtime::ValueKind::Null
         ) {
             visitor.visit_none()
@@ -316,7 +316,7 @@ impl<'de, 'a, 'c, 'ctx> de::Deserializer<'de> for JsValueDeserializer<'a, 'c, 'c
             .value
             .clone()
             .into_object()
-            .map_err(|error| de::Error::custom(error))?;
+            .map_err(de::Error::custom)?;
         let length = array_length(self.context, self.value)?;
         visitor.visit_seq(ArrayAccess {
             context: self.context,
@@ -354,7 +354,7 @@ impl<'de, 'a, 'c, 'ctx> de::Deserializer<'de> for JsValueDeserializer<'a, 'c, 'c
             .value
             .clone()
             .into_object()
-            .map_err(|error| de::Error::custom(error))?;
+            .map_err(de::Error::custom)?;
         let keys = object_string_keys(self.context, self.value)?;
         visitor.visit_map(ObjectAccess {
             context: self.context,
@@ -391,7 +391,7 @@ impl<'de, 'a, 'c, 'ctx> de::Deserializer<'de> for JsValueDeserializer<'a, 'c, 'c
         let Some(variant) = self
             .value
             .as_string()
-            .map_err(|error| de::Error::custom(error))?
+            .map_err(de::Error::custom)?
         else {
             return Err(self.invalid("a String enum representation"));
         };
@@ -419,7 +419,7 @@ impl<'de, 'a, 'c, 'ctx> de::Deserializer<'de> for JsValueDeserializer<'a, 'c, 'c
 fn is_array(context: &Context<'_>, value: &JsValue) -> Result<bool, DeserializationError> {
     context
         .is_array(value)
-        .map_err(|error| de::Error::custom(error))
+        .map_err(de::Error::custom)
 }
 
 /// Reads the dense length of an Array exotic (defaulting to 0 for non-arrays).
@@ -427,13 +427,13 @@ fn array_length(context: &mut Context<'_>, value: &JsValue) -> Result<usize, Des
     let object = value
         .clone()
         .into_object()
-        .map_err(|error| de::Error::custom(error))?;
+        .map_err(de::Error::custom)?;
     let key = context
         .property_key("length")
-        .map_err(|error| de::Error::custom(error))?;
+        .map_err(de::Error::custom)?;
     let length = object
         .get(context, key)
-        .map_err(|error| de::Error::custom(error))?;
+        .map_err(de::Error::custom)?;
     Ok(length
         .as_number()
         .ok()
@@ -450,10 +450,10 @@ fn object_string_keys(
     let object = value
         .clone()
         .into_object()
-        .map_err(|error| de::Error::custom(error))?;
+        .map_err(de::Error::custom)?;
     let keys = object
         .own_property_keys(context)
-        .map_err(|error| de::Error::custom(error))?;
+        .map_err(de::Error::custom)?;
     Ok(keys
         .into_iter()
         .filter(|key| {
@@ -484,11 +484,11 @@ impl<'de, 'c, 'ctx> SeqAccess<'de> for ArrayAccess<'c, 'ctx> {
         let key = self
             .context
             .property_key(&self.index.to_string())
-            .map_err(|error| de::Error::custom(error))?;
+            .map_err(de::Error::custom)?;
         let value = self
             .object
             .get(self.context, key)
-            .map_err(|error| de::Error::custom(error))?;
+            .map_err(de::Error::custom)?;
         self.index += 1;
         seed.deserialize(JsValueDeserializer::new(
             self.context,
@@ -528,7 +528,7 @@ impl<'de, 'c, 'ctx> MapAccess<'de> for ObjectAccess<'c, 'ctx> {
         let value = self
             .object
             .get(self.context, key.clone())
-            .map_err(|error| de::Error::custom(error))?;
+            .map_err(de::Error::custom)?;
         self.pending = Some(value);
         seed.deserialize(name.into_deserializer()).map(Some)
     }
@@ -614,7 +614,7 @@ impl<'a, 'ctx> ser::Serializer for JsValueSerializer<'a, 'ctx> {
     }
 
     fn serialize_str(self, value: &str) -> Result<Self::Ok, Self::Error> {
-        let string = JsString::from_utf8(value).map_err(|error| ser::Error::custom(error))?;
+        let string = JsString::from_utf8(value).map_err(ser::Error::custom)?;
         Ok(self.context.string(string))
     }
 
@@ -754,7 +754,7 @@ impl<'a, 'ctx> SerializeSeq for ValueSequence<'a, 'ctx> {
     fn end(self) -> Result<Self::Ok, Self::Error> {
         self.context
             .new_array(self.elements)
-            .map_err(|error| ser::Error::custom(error))
+            .map_err(ser::Error::custom)
     }
 }
 
@@ -841,17 +841,17 @@ impl<'a, 'ctx> SerializeMap for ValueMap<'a, 'ctx> {
         let object = self
             .context
             .new_object()
-            .map_err(|error| ser::Error::custom(error))?
+            .map_err(ser::Error::custom)?
             .into_object()
-            .map_err(|error| ser::Error::custom(error))?;
+            .map_err(ser::Error::custom)?;
         for (name, value) in self.entries {
             let key = self
                 .context
                 .property_key(&name.to_utf8_lossy().unwrap_or_default())
-                .map_err(|error| ser::Error::custom(error))?;
+                .map_err(ser::Error::custom)?;
             object
                 .set(self.context, key, value)
-                .map_err(|error| ser::Error::custom(error))?;
+                .map_err(ser::Error::custom)?;
         }
         Ok(object.as_value())
     }
@@ -907,7 +907,7 @@ impl ser::Serializer for KeySerializer {
     type SerializeStructVariant = KeySequence;
 
     fn serialize_str(self, value: &str) -> Result<Self::Ok, Self::Error> {
-        JsString::from_utf8(value).map_err(|error| ser::Error::custom(error))
+        JsString::from_utf8(value).map_err(ser::Error::custom)
     }
 
     fn serialize_char(self, value: char) -> Result<Self::Ok, Self::Error> {

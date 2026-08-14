@@ -20,7 +20,7 @@ pub(crate) struct ModuleNamespaceState {
 /// The JavaScript-observable failure of an ECMA-262 `EvaluateModuleSync`
 /// performed for a deferred namespace property access.
 pub(crate) enum DeferredNamespaceEvaluationFailure {
-    /// `ReadyForSyncExecution` was false: the caller throws a TypeError.
+    /// `ReadyForSyncExecution` was false: the caller throws a `TypeError`.
     NotReady,
     /// The module's evaluation rejected: the caller throws this value.
     Thrown(StoredValue),
@@ -28,7 +28,7 @@ pub(crate) enum DeferredNamespaceEvaluationFailure {
     Fault(crate::EngineFault),
 }
 
-/// A namespace export entry (ECMA-262 ResolvedBinding shape).
+/// A namespace export entry (ECMA-262 `ResolvedBinding` shape).
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum NamespaceExport {
     /// A live binding: target module + binding cell.
@@ -80,7 +80,7 @@ impl Runtime {
     ///
     /// Symbol keys and the `"then"` string never trigger evaluation
     /// (`IsSymbolLikeNamespaceKey`); every other string key does. A module
-    /// that cannot complete synchronously raises a TypeError; an evaluation
+    /// that cannot complete synchronously raises a `TypeError`; an evaluation
     /// rejection surfaces as the original rejection value. Success clears
     /// `[[Deferred]]` so later accesses are ordinary.
     pub(crate) fn ensure_deferred_namespace_evaluation(

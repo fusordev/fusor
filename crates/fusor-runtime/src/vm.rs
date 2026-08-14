@@ -970,7 +970,7 @@ impl ProxyOwnKeysContinuation {
 
 enum NativeContinuation {
     FunctionSource(FunctionSourceContinuation),
-    HostConstruct(Box<crate::vm::native::HostConstructContinuation>),
+    HostConstruct(Box<HostConstructContinuation>),
     FunctionApply(FunctionApplyContinuation),
     FunctionBind(FunctionBindContinuation),
     PropertyKey(PropertyKeyContinuation),

@@ -2444,7 +2444,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             .id
             .as_ref()
             .map(|identifier| identifier.span)
-            .or_else(|| anonymous_default.then(|| function.span));
+            .or_else(|| anonymous_default.then_some(function.span));
         self.inventory_executable(
             node_id,
             ExecutableKind::Function {
@@ -6060,7 +6060,7 @@ fn freeze_bindings(
             arguments_object: draft.arguments_object,
         });
     }
-    for binding in symbol_bindings.iter() {
+    for binding in &symbol_bindings {
         if binding.is_none() {
             return Err(CompilerError::SemanticInvariant {
                 invariant: "every ordinary semantic symbol has compiler binding",

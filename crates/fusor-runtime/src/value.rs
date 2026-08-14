@@ -442,7 +442,7 @@ impl JsValue {
         })
     }
 
-    /// Returns the BigInt payload, or `None` for another live value kind.
+    /// Returns the `BigInt` payload, or `None` for another live value kind.
     ///
     /// # Errors
     ///

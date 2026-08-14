@@ -41,11 +41,11 @@ use crate::{
     report_module_error, report_script_error,
 };
 
-/// The DevTools bundle the REPL forwards uncaught entry failures to while an
+/// The `DevTools` bundle the REPL forwards uncaught entry failures to while an
 /// inspector session is attached.
 ///
 /// V8-aligned: terminal entries that throw or fail to parse render in the
-/// DevTools console as `Runtime.exceptionThrown` events, in addition to the
+/// `DevTools` console as `Runtime.exceptionThrown` events, in addition to the
 /// miette report on stderr.
 #[derive(Clone)]
 pub(crate) struct ReplInspection {
@@ -55,7 +55,7 @@ pub(crate) struct ReplInspection {
 }
 
 impl ReplInspection {
-    /// Renders one uncaught entry failure into the attached DevTools session
+    /// Renders one uncaught entry failure into the attached `DevTools` session
     /// as a `Runtime.exceptionThrown` event, from inside the owning turn.
     fn emit_exception(
         &self,
@@ -541,11 +541,10 @@ async fn evaluate_repl_entry(
         if let Some(error) = error_slot.replace(None) {
             report_module_error("module entry", error);
         }
-        if print_completion {
-            if let Some(value) = completion.replace(None) {
+        if print_completion
+            && let Some(value) = completion.replace(None) {
                 println!("{}", format_value(&value));
             }
-        }
         imports.extend(extract_imports(entry));
     } else {
         let name = format!("<repl>:{entry_index}");
@@ -594,11 +593,10 @@ async fn evaluate_repl_entry(
             report_module_error("script entry", error);
             emit_in_turn(host_loop, inspection, exception, drain_entry, drain_name);
         }
-        if print_completion {
-            if let Some(value) = completion.replace(None) {
+        if print_completion
+            && let Some(value) = completion.replace(None) {
                 println!("{}", format_value(&value));
             }
-        }
     }
 }
 

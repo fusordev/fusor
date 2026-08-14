@@ -226,7 +226,7 @@ pub(super) enum PropertyFailure {
     /// (ECMA-262 10.4.6.2/10.4.6.3, the temporal dead zone).
     Uninitialized,
     /// A deferred namespace access found the module unable to complete
-    /// synchronously (ECMA-262 `ReadyForSyncExecution` false): a TypeError.
+    /// synchronously (ECMA-262 `ReadyForSyncExecution` false): a `TypeError`.
     DeferredNamespaceTypeError,
     /// A deferred namespace access triggered module evaluation, and the
     /// evaluation rejected with this original value.

@@ -1189,7 +1189,7 @@ pub(super) fn own_property_descriptor(
                 // ECMA-262 10.4.6.3 [[GetOwnProperty]] step 2: the exports
                 // list triggers deferred evaluation for string keys (except
                 // "then").
-                crate::vm::proxy::ensure_deferred_namespace_access(
+                ensure_deferred_namespace_access(
                     runtime,
                     *object,
                     key,
@@ -1250,7 +1250,7 @@ pub(super) fn resolve_own_property(
                 // ECMA-262 10.4.6.3 [[GetOwnProperty]] step 2: the exports
                 // list triggers deferred evaluation for string keys (except
                 // "then").
-                crate::vm::proxy::ensure_deferred_namespace_access(
+                ensure_deferred_namespace_access(
                     runtime,
                     *object,
                     key,

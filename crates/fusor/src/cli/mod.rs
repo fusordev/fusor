@@ -1,5 +1,5 @@
 //! The `fusor` binary's CLI modules (node-like module runner, ESM REPL, and
-//! DevTools entry point).
+//! `DevTools` entry point).
 //!
 //! These modules belong to the *binary* target of the `fusor` package
 //! (`src/main.rs`), not to the facade library (`src/lib.rs`): the module

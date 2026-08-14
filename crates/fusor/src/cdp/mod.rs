@@ -1,4 +1,4 @@
-//! Chrome DevTools Protocol server for the Experimental JavaScript Engine.
+//! Chrome `DevTools` Protocol server for the Experimental JavaScript Engine.
 //!
 //! A bin-side module of the `fusor` package (2026-08-14: the former
 //! `fusor-cdp` crate merged into the CLI — the CDP server's only consumer

@@ -1161,7 +1161,7 @@ impl From<ExecutionError> for GlobalScriptError {
 #[derive(Debug)]
 pub enum CallError {
     /// The called function threw; the rooted thrown value is retained.
-    Thrown(crate::JsValue),
+    Thrown(JsValue),
     /// An engine or host failure during the call (limits, allocation, an
     /// engine fault), or a thrown exception that could not be re-rooted.
     Execution(ExecutionError),

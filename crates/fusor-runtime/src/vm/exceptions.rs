@@ -1136,7 +1136,7 @@ fn freeze_pending_engine_stack(
     header = header.concat(message)?;
     header = header.concat(&JsString::from_utf8("\n")?)?;
     let stack = header.concat(&frames_rendered)?;
-    let (kind, message) = (kind.clone(), message.clone());
+    let (kind, message) = (*kind, message.clone());
     let _ = std::mem::replace(
         &mut pending.payload,
         PendingExceptionPayload::ThrownValue(StoredValue::Undefined),

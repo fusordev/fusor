@@ -3496,7 +3496,7 @@ pub(crate) enum PromiseReactionTarget {
         module: crate::ids::ModuleRecordId,
     },
     /// One of the async-dependency capability promises of an `import.defer()`
-    /// (SafePerformPromiseAll element reaction).
+    /// (`SafePerformPromiseAll` element reaction).
     ImportDeferDeps {
         promise: ObjectId,
         module: crate::ids::ModuleRecordId,

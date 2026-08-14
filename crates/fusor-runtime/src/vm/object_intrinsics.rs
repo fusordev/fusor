@@ -2063,7 +2063,7 @@ pub(super) fn own_property_keys(
         match runtime.ensure_deferred_namespace_evaluation(object, None) {
             Ok(()) => {}
             Err(failure) => {
-                return Err(crate::vm::proxy::deferred_namespace_evaluation_abrupt(
+                return Err(deferred_namespace_evaluation_abrupt(
                     realm, origin, failure,
                 )?);
             }

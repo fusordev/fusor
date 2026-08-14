@@ -1396,7 +1396,7 @@ pub fn evaluate_preloaded_module_graph(
     Ok(context.undefined_value())
 }
 
-/// Returns the recorded evaluation error (ECMA-262 [[EvaluationError]]) of
+/// Returns the recorded evaluation error (ECMA-262 [[`EvaluationError`]]) of
 /// the module registered under `root_name` in `context`'s realm, if its
 /// evaluation failed.
 ///
@@ -1599,7 +1599,7 @@ pub fn settle_dynamic_import(
         // `SyntaxError` (resolution phase); a host load or resolution miss
         // rejects with a `TypeError` (ECMA-262 FinishDynamicImport onRejected).
         Err(error) if is_syntax_resolution_failure(&error) => {
-            context.reject_dynamic_import_syntax(import, &error.to_string())?
+            context.reject_dynamic_import_syntax(import, &error.to_string())?;
         }
         Err(error) => context.reject_dynamic_import(import, &error.to_string())?,
     }
