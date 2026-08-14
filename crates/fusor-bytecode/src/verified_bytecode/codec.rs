@@ -28,6 +28,16 @@ use crate::{
     CompilerConstant, CompilerConstantValue, CompilerString, CompilerTemplateElement,
     CompilerTemplateObject, FunctionTemplateId,
 };
+use crate::compiler_graph::{
+    UnverifiedCompilerFunction, UnverifiedCompilerFunctionGraph, VerifiedCompilerFunction,
+    VerifiedCompilerFunctionGraph, verify_compiler_function_graph,
+};
+use crate::function::UnverifiedFunctionHeader;
+use crate::verifier::{
+    CompilerCapturedBinding, CompilerCaptureLayout, CompilerConstantKind, CompilerConstantLayout,
+    FunctionIndexDomains, UnverifiedCompilerFunctionBody, VerificationLimits,
+    verify_compiler_control_flow,
+};
 
 /// The bytecode codec magic.
 pub const BYTECODE_CODEC_MAGIC: [u8; 8] = *b"FUSRBYTE";
@@ -51,6 +61,8 @@ pub enum BytecodeCodecError {
     /// A decoded pool value violated a canonical invariant (string length
     /// domain, allocation failure).
     String(String),
+    /// The load-time re-verification (§8.3) rejected the decoded payload.
+    Verification(String),
 }
 
 impl fmt::Display for BytecodeCodecError {
@@ -62,6 +74,9 @@ impl fmt::Display for BytecodeCodecError {
             }
             Self::Truncated => formatter.write_str("the bytecode payload is truncated"),
             Self::String(message) => write!(formatter, "invalid bytecode pool value: {message}"),
+            Self::Verification(message) => {
+                write!(formatter, "bytecode re-verification failed: {message}")
+            }
         }
     }
 }
@@ -250,23 +265,30 @@ pub fn encode_atom_pool(atoms: &[CompilerAtom]) -> Vec<u8> {
 /// a canonical string violation, or trailing bytes.
 pub fn decode_atom_pool(payload: &[u8]) -> Result<Vec<CompilerAtom>, BytecodeCodecError> {
     let mut reader = Reader::new(payload);
-    let count = read_count(&mut reader)?;
+    let atoms = decode_atom_pool_from(&mut reader)?;
+    if reader.remaining() != 0 {
+        return Err(BytecodeCodecError::Truncated);
+    }
+    Ok(atoms)
+}
+
+/// Reads one atom pool from the reader's current position (the graph
+/// record sub-payload form: no trailing-byte check).
+fn decode_atom_pool_from(reader: &mut Reader<'_>) -> Result<Vec<CompilerAtom>, BytecodeCodecError> {
+    let count = read_count(reader)?;
     let mut atoms = Vec::new();
     atoms
         .try_reserve_exact(count)
         .map_err(|_| BytecodeCodecError::String("atom allocation failed".to_owned()))?;
     for _ in 0..count {
         let flag = reader.read_u8()?;
-        let string = decode_string(&mut reader)?;
+        let string = decode_string(reader)?;
         let atom = match flag {
             0 => CompilerAtom::new(string),
             1 => CompilerAtom::new_static_property_only(string),
             other => return Err(BytecodeCodecError::FormatMismatch { found: u32::from(other) }),
         };
         atoms.push(atom);
-    }
-    if reader.remaining() != 0 {
-        return Err(BytecodeCodecError::Truncated);
     }
     Ok(atoms)
 }
@@ -329,7 +351,19 @@ pub fn encode_constant_pool(constants: &[CompilerConstant]) -> Vec<u8> {
 /// or value tag, a canonical string/template violation, or trailing bytes.
 pub fn decode_constant_pool(payload: &[u8]) -> Result<Vec<CompilerConstant>, BytecodeCodecError> {
     let mut reader = Reader::new(payload);
-    let count = read_count(&mut reader)?;
+    let constants = decode_constant_pool_from(&mut reader)?;
+    if reader.remaining() != 0 {
+        return Err(BytecodeCodecError::Truncated);
+    }
+    Ok(constants)
+}
+
+/// Reads one constant pool from the reader's current position (the graph
+/// record sub-payload form: no trailing-byte check).
+fn decode_constant_pool_from(
+    reader: &mut Reader<'_>,
+) -> Result<Vec<CompilerConstant>, BytecodeCodecError> {
+    let count = read_count(reader)?;
     let mut constants = Vec::new();
     constants
         .try_reserve_exact(count)
@@ -344,13 +378,13 @@ pub fn decode_constant_pool(payload: &[u8]) -> Result<Vec<CompilerConstant>, Byt
                     0 => CompilerConstantValue::Number(Binary64Constant::from_bits(
                         reader.read_u64()?,
                     )),
-                    1 => CompilerConstantValue::String(decode_string(&mut reader)?),
+                    1 => CompilerConstantValue::String(decode_string(reader)?),
                     2 => CompilerConstantValue::BigInt(
-                        CompilerBigInt::try_from_decimal(decode_string(&mut reader)?)
+                        CompilerBigInt::try_from_decimal(decode_string(reader)?)
                             .map_err(|error| BytecodeCodecError::String(error.to_string()))?,
                     ),
                     3 => {
-                        let element_count = read_count(&mut reader)?;
+                        let element_count = read_count(reader)?;
                         let mut elements = Vec::new();
                         elements.try_reserve_exact(element_count).map_err(|_| {
                             BytecodeCodecError::String("template allocation failed".to_owned())
@@ -358,7 +392,7 @@ pub fn decode_constant_pool(payload: &[u8]) -> Result<Vec<CompilerConstant>, Byt
                         for _ in 0..element_count {
                             let cooked = match reader.read_u8()? {
                                 0 => None,
-                                1 => Some(decode_string(&mut reader)?),
+                                1 => Some(decode_string(reader)?),
                                 other => {
                                     return Err(BytecodeCodecError::FormatMismatch {
                                         found: u32::from(other),
@@ -367,7 +401,7 @@ pub fn decode_constant_pool(payload: &[u8]) -> Result<Vec<CompilerConstant>, Byt
                             };
                             elements.push(CompilerTemplateElement::new(
                                 cooked,
-                                decode_string(&mut reader)?,
+                                decode_string(reader)?,
                             ));
                         }
                         CompilerConstantValue::TemplateObject(
@@ -392,9 +426,6 @@ pub fn decode_constant_pool(payload: &[u8]) -> Result<Vec<CompilerConstant>, Byt
             }
         };
         constants.push(constant);
-    }
-    if reader.remaining() != 0 {
-        return Err(BytecodeCodecError::Truncated);
     }
     Ok(constants)
 }
@@ -453,7 +484,19 @@ pub fn decode_closure_sources(
     payload: &[u8],
 ) -> Result<Vec<CompilerClosureSource>, BytecodeCodecError> {
     let mut reader = Reader::new(payload);
-    let count = read_count(&mut reader)?;
+    let sources = decode_closure_sources_from(&mut reader)?;
+    if reader.remaining() != 0 {
+        return Err(BytecodeCodecError::Truncated);
+    }
+    Ok(sources)
+}
+
+/// Reads one closure-source pool from the reader's current position (the
+/// graph record sub-payload form: no trailing-byte check).
+fn decode_closure_sources_from(
+    reader: &mut Reader<'_>,
+) -> Result<Vec<CompilerClosureSource>, BytecodeCodecError> {
+    let count = read_count(reader)?;
     let mut sources = Vec::new();
     sources
         .try_reserve_exact(count)
@@ -485,10 +528,279 @@ pub fn decode_closure_sources(
         };
         sources.push(source);
     }
+    Ok(sources)
+}
+
+// ---- Graph section codec (section 1) ----
+
+/// Encodes one verified compiler graph as its graph-section payload: the
+/// root identity and one record per function — raw bytecode, the
+/// serialized stack size, index domains, serialized header bits, the
+/// capture/constant layouts, the three pools, and the scalar markers.
+/// Derived aggregates (usage, nesting depth) are recomputed by the
+/// verifier on decode.
+pub fn encode_graph(graph: &VerifiedCompilerFunctionGraph) -> Vec<u8> {
+    let mut buffer = Vec::new();
+    write_u32(&mut buffer, graph.functions().len() as u32);
+    for function in graph.functions() {
+        encode_function_record(&mut buffer, function);
+    }
+    write_u32(&mut buffer, graph.root_id().get());
+    buffer
+}
+
+/// Encodes one function record.
+fn encode_function_record(buffer: &mut Vec<u8>, function: &VerifiedCompilerFunction) {
+    let flow = function.control_flow();
+    let bytecode = flow.bytecode();
+    write_u32(buffer, bytecode.len() as u32);
+    buffer.extend_from_slice(bytecode);
+    write_u32(buffer, flow.computed_stack_size());
+    let domains = flow.domains();
+    write_u32(buffer, domains.atom_pool_len());
+    write_u32(buffer, domains.constant_pool_len());
+    write_u32(buffer, domains.argument_count());
+    write_u32(buffer, domains.local_count());
+    write_u32(buffer, domains.closure_var_count());
+    let header = flow.function_header();
+    buffer.extend_from_slice(&header.flags().bits().to_le_bytes());
+    buffer.push(header.mode().bits());
+    write_u32(buffer, header.defined_argument_count());
+    write_u32(buffer, header.variable_reference_count());
+    match flow.compiler_capture_layout() {
+        Some(layout) => {
+            buffer.push(1);
+            let bindings = layout.bindings();
+            write_u32(buffer, bindings.len() as u32);
+            for binding in bindings {
+                match binding {
+                    CompilerCapturedBinding::Argument(index) => {
+                        buffer.push(0);
+                        write_u32(buffer, *index);
+                    }
+                    CompilerCapturedBinding::FunctionLocal(index) => {
+                        buffer.push(1);
+                        write_u32(buffer, *index);
+                    }
+                    CompilerCapturedBinding::ScopedLocal(index) => {
+                        buffer.push(2);
+                        write_u32(buffer, *index);
+                    }
+                }
+            }
+            match layout.mapped_arguments() {
+                Some(mapped) => {
+                    buffer.push(1);
+                    write_u32(buffer, mapped.len() as u32);
+                    for index in mapped {
+                        write_u32(buffer, *index);
+                    }
+                }
+                None => buffer.push(0),
+            }
+        }
+        None => buffer.push(0),
+    }
+    match flow.compiler_constant_layout() {
+        Some(layout) => {
+            buffer.push(1);
+            let kinds = layout.kinds();
+            write_u32(buffer, kinds.len() as u32);
+            for kind in kinds {
+                buffer.push(match kind {
+                    CompilerConstantKind::Value => 0,
+                    CompilerConstantKind::Function => 1,
+                });
+            }
+        }
+        None => buffer.push(0),
+    }
+    buffer.extend_from_slice(&encode_atom_pool(function.atoms()));
+    buffer.extend_from_slice(&encode_constant_pool(function.constants()));
+    buffer.extend_from_slice(&encode_closure_sources(function.closure_sources()));
+    buffer.push(u8::from(function.has_direct_eval()));
+    match function.parameter_initialization_end() {
+        Some(boundary) => {
+            buffer.push(1);
+            write_u32(buffer, boundary);
+        }
+        None => buffer.push(0),
+    }
+    write_u32(buffer, function.function_initializer_prefix_start());
+    let eval_references = function.eval_reference_call_instructions();
+    write_u32(buffer, eval_references.len() as u32);
+    for index in eval_references {
+        write_u32(buffer, *index);
+    }
+}
+
+/// Decodes one graph-section payload and rebuilds the verified graph by
+/// re-running the body verifier per function and the whole-graph verifier
+/// ("load-time verification", §8.3).
+///
+/// # Errors
+///
+/// Returns a typed [`BytecodeCodecError`] for truncation, unknown tags,
+/// canonical pool violations, a serialized-stack-size mismatch, or a
+/// body/whole-graph re-verification failure.
+pub fn decode_graph(payload: &[u8]) -> Result<VerifiedCompilerFunctionGraph, BytecodeCodecError> {
+    let mut reader = Reader::new(payload);
+    let count = read_count(&mut reader)?;
+    let mut functions = Vec::new();
+    functions
+        .try_reserve_exact(count)
+        .map_err(|_| BytecodeCodecError::String("function allocation failed".to_owned()))?;
+    for _ in 0..count {
+        functions.push(decode_function_record(&mut reader)?);
+    }
+    let root = FunctionTemplateId::new(reader.read_u32()?);
     if reader.remaining() != 0 {
         return Err(BytecodeCodecError::Truncated);
     }
-    Ok(sources)
+    let graph = UnverifiedCompilerFunctionGraph::new(root, Arc::from(functions));
+    verify_compiler_function_graph(graph, crate::FunctionGraphVerificationLimits::default())
+        .map_err(|error| BytecodeCodecError::Verification(error.to_string()))
+}
+
+/// Decodes one function record and re-verifies its control flow with the
+/// serialized stack-size check (§8.3 fail closed).
+fn decode_function_record(
+    reader: &mut Reader<'_>,
+) -> Result<UnverifiedCompilerFunction, BytecodeCodecError> {
+    let bytecode_length = read_count(reader)?;
+    let bytecode = reader.read_bytes(bytecode_length)?.to_vec();
+    let expected_stack_size = reader.read_u32()?;
+    let domains = FunctionIndexDomains::new(
+        reader.read_u32()?,
+        reader.read_u32()?,
+        reader.read_u32()?,
+        reader.read_u32()?,
+        reader.read_u32()?,
+    );
+    let serialized_flags = u16::from_le_bytes([reader.read_u8()?, reader.read_u8()?]);
+    let js_mode = reader.read_u8()?;
+    let header = UnverifiedFunctionHeader::new(
+        serialized_flags,
+        js_mode,
+        reader.read_u32()?,
+        reader.read_u32()?,
+    );
+    let capture_layout = match reader.read_u8()? {
+        0 => None,
+        1 => {
+            let binding_count = read_count(reader)?;
+            let mut bindings = Vec::new();
+            bindings.try_reserve_exact(binding_count).map_err(|_| {
+                BytecodeCodecError::String("capture allocation failed".to_owned())
+            })?;
+            for _ in 0..binding_count {
+                bindings.push(match reader.read_u8()? {
+                    0 => CompilerCapturedBinding::Argument(reader.read_u32()?),
+                    1 => CompilerCapturedBinding::FunctionLocal(reader.read_u32()?),
+                    2 => CompilerCapturedBinding::ScopedLocal(reader.read_u32()?),
+                    other => {
+                        return Err(BytecodeCodecError::FormatMismatch {
+                            found: u32::from(other),
+                        });
+                    }
+                });
+            }
+            let mut layout = CompilerCaptureLayout::new(Arc::from(bindings));
+            if reader.read_u8()? == 1 {
+                let mapped_count = read_count(reader)?;
+                let mut mapped = Vec::new();
+                mapped.try_reserve_exact(mapped_count).map_err(|_| {
+                    BytecodeCodecError::String("mapped arguments allocation failed".to_owned())
+                })?;
+                for _ in 0..mapped_count {
+                    mapped.push(reader.read_u32()?);
+                }
+                layout = layout.with_mapped_arguments(Arc::from(mapped));
+            }
+            Some(layout)
+        }
+        other => {
+            return Err(BytecodeCodecError::FormatMismatch {
+                found: u32::from(other),
+            });
+        }
+    };
+    let constant_layout = match reader.read_u8()? {
+        0 => None,
+        1 => {
+            let kind_count = read_count(reader)?;
+            let mut kinds = Vec::new();
+            kinds.try_reserve_exact(kind_count).map_err(|_| {
+                BytecodeCodecError::String("constant layout allocation failed".to_owned())
+            })?;
+            for _ in 0..kind_count {
+                kinds.push(match reader.read_u8()? {
+                    0 => CompilerConstantKind::Value,
+                    1 => CompilerConstantKind::Function,
+                    other => {
+                        return Err(BytecodeCodecError::FormatMismatch {
+                            found: u32::from(other),
+                        });
+                    }
+                });
+            }
+            Some(CompilerConstantLayout::new(Arc::from(kinds)))
+        }
+        other => {
+            return Err(BytecodeCodecError::FormatMismatch {
+                found: u32::from(other),
+            });
+        }
+    };
+    let atoms = decode_atom_pool_from(reader)?;
+    let constants = decode_constant_pool_from(reader)?;
+    let closure_sources = decode_closure_sources_from(reader)?;
+    let has_direct_eval = reader.read_u8()? != 0;
+    let parameter_initialization_end = match reader.read_u8()? {
+        0 => None,
+        1 => Some(reader.read_u32()?),
+        other => {
+            return Err(BytecodeCodecError::FormatMismatch {
+                found: u32::from(other),
+            });
+        }
+    };
+    let function_initializer_prefix_start = reader.read_u32()?;
+    let eval_reference_count = read_count(reader)?;
+    let mut eval_references = Vec::new();
+    eval_references.try_reserve_exact(eval_reference_count).map_err(|_| {
+        BytecodeCodecError::String("eval reference allocation failed".to_owned())
+    })?;
+    for _ in 0..eval_reference_count {
+        eval_references.push(reader.read_u32()?);
+    }
+
+    let mut body = UnverifiedCompilerFunctionBody::new(bytecode, domains, header);
+    if let Some(layout) = capture_layout {
+        body = body.with_capture_layout(layout);
+    }
+    if let Some(layout) = constant_layout {
+        body = body.with_constant_layout(layout);
+    }
+    let flow = verify_compiler_control_flow(body, VerificationLimits::default())
+        .map_err(|error| BytecodeCodecError::Verification(error.to_string()))?;
+    if flow.computed_stack_size() != expected_stack_size {
+        return Err(BytecodeCodecError::Verification(format!(
+            "serialized stack size mismatch: expected {expected_stack_size}, computed {}",
+            flow.computed_stack_size()
+        )));
+    }
+
+    Ok(UnverifiedCompilerFunction::new(
+        Arc::new(flow),
+        Arc::from(constants),
+        Arc::from(closure_sources),
+    )
+    .with_atom_pool(Arc::from(atoms))
+    .with_direct_eval(has_direct_eval)
+    .with_parameter_initialization_end(parameter_initialization_end)
+    .with_function_initializer_prefix_start(function_initializer_prefix_start)
+    .with_eval_reference_call_instructions(Arc::from(eval_references)))
 }
 
 #[cfg(test)]

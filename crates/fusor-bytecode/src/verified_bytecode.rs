@@ -24,8 +24,9 @@ mod lexical_environment;
 mod object_provenance;
 
 pub use codec::{
-    BYTECODE_CODEC_MAGIC, BYTECODE_CODEC_STAMP, BytecodeCodecError, frame_sections,
-    read_sections,
+    BYTECODE_CODEC_MAGIC, BYTECODE_CODEC_STAMP, BytecodeCodecError, decode_atom_pool,
+    decode_closure_sources, decode_constant_pool, decode_graph, encode_atom_pool,
+    encode_closure_sources, encode_constant_pool, encode_graph, frame_sections, read_sections,
 };
 
 use lexical_environment::verify_lexical_arrow_environments;
