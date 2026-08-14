@@ -5523,7 +5523,7 @@ pub(crate) fn global_declaration_error(
 /// ```
 pub struct Runtime {
     pub(crate) mailbox: Arc<ReleaseMailbox>,
-    atoms: AtomTable,
+    pub(crate) atoms: AtomTable,
     realms: Arena<crate::ids::RealmMarker, RealmState>,
     pub(crate) code: Arena<crate::ids::InstalledCodeMarker, InstalledCode>,
     pub(crate) functions: Arena<crate::ids::FunctionMarker, HeapFunction>,

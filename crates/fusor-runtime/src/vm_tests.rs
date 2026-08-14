@@ -7612,3 +7612,117 @@ fn js_exceptions_expose_their_origin_span() {
     assert_eq!(exception.source_span().start(), 0);
     assert_eq!(exception.source_span().end(), 7);
 }
+
+#[test]
+fn snapshot_round_trips_dynamic_atoms() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    // The keys keep the dynamic atoms alive; the context must drop before
+    // the immutable snapshot borrow.
+    let keys = {
+        let mut context = runtime.context(&realm).expect("context");
+        [
+            context.property_key("fusor-dynamic-a").expect("key"),
+            context.property_key("fusor-dynamic-b").expect("key"),
+        ]
+    };
+    let source = runtime.atoms.snapshot_atoms();
+    // The atoms payload encodes and decodes exactly (kind + code units).
+    let encoded = crate::snapshot::encode_atoms(&source);
+    let decoded = crate::snapshot::decode_atoms(&encoded).expect("decode");
+    assert_eq!(decoded.len(), source.len());
+    for ((kind_a, description_a), (kind_b, description_b)) in source.iter().zip(&decoded) {
+        assert_eq!(kind_a, kind_b);
+        assert_eq!(
+            description_a.code_units().collect::<Vec<_>>(),
+            description_b.code_units().collect::<Vec<_>>(),
+            "atom descriptions round-trip exactly"
+        );
+    }
+    // End to end: the blob carries the section through the frame/CRC
+    // machinery and restores into a fresh runtime without leaking
+    // accounting (the interner holds weak slots, §8 snapshot format).
+    let blob = runtime.snapshot().expect("snapshot");
+    assert!(
+        blob.starts_with(&crate::snapshot::SNAPSHOT_MAGIC),
+        "the blob carries the magic"
+    );
+    let mut restored = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    restored.from_snapshot(&blob).expect("restore");
+    assert_eq!(
+        restored.atom_usage().live_atoms,
+        PredefinedAtom::COUNT as u32,
+        "restore leaves the accounting clean (entries stay only while referenced)"
+    );
+    // The restored runtime works: realm creation and interning succeed.
+    // The key must stay alive while the usage is read (atoms live only
+    // while referenced, §8 snapshot format).
+    let restored_realm = restored.create_realm().expect("realm");
+    let realm_atoms = restored.atom_usage().live_atoms;
+    let again = {
+        let mut restored_context = restored.context(&restored_realm).expect("context");
+        restored_context.property_key("fusor-dynamic-a").expect("key")
+    };
+    assert_eq!(
+        restored.atom_usage().live_atoms,
+        realm_atoms + 1,
+        "interning works after restore"
+    );
+    drop(again);
+    drop(keys);
+}
+
+#[test]
+fn snapshot_restore_fails_closed_on_damage() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let keys = {
+        let mut context = runtime.context(&realm).expect("context");
+        [context.property_key("fusor-dynamic-a").expect("key")]
+    };
+    let blob = runtime.snapshot().expect("snapshot");
+    drop(keys);
+    let fresh = || Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+
+    let mut target = fresh();
+    assert!(
+        matches!(
+            target.from_snapshot(&blob[..blob.len() - 3]),
+            Err(crate::snapshot::SnapshotError::Truncated)
+        ),
+        "a truncated blob fails closed"
+    );
+    let mut bad = blob.clone();
+    bad[0] ^= 0xFF;
+    let mut target = fresh();
+    assert!(
+        matches!(
+            target.from_snapshot(&bad),
+            Err(crate::snapshot::SnapshotError::MagicMismatch)
+        ),
+        "a corrupted magic fails closed"
+    );
+    let mut bad = blob.clone();
+    bad[SNAPSHOT_MAGIC_LEN] = 9;
+    let mut target = fresh();
+    assert!(
+        matches!(
+            target.from_snapshot(&bad),
+            Err(crate::snapshot::SnapshotError::FormatMismatch { found: 9 })
+        ),
+        "an unknown format stamp fails closed"
+    );
+    let mut bad = blob.clone();
+    let last = bad.len() - 1;
+    bad[last - 5] ^= 0xFF;
+    let mut target = fresh();
+    assert!(
+        matches!(
+            target.from_snapshot(&bad),
+            Err(crate::snapshot::SnapshotError::IntegrityViolation)
+        ),
+        "a tampered payload fails the checksum"
+    );
+}
+
+const SNAPSHOT_MAGIC_LEN: usize = 8;

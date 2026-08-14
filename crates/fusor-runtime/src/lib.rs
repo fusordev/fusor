@@ -33,6 +33,7 @@ mod promise_rejection;
 mod property;
 mod runtime;
 mod shared_array_buffer;
+mod snapshot;
 mod string;
 mod value;
 mod vm;
@@ -75,6 +76,7 @@ pub use runtime::{
     PendingDynamicImport, Realm, Runtime, RuntimeLimits, RuntimeUsage,
 };
 pub use shared_array_buffer::SharedArrayBufferHandle;
+pub use snapshot::{SNAPSHOT_FORMAT_STAMP, SNAPSHOT_MAGIC, SnapshotError};
 pub use string::{CodeUnits, JsString, JsStringError, MAX_STRING_CODE_UNITS};
 pub use value::{Function, HostCall, HostCallback, JsValue, Object, Promise, PromiseResolver};
 pub use vm::ExecutionLimits;
