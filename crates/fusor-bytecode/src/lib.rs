@@ -84,7 +84,8 @@ pub use verified_bytecode::{
     UnverifiedModuleDeclarationRecord, VariableDefinition, VerifiedBytecode,
     VerifiedBytecodeFunction, VerifiedCompilerSource, VerifiedFunctionMetadata,
     decode_atom_pool, decode_closure_sources, decode_constant_pool, decode_graph,
-    encode_atom_pool, encode_closure_sources, encode_constant_pool, encode_graph,
+    decode_metadata, decode_verified_bytecode, encode_atom_pool, encode_closure_sources,
+    encode_constant_pool, encode_graph, encode_metadata, encode_verified_bytecode,
     frame_sections, read_sections, verify_compiler_bytecode_graph,
 };
 pub use verifier::{

@@ -6,7 +6,9 @@
 
 use std::sync::Arc;
 
-use fusor_bytecode::{BytecodeCodecError, decode_graph, encode_graph};
+use fusor_bytecode::{
+    BytecodeCodecError, decode_verified_bytecode, encode_verified_bytecode,
+};
 use fusor_compiler::CompilationContext;
 use fusor_frontend::{CompilationGoal, FrontendOptions, GlobalScriptGoal, with_parsed_program};
 
@@ -44,14 +46,70 @@ String(globalThis.summary.join('|'));";
 #[test]
 fn a_verified_graph_round_trips_through_the_codec() {
     let authority = compile(RICH_SCRIPT);
-    let graph = authority.compiler_graph();
-    let payload = encode_graph(graph);
-    let decoded = decode_graph(&payload).expect("decode");
-    assert_eq!(&decoded, graph.as_ref(), "the re-verified graph is identical");
+    let payload = encode_verified_bytecode(&authority).expect("encode");
+    let decoded = decode_verified_bytecode(&payload).expect("decode");
+    for (decoded_function, original_function) in decoded.functions().zip(authority.functions()) {
+        let decoded_function = decoded_function.function();
+        let original_function = original_function.function();
+        let decoded_flow = decoded_function.control_flow();
+        let original_flow = original_function.control_flow();
+        assert_eq!(decoded_flow.bytecode(), original_flow.bytecode(), "bytecode");
+        assert_eq!(
+            decoded_flow.computed_stack_size(),
+            original_flow.computed_stack_size(),
+            "computed stack size"
+        );
+        assert_eq!(
+            decoded_flow.transfer_evaluations(),
+            original_flow.transfer_evaluations(),
+            "transfer evaluations"
+        );
+        assert_eq!(decoded_flow.domains(), original_flow.domains(), "domains");
+        assert_eq!(
+            decoded_flow.function_header(),
+            original_flow.function_header(),
+            "header"
+        );
+        assert_eq!(decoded_function.atoms(), original_function.atoms(), "atoms");
+        assert_eq!(
+            decoded_function.constants(),
+            original_function.constants(),
+            "constants"
+        );
+        assert_eq!(
+            decoded_function.closure_sources(),
+            original_function.closure_sources(),
+            "closure sources"
+        );
+        assert_eq!(
+            decoded_function.has_direct_eval(),
+            original_function.has_direct_eval(),
+            "direct eval"
+        );
+        assert_eq!(
+            decoded_function.parameter_initialization_end(),
+            original_function.parameter_initialization_end(),
+            "parameter init end"
+        );
+        assert_eq!(
+            decoded_function.function_initializer_prefix_start(),
+            original_function.function_initializer_prefix_start(),
+            "initializer prefix"
+        );
+        assert_eq!(
+            decoded_function.eval_reference_call_instructions(),
+            original_function.eval_reference_call_instructions(),
+            "eval references"
+        );
+    }
+    assert_eq!(decoded.metadata(), authority.metadata(), "metadata");
+    assert_eq!(decoded.usage(), authority.usage(), "usage");
+    assert_eq!(decoded.requirements(), authority.requirements(), "requirements");
+    assert_eq!(&decoded, authority.as_ref(), "the re-verified authority is identical");
     // The decoded graph still authorizes the original behavior.
     assert_eq!(
-        decoded.root().control_flow().bytecode(),
-        graph.root().control_flow().bytecode(),
+        decoded.root().function().control_flow().bytecode(),
+        authority.compiler_graph().root().control_flow().bytecode(),
         "the root bytecode is bit-identical"
     );
 }
@@ -59,20 +117,22 @@ fn a_verified_graph_round_trips_through_the_codec() {
 #[test]
 fn graph_decoding_fails_closed_on_damage() {
     let authority = compile(RICH_SCRIPT);
-    let graph = authority.compiler_graph();
-    let payload = encode_graph(graph);
+    let payload = encode_verified_bytecode(&authority).expect("encode");
 
     // Truncation fails closed.
     assert!(matches!(
-        decode_graph(&payload[..payload.len() - 1]),
+        decode_verified_bytecode(&payload[..payload.len() - 1]),
         Err(BytecodeCodecError::Truncated)
     ));
 
     // A corrupted bytecode byte fails the re-verification, never panics.
     let mut damaged = payload.clone();
-    let bytecode_offset = 8; // count(4) + bytecode length(4)
+    // FUSRBYTE header (8) + stamp (4) + count (4) + tag (1) + length (8) +
+    // graph count (4): the graph payload's bytecode begins at offset 29+4.
+    let bytecode_offset = 8 + 4 + 4 + 1 + 8 + 4 + 4;
     damaged[bytecode_offset + 1] ^= 0xFF;
-    let error = decode_graph(&damaged).expect_err("corrupted bytecode must be rejected");
+    let error =
+        decode_verified_bytecode(&damaged).expect_err("corrupted bytecode must be rejected");
     assert!(
         matches!(error, BytecodeCodecError::Verification(_)),
         "unexpected error: {error}"

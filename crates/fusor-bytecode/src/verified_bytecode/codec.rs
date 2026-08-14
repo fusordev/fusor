@@ -28,6 +28,13 @@ use crate::{
     CompilerConstant, CompilerConstantValue, CompilerString, CompilerTemplateElement,
     CompilerTemplateObject, FunctionTemplateId,
 };
+use crate::{
+    BytecodeGraphVerificationLimits, BytecodePc, ClosureVariableDefinition, CompilerBindingKind,
+    CompilerBindingPolicy, CompilerClosureBinding, CompilerExecutableKind,
+    CompilerInitializationPolicy, CompilerWritePolicy, CompilerSource, PcSourceSpan, ScopeLink,
+    SourceByteSpan, UnverifiedCompilerBytecodeGraph, UnverifiedFunctionMetadata,
+    VariableDefinition, VerifiedBytecode, VerifiedFunctionMetadata, verify_compiler_bytecode_graph,
+};
 use crate::compiler_graph::{
     UnverifiedCompilerFunction, UnverifiedCompilerFunctionGraph, VerifiedCompilerFunction,
     VerifiedCompilerFunctionGraph, verify_compiler_function_graph,
@@ -63,6 +70,9 @@ pub enum BytecodeCodecError {
     String(String),
     /// The load-time re-verification (§8.3) rejected the decoded payload.
     Verification(String),
+    /// The bytecode carries a module declaration record, whose codec lands
+    /// with the module slice (fail closed until then).
+    UnsupportedModule,
 }
 
 impl fmt::Display for BytecodeCodecError {
@@ -77,6 +87,9 @@ impl fmt::Display for BytecodeCodecError {
             Self::Verification(message) => {
                 write!(formatter, "bytecode re-verification failed: {message}")
             }
+            Self::UnsupportedModule => formatter.write_str(
+                "module declaration records are not serializable yet (module slice pending)",
+            ),
         }
     }
 }
@@ -801,6 +814,565 @@ fn decode_function_record(
     .with_parameter_initialization_end(parameter_initialization_end)
     .with_function_initializer_prefix_start(function_initializer_prefix_start)
     .with_eval_reference_call_instructions(Arc::from(eval_references)))
+}
+
+// ---- Metadata section codec (section 2) ----
+
+/// Encodes the verified per-function metadata as the metadata-section
+/// payload: executable kinds, names, variable definitions, closure
+/// descriptors, and source records (exact text, spans, and PC mappings).
+pub fn encode_metadata(metadata: &[VerifiedFunctionMetadata]) -> Vec<u8> {
+    let mut buffer = Vec::new();
+    write_u32(&mut buffer, metadata.len() as u32);
+    for record in metadata {
+        encode_metadata_record(&mut buffer, record);
+    }
+    buffer
+}
+
+/// Encodes one metadata record.
+fn encode_metadata_record(buffer: &mut Vec<u8>, record: &VerifiedFunctionMetadata) {
+    buffer.push(executable_kind_tag(record.executable_kind()));
+    write_option_atom(buffer, record.function_name());
+    let variables = record.variables();
+    write_u32(buffer, variables.len() as u32);
+    for variable in variables {
+        write_option_atom(buffer, variable.name());
+        match variable.scope_next() {
+            ScopeLink::End => buffer.push(0),
+            ScopeLink::ArgumentScopeEnd => buffer.push(1),
+            ScopeLink::Local(index) => {
+                buffer.push(2);
+                write_u32(buffer, index);
+            }
+        }
+        write_policy(buffer, variable.policy());
+        buffer.push(u8::from(variable.has_scope()));
+        buffer.push(u8::from(variable.is_arguments_object()));
+        write_option_u32(buffer, variable.variable_reference());
+        write_option_u32(buffer, variable.function_initializer());
+    }
+    let closures = record.closures();
+    write_u32(buffer, closures.len() as u32);
+    for closure in closures {
+        write_option_atom(buffer, closure.name());
+        buffer.push(match closure.binding() {
+            CompilerClosureBinding::Captured(_) => 0,
+            CompilerClosureBinding::RealmGlobal(_) => 1,
+        });
+        write_policy(buffer, closure.binding().policy());
+        let source = closure.source();
+        buffer.push(closure_source_tag(source));
+        write_closure_source_payload(buffer, source);
+        buffer.push(u8::from(closure.is_arguments_object()));
+        buffer.push(u8::from(closure.is_deletable_eval_variable()));
+        write_option_u32(buffer, closure.function_initializer());
+    }
+    let source = record.source();
+    write_utf8(buffer, source.display_name_arc().as_ref());
+    write_utf8(buffer, source.text_arc().as_ref());
+    write_span(buffer, source.function_span());
+    match source.name_span() {
+        Some(span) => {
+            buffer.push(1);
+            write_span(buffer, span);
+        }
+        None => buffer.push(0),
+    }
+    let mappings = source.mappings();
+    write_u32(buffer, mappings.len() as u32);
+    for mapping in mappings {
+        write_u32(buffer, mapping.pc().get());
+        write_span(buffer, mapping.span());
+    }
+    match source.strict_mode_pcs.as_ref() {
+        Some(pcs) => {
+            buffer.push(1);
+            write_u32(buffer, pcs.len() as u32);
+            for pc in pcs.as_ref() {
+                write_u32(buffer, pc.get());
+            }
+        }
+        None => buffer.push(0),
+    }
+}
+
+/// Decodes one metadata-section payload.
+///
+/// # Errors
+///
+/// Returns a typed [`BytecodeCodecError`] for truncation, unknown tags, or
+/// trailing bytes.
+pub fn decode_metadata(
+    payload: &[u8],
+) -> Result<Arc<[UnverifiedFunctionMetadata]>, BytecodeCodecError> {
+    let mut reader = Reader::new(payload);
+    let count = read_count(&mut reader)?;
+    let mut metadata = Vec::new();
+    metadata
+        .try_reserve_exact(count)
+        .map_err(|_| BytecodeCodecError::String("metadata allocation failed".to_owned()))?;
+    // The compiler shares content-equal source texts across functions;
+    // decode re-interns them so the verified result (and its charged
+    // usage) matches byte-for-byte.
+    let mut interned_texts = std::collections::HashMap::<String, Arc<str>>::new();
+    let mut interned_names = std::collections::HashMap::<String, Arc<str>>::new();
+    for _ in 0..count {
+        let kind = executable_kind_from_tag(reader.read_u8()?)?;
+        let function_name = read_option_atom(&mut reader)?;
+        let variable_count = read_count(&mut reader)?;
+        let mut variables = Vec::new();
+        variables.try_reserve_exact(variable_count).map_err(|_| {
+            BytecodeCodecError::String("variable allocation failed".to_owned())
+        })?;
+        for _ in 0..variable_count {
+            let name = read_option_atom(&mut reader)?;
+            let scope_next = match reader.read_u8()? {
+                0 => ScopeLink::End,
+                1 => ScopeLink::ArgumentScopeEnd,
+                2 => ScopeLink::Local(reader.read_u32()?),
+                other => {
+                    return Err(BytecodeCodecError::FormatMismatch {
+                        found: u32::from(other),
+                    });
+                }
+            };
+            let policy = read_policy(&mut reader)?;
+            let has_scope = reader.read_u8()? != 0;
+            let arguments_object = reader.read_u8()? != 0;
+            let variable_reference = read_option_u32(&mut reader)?;
+            let function_initializer = read_option_u32(&mut reader)?;
+            let mut variable =
+                VariableDefinition::new(name, scope_next, policy, has_scope, variable_reference)
+                    .with_arguments_object(arguments_object);
+            if let Some(constant) = function_initializer {
+                variable = variable.with_function_initializer(constant);
+            }
+            variables.push(variable);
+        }
+        let closure_count = read_count(&mut reader)?;
+        let mut closures = Vec::new();
+        closures.try_reserve_exact(closure_count).map_err(|_| {
+            BytecodeCodecError::String("closure allocation failed".to_owned())
+        })?;
+        for _ in 0..closure_count {
+            let name = read_option_atom(&mut reader)?;
+            let binding_tag = reader.read_u8()?;
+            let policy = read_policy(&mut reader)?;
+            let source = read_closure_source(&mut reader)?;
+            let arguments_object = reader.read_u8()? != 0;
+            let deletable = reader.read_u8()? != 0;
+            let function_initializer = read_option_u32(&mut reader)?;
+            let mut closure = match binding_tag {
+                0 => ClosureVariableDefinition::new(name, policy, source),
+                1 => ClosureVariableDefinition::realm_global(name, policy, source),
+                other => {
+                    return Err(BytecodeCodecError::FormatMismatch {
+                        found: u32::from(other),
+                    });
+                }
+            };
+            closure = closure
+                .with_arguments_object(arguments_object)
+                .with_deletable_eval_variable(deletable);
+            if let Some(constant) = function_initializer {
+                closure = closure.with_function_initializer(constant);
+            }
+            closures.push(closure);
+        }
+        let display_name = read_utf8(&mut reader)?;
+        let display_name = interned_names
+            .entry(display_name.clone())
+            .or_insert_with(|| Arc::from(display_name.as_str()))
+            .clone();
+        let text = read_utf8(&mut reader)?;
+        let text = interned_texts
+            .entry(text.clone())
+            .or_insert_with(|| Arc::from(text.as_str()))
+            .clone();
+        let function_span = read_span(&mut reader)?;
+        let name_span = match reader.read_u8()? {
+            0 => None,
+            1 => Some(read_span(&mut reader)?),
+            other => {
+                return Err(BytecodeCodecError::FormatMismatch {
+                    found: u32::from(other),
+                });
+            }
+        };
+        let mapping_count = read_count(&mut reader)?;
+        let mut mappings = Vec::new();
+        mappings.try_reserve_exact(mapping_count).map_err(|_| {
+            BytecodeCodecError::String("mapping allocation failed".to_owned())
+        })?;
+        for _ in 0..mapping_count {
+            let pc = BytecodePc::new(reader.read_u32()?);
+            mappings.push(PcSourceSpan::new(pc, read_span(&mut reader)?));
+        }
+        let strict_mode_pcs = match reader.read_u8()? {
+            0 => None,
+            1 => {
+                let pc_count = read_count(&mut reader)?;
+                let mut pcs = Vec::new();
+                pcs.try_reserve_exact(pc_count).map_err(|_| {
+                    BytecodeCodecError::String("strict pc allocation failed".to_owned())
+                })?;
+                for _ in 0..pc_count {
+                    pcs.push(BytecodePc::new(reader.read_u32()?));
+                }
+                Some(Arc::from(pcs))
+            }
+            other => {
+                return Err(BytecodeCodecError::FormatMismatch {
+                    found: u32::from(other),
+                });
+            }
+        };
+        let source =
+            CompilerSource::new(display_name, text, function_span, name_span, Arc::from(mappings));
+        let source = match strict_mode_pcs {
+            Some(pcs) => source.with_strict_mode_pcs(pcs),
+            None => source,
+        };
+        metadata.push(
+            UnverifiedFunctionMetadata::new(function_name, Arc::from(variables), Arc::from(closures), source)
+                .with_executable_kind(kind),
+        );
+    }
+    if reader.remaining() != 0 {
+        return Err(BytecodeCodecError::Truncated);
+    }
+    Ok(Arc::from(metadata))
+}
+
+// ---- Full verified-bytecode payload (§8.2) ----
+
+/// Encodes one complete verified bytecode authority: the graph section
+/// (tag 1) and the metadata section (tag 2) under the FUSRBYTE framing.
+///
+/// # Errors
+///
+/// Returns [`BytecodeCodecError::UnsupportedModule`] for a bytecode that
+/// carries a module declaration record (the module section lands with the
+/// module slice).
+pub fn encode_verified_bytecode(
+    bytecode: &VerifiedBytecode,
+) -> Result<Vec<u8>, BytecodeCodecError> {
+    if bytecode.module().is_some() {
+        return Err(BytecodeCodecError::UnsupportedModule);
+    }
+    frame_sections(&[
+        (1, encode_graph(bytecode.compiler_graph())),
+        (2, encode_metadata(bytecode.metadata())),
+    ])
+}
+
+/// Decodes one complete verified-bytecode payload, re-verifying the graph
+/// and metadata ("load-time verification", §8.3).
+///
+/// # Errors
+///
+/// Returns a typed [`BytecodeCodecError`] for framing damage, canonical
+/// pool violations, an unsupported module section, or a re-verification
+/// failure.
+pub fn decode_verified_bytecode(payload: &[u8]) -> Result<VerifiedBytecode, BytecodeCodecError> {
+    let sections = read_sections(payload)?;
+    let mut graph = None;
+    let mut metadata = None;
+    for (tag, section_payload) in sections {
+        match tag {
+            1 => {
+                graph = Some(decode_graph(section_payload)?);
+            }
+            2 => {
+                metadata = Some(decode_metadata(section_payload)?);
+            }
+            4 => return Err(BytecodeCodecError::UnsupportedModule),
+            other => {
+                return Err(BytecodeCodecError::FormatMismatch {
+                    found: u32::from(other),
+                });
+            }
+        }
+    }
+    let graph = graph.ok_or(BytecodeCodecError::Truncated)?;
+    let metadata = metadata.ok_or(BytecodeCodecError::Truncated)?;
+    verify_compiler_bytecode_graph(
+        UnverifiedCompilerBytecodeGraph::new(Arc::new(graph), metadata),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .map_err(|error| BytecodeCodecError::Verification(error.to_string()))
+}
+
+fn executable_kind_tag(kind: CompilerExecutableKind) -> u8 {
+    match kind {
+        CompilerExecutableKind::GlobalScript => 0,
+        CompilerExecutableKind::IndirectEvalScript => 1,
+        CompilerExecutableKind::DirectEvalScript => 2,
+        CompilerExecutableKind::OrdinaryFunction => 3,
+        CompilerExecutableKind::OrdinaryArrow => 4,
+        CompilerExecutableKind::AsyncArrow => 5,
+        CompilerExecutableKind::OrdinaryMethod => 6,
+        CompilerExecutableKind::ClassInstanceInitializer => 7,
+        CompilerExecutableKind::ClassConstructor => 8,
+        CompilerExecutableKind::GeneratorFunction => 9,
+        CompilerExecutableKind::GeneratorMethod => 10,
+        CompilerExecutableKind::AsyncFunction => 11,
+        CompilerExecutableKind::AsyncMethod => 12,
+        CompilerExecutableKind::AsyncGeneratorFunction => 13,
+        CompilerExecutableKind::AsyncGeneratorMethod => 14,
+        CompilerExecutableKind::DynamicFunctionScript => 15,
+        CompilerExecutableKind::Module => 16,
+    }
+}
+
+fn executable_kind_from_tag(tag: u8) -> Result<CompilerExecutableKind, BytecodeCodecError> {
+    match tag {
+        0 => Ok(CompilerExecutableKind::GlobalScript),
+        1 => Ok(CompilerExecutableKind::IndirectEvalScript),
+        2 => Ok(CompilerExecutableKind::DirectEvalScript),
+        3 => Ok(CompilerExecutableKind::OrdinaryFunction),
+        4 => Ok(CompilerExecutableKind::OrdinaryArrow),
+        5 => Ok(CompilerExecutableKind::AsyncArrow),
+        6 => Ok(CompilerExecutableKind::OrdinaryMethod),
+        7 => Ok(CompilerExecutableKind::ClassInstanceInitializer),
+        8 => Ok(CompilerExecutableKind::ClassConstructor),
+        9 => Ok(CompilerExecutableKind::GeneratorFunction),
+        10 => Ok(CompilerExecutableKind::GeneratorMethod),
+        11 => Ok(CompilerExecutableKind::AsyncFunction),
+        12 => Ok(CompilerExecutableKind::AsyncMethod),
+        13 => Ok(CompilerExecutableKind::AsyncGeneratorFunction),
+        14 => Ok(CompilerExecutableKind::AsyncGeneratorMethod),
+        15 => Ok(CompilerExecutableKind::DynamicFunctionScript),
+        16 => Ok(CompilerExecutableKind::Module),
+        other => Err(BytecodeCodecError::FormatMismatch {
+            found: u32::from(other),
+        }),
+    }
+}
+
+fn write_option_atom(buffer: &mut Vec<u8>, atom: Option<AtomPoolIndex>) {
+    match atom {
+        Some(index) => {
+            buffer.push(1);
+            write_u32(buffer, index.get());
+        }
+        None => buffer.push(0),
+    }
+}
+
+fn read_option_atom(reader: &mut Reader<'_>) -> Result<Option<AtomPoolIndex>, BytecodeCodecError> {
+    match reader.read_u8()? {
+        0 => Ok(None),
+        1 => Ok(Some(AtomPoolIndex::new(reader.read_u32()?))),
+        other => Err(BytecodeCodecError::FormatMismatch {
+            found: u32::from(other),
+        }),
+    }
+}
+
+fn write_option_u32(buffer: &mut Vec<u8>, value: Option<u32>) {
+    match value {
+        Some(number) => {
+            buffer.push(1);
+            write_u32(buffer, number);
+        }
+        None => buffer.push(0),
+    }
+}
+
+fn read_option_u32(reader: &mut Reader<'_>) -> Result<Option<u32>, BytecodeCodecError> {
+    match reader.read_u8()? {
+        0 => Ok(None),
+        1 => Ok(Some(reader.read_u32()?)),
+        other => Err(BytecodeCodecError::FormatMismatch {
+            found: u32::from(other),
+        }),
+    }
+}
+
+fn write_policy(buffer: &mut Vec<u8>, policy: CompilerBindingPolicy) {
+    buffer.push(binding_kind_tag(policy.kind()));
+    buffer.push(initialization_tag(policy.initialization()));
+    buffer.push(writes_tag(policy.writes()));
+    buffer.push(u8::from(policy.has_temporal_dead_zone()));
+}
+
+fn read_policy(reader: &mut Reader<'_>) -> Result<CompilerBindingPolicy, BytecodeCodecError> {
+    let kind = binding_kind_from_tag(reader.read_u8()?)?;
+    let initialization = initialization_from_tag(reader.read_u8()?)?;
+    let writes = writes_from_tag(reader.read_u8()?)?;
+    let temporal_dead_zone = reader.read_u8()? != 0;
+    Ok(CompilerBindingPolicy::new(
+        kind,
+        initialization,
+        writes,
+        temporal_dead_zone,
+    ))
+}
+
+fn binding_kind_tag(kind: CompilerBindingKind) -> u8 {
+    match kind {
+        CompilerBindingKind::Parameter => 0,
+        CompilerBindingKind::Var => 1,
+        CompilerBindingKind::Let => 2,
+        CompilerBindingKind::Const => 3,
+        CompilerBindingKind::ClassName => 4,
+        CompilerBindingKind::ClassFieldKey => 5,
+        CompilerBindingKind::ClassInstanceInitializer => 6,
+        CompilerBindingKind::ClassPrivateName => 7,
+        CompilerBindingKind::ClassStaticReceiver => 8,
+        CompilerBindingKind::WithObject => 9,
+        CompilerBindingKind::Function => 10,
+        CompilerBindingKind::FunctionName => 11,
+        CompilerBindingKind::Catch => 12,
+        CompilerBindingKind::GlobalReference => 13,
+    }
+}
+
+fn binding_kind_from_tag(tag: u8) -> Result<CompilerBindingKind, BytecodeCodecError> {
+    match tag {
+        0 => Ok(CompilerBindingKind::Parameter),
+        1 => Ok(CompilerBindingKind::Var),
+        2 => Ok(CompilerBindingKind::Let),
+        3 => Ok(CompilerBindingKind::Const),
+        4 => Ok(CompilerBindingKind::ClassName),
+        5 => Ok(CompilerBindingKind::ClassFieldKey),
+        6 => Ok(CompilerBindingKind::ClassInstanceInitializer),
+        7 => Ok(CompilerBindingKind::ClassPrivateName),
+        8 => Ok(CompilerBindingKind::ClassStaticReceiver),
+        9 => Ok(CompilerBindingKind::WithObject),
+        10 => Ok(CompilerBindingKind::Function),
+        11 => Ok(CompilerBindingKind::FunctionName),
+        12 => Ok(CompilerBindingKind::Catch),
+        13 => Ok(CompilerBindingKind::GlobalReference),
+        other => Err(BytecodeCodecError::FormatMismatch {
+            found: u32::from(other),
+        }),
+    }
+}
+
+fn initialization_tag(policy: CompilerInitializationPolicy) -> u8 {
+    match policy {
+        CompilerInitializationPolicy::Argument => 0,
+        CompilerInitializationPolicy::UndefinedAtInstantiation => 1,
+        CompilerInitializationPolicy::AtDeclaration => 2,
+        CompilerInitializationPolicy::FunctionAtInstantiation => 3,
+        CompilerInitializationPolicy::FunctionAtScopeEntry => 4,
+        CompilerInitializationPolicy::FunctionName => 5,
+        CompilerInitializationPolicy::Catch => 6,
+        CompilerInitializationPolicy::ConstructorRealmLookup => 7,
+    }
+}
+
+fn initialization_from_tag(tag: u8) -> Result<CompilerInitializationPolicy, BytecodeCodecError> {
+    match tag {
+        0 => Ok(CompilerInitializationPolicy::Argument),
+        1 => Ok(CompilerInitializationPolicy::UndefinedAtInstantiation),
+        2 => Ok(CompilerInitializationPolicy::AtDeclaration),
+        3 => Ok(CompilerInitializationPolicy::FunctionAtInstantiation),
+        4 => Ok(CompilerInitializationPolicy::FunctionAtScopeEntry),
+        5 => Ok(CompilerInitializationPolicy::FunctionName),
+        6 => Ok(CompilerInitializationPolicy::Catch),
+        7 => Ok(CompilerInitializationPolicy::ConstructorRealmLookup),
+        other => Err(BytecodeCodecError::FormatMismatch {
+            found: u32::from(other),
+        }),
+    }
+}
+
+fn writes_tag(policy: CompilerWritePolicy) -> u8 {
+    match policy {
+        CompilerWritePolicy::Mutable => 0,
+        CompilerWritePolicy::Immutable => 1,
+        CompilerWritePolicy::ImmutableInStrictCode => 2,
+    }
+}
+
+fn writes_from_tag(tag: u8) -> Result<CompilerWritePolicy, BytecodeCodecError> {
+    match tag {
+        0 => Ok(CompilerWritePolicy::Mutable),
+        1 => Ok(CompilerWritePolicy::Immutable),
+        2 => Ok(CompilerWritePolicy::ImmutableInStrictCode),
+        other => Err(BytecodeCodecError::FormatMismatch {
+            found: u32::from(other),
+        }),
+    }
+}
+
+fn closure_source_tag(source: CompilerClosureSource) -> u8 {
+    match source {
+        CompilerClosureSource::ParentVariableReference(_) => 0,
+        CompilerClosureSource::ParentClosure(_) => 1,
+        CompilerClosureSource::ConstructorRealmGlobal(_) => 2,
+        CompilerClosureSource::DirectEvalBinding { .. } => 3,
+        CompilerClosureSource::DirectEvalVariable { .. } => 4,
+        CompilerClosureSource::Module { .. } => 5,
+    }
+}
+
+fn write_closure_source_payload(buffer: &mut Vec<u8>, source: CompilerClosureSource) {
+    match source {
+        CompilerClosureSource::ParentVariableReference(index)
+        | CompilerClosureSource::ParentClosure(index)
+        | CompilerClosureSource::Module { index } => write_u32(buffer, index),
+        CompilerClosureSource::ConstructorRealmGlobal(atom) => write_u32(buffer, atom.get()),
+        CompilerClosureSource::DirectEvalBinding {
+            index,
+            environment_size,
+        }
+        | CompilerClosureSource::DirectEvalVariable {
+            index,
+            environment_size,
+        } => {
+            write_u32(buffer, index);
+            write_u32(buffer, environment_size);
+        }
+    }
+}
+
+fn read_closure_source(reader: &mut Reader<'_>) -> Result<CompilerClosureSource, BytecodeCodecError> {
+    match reader.read_u8()? {
+        0 => Ok(CompilerClosureSource::ParentVariableReference(reader.read_u32()?)),
+        1 => Ok(CompilerClosureSource::ParentClosure(reader.read_u32()?)),
+        2 => Ok(CompilerClosureSource::ConstructorRealmGlobal(
+            AtomPoolIndex::new(reader.read_u32()?),
+        )),
+        3 => Ok(CompilerClosureSource::DirectEvalBinding {
+            index: reader.read_u32()?,
+            environment_size: reader.read_u32()?,
+        }),
+        4 => Ok(CompilerClosureSource::DirectEvalVariable {
+            index: reader.read_u32()?,
+            environment_size: reader.read_u32()?,
+        }),
+        5 => Ok(CompilerClosureSource::Module {
+            index: reader.read_u32()?,
+        }),
+        other => Err(BytecodeCodecError::FormatMismatch {
+            found: u32::from(other),
+        }),
+    }
+}
+
+fn write_utf8(buffer: &mut Vec<u8>, text: &str) {
+    write_u32(buffer, text.len() as u32);
+    buffer.extend_from_slice(text.as_bytes());
+}
+
+fn read_utf8(reader: &mut Reader<'_>) -> Result<String, BytecodeCodecError> {
+    let length = read_count(reader)?;
+    let bytes = reader.read_bytes(length)?;
+    String::from_utf8(bytes.to_vec()).map_err(|_| BytecodeCodecError::String("invalid UTF-8 text".to_owned()))
+}
+
+fn write_span(buffer: &mut Vec<u8>, span: SourceByteSpan) {
+    write_u32(buffer, span.start());
+    write_u32(buffer, span.end());
+}
+
+fn read_span(reader: &mut Reader<'_>) -> Result<SourceByteSpan, BytecodeCodecError> {
+    Ok(SourceByteSpan::new(reader.read_u32()?, reader.read_u32()?))
 }
 
 #[cfg(test)]
