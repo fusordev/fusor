@@ -17,6 +17,7 @@ fusor-bytecode = { path = "../fusor-bytecode" }
 fusor-compiler = { path = "../fusor-compiler" }
 fusor-diagnostics = { path = "../fusor-diagnostics" }
 fusor-frontend = { path = "../fusor-frontend" }
+fusor-host = { path = "../fusor-host" }
 fusor-runtime = { path = "../fusor-runtime" }
 miette = { workspace = true }
 rustyline = { workspace = true }

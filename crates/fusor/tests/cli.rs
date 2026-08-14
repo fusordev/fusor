@@ -132,6 +132,68 @@ fn repl_evaluates_a_module_entry_with_a_static_import() {
 }
 
 #[test]
+fn repl_drives_the_host_loop_for_set_immediate() {
+    // The REPL runs on the host event loop (§6): `Fusor.ops` timer ops work
+    // per entry turn — the immediate callback fires before the next entry
+    // evaluates.
+    let mut child = Command::new(env!("CARGO_BIN_EXE_fusor"))
+        .arg("repl")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn fusor repl");
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin")
+        .write_all(
+            b"Fusor.ops.op_set_immediate(function () { globalThis.immediate = 7; });\nimmediate;\n.exit\n",
+        )
+        .expect("write stdin");
+    let output = child.wait_with_output().expect("wait for repl");
+    assert!(
+        output.status.success(),
+        "repl failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("7"),
+        "expected 7 in repl output: {stdout}"
+    );
+}
+
+#[test]
+fn run_path_drives_the_host_loop_for_set_immediate() {
+    // The module runner drives host-loop turns after evaluation: an
+    // `op_set_immediate` callback scheduled at the top level fires before
+    // the process exits.
+    let directory = temp_dir("immediate");
+    let _cleanup = Cleanup(directory.clone());
+    fs::write(
+        directory.join("entry.mjs"),
+        "Fusor.ops.op_set_immediate(function () { print(42); });\n",
+    )
+    .expect("write entry");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_fusor"))
+        .arg(directory.join("entry.mjs"))
+        .output()
+        .expect("spawn fusor");
+    assert!(
+        output.status.success(),
+        "fusor run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("42"),
+        "expected 42 on stdout: {stdout}"
+    );
+}
+
+#[test]
 fn run_path_top_level_await_observes_the_awaited_value() {
     let directory = temp_dir("tla");
     let _cleanup = Cleanup(directory.clone());
@@ -179,5 +241,31 @@ fn run_path_rejecting_top_level_await_exits_non_zero() {
     assert!(
         stderr.contains("boom"),
         "expected the rejection on stderr: {stderr}"
+    );
+}
+
+#[test]
+fn script_path_prints_through_the_overlay_shim() {
+    // The CLI installs no host `print` global (§9): the CLI overlay's init
+    // script shims `print` over `Fusor.ops.op_core_print`, so bare `print`
+    // reaches stdout through the installable sink.
+    let directory = temp_dir("print");
+    let _cleanup = Cleanup(directory.clone());
+    fs::write(directory.join("print.js"), "print(1 + 2 * 3);\n").expect("write script");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_fusor"))
+        .arg("--script")
+        .arg(directory.join("print.js"))
+        .output()
+        .expect("spawn fusor");
+    assert!(
+        output.status.success(),
+        "fusor --script failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("7"),
+        "expected 7 on stdout: {stdout}"
     );
 }

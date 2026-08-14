@@ -1,27 +1,31 @@
-//! Tokio-driven drain of parked dynamic `import()` loads.
+//! Host-loop-driven drain of parked dynamic `import()` loads.
 //!
 //! The engine is synchronous and single-threaded (its GC'd types are not
-//! `Send`), so all engine interaction stays on the calling thread. Each
-//! round drains queued Promise reaction jobs, takes every currently parked
-//! load from the runtime queue, resolves its specifier synchronously through
-//! the [`NodeLikeResolver`], and reads the resolved files concurrently as
-//! spawned tasks on the caller's Tokio runtime — only pure data (paths, file
-//! bytes) crosses the await boundary. Loaded roots are then fed back to the
-//! engine in FIFO order through [`settle_dynamic_import`], and the loop
-//! repeats until no reactions or parked loads remain.
+//! `Send`), so all engine interaction happens inside host-loop turns. Each
+//! round drains queued Promise reaction jobs and takes the parked batch
+//! inside one turn, resolves specifiers synchronously through the
+//! [`NodeLikeResolver`] and reads the resolved files concurrently as spawned
+//! tasks on the caller's Tokio runtime — only pure data (paths, file bytes)
+//! crosses the await boundary — then settles the batch inside the next turn
+//! through [`settle_dynamic_import`]. The loop repeats until no parked loads
+//! remain.
+
+use std::cell::RefCell;
+use std::rc::Rc;
 
 use fusor::{
     LoadedModuleSource, ModuleEvaluationError, ModuleSourceError, ScriptLimits,
     drain_dynamic_import_jobs, settle_dynamic_import,
 };
-use fusor_runtime::{Context, ModuleKey};
+use fusor_host::r#loop::HostLoop;
+use fusor_runtime::{ModuleKey, PendingDynamicImport};
 
 use crate::cli::resolver::NodeLikeResolver;
 
-/// Drains parked dynamic `import()` loads to quiescence, reading module
-/// sources concurrently on the caller's Tokio runtime.
+/// Drains parked dynamic `import()` loads to quiescence across host-loop
+/// turns, reading module sources concurrently on the caller's Tokio runtime.
 ///
-/// Call this after the static graph has been evaluated (see
+/// Call this after the static graph has been evaluated inside a turn (see
 /// [`crate::cli::loader::gather_static_graph`] and
 /// [`fusor::evaluate_preloaded_module_graph`]). Mirrors
 /// `fusor::pump_dynamic_imports` semantics: registry dedup, linking,
@@ -33,24 +37,43 @@ use crate::cli::resolver::NodeLikeResolver;
 /// Returns a [`ModuleEvaluationError`] only for internal runtime failures;
 /// load, resolution, and compile failures reject their import Promises.
 pub(crate) async fn drain_pending_imports(
-    context: &mut Context<'_>,
-    resolver: &mut NodeLikeResolver,
+    host_loop: &mut HostLoop,
+    resolver: &Rc<RefCell<NodeLikeResolver>>,
     limits: ScriptLimits,
 ) -> Result<(), ModuleEvaluationError> {
     loop {
-        drain_dynamic_import_jobs(context, limits)?;
-        let mut batch = Vec::new();
-        while let Some(import) = context.take_pending_dynamic_import() {
-            batch.push(import);
+        // Phase 1 (turn): drain reaction jobs, then take every parked load.
+        let taken: Rc<RefCell<Vec<PendingDynamicImport>>> = Rc::new(RefCell::new(Vec::new()));
+        let target = Rc::clone(&taken);
+        let drain_failure: Rc<RefCell<Option<ModuleEvaluationError>>> =
+            Rc::new(RefCell::new(None));
+        let failure = Rc::clone(&drain_failure);
+        host_loop.post_event(Box::new(move |context| {
+            if let Err(error) = drain_dynamic_import_jobs(context, limits) {
+                *failure.borrow_mut() = Some(error);
+                return Ok(());
+            }
+            while let Some(import) = context.take_pending_dynamic_import() {
+                target.borrow_mut().push(import);
+            }
+            Ok(())
+        }));
+        host_loop
+            .run_one_turn()
+            .map_err(ModuleEvaluationError::from)?;
+        if let Some(error) = drain_failure.replace(None) {
+            return Err(error);
         }
+        let batch = taken.replace(Vec::new());
         if batch.is_empty() {
             return Ok(());
         }
+
         // Resolution stays synchronous; only the file reads cross an await.
         let reads = batch
             .iter()
             .map(|import| {
-                resolver.resolve_request(
+                resolver.borrow().resolve_request(
                     &import.specifier(),
                     import.referrer().map(ModuleKey::as_str),
                 )
@@ -73,8 +96,28 @@ pub(crate) async fn drain_pending_imports(
                 )))
             }));
         }
-        for (import, root) in batch.into_iter().zip(roots) {
-            settle_dynamic_import(context, resolver, import, root, limits)?;
+
+        // Phase 2 (turn): settle the batch in FIFO order.
+        let loader = Rc::clone(resolver);
+        let settle_failure: Rc<RefCell<Option<ModuleEvaluationError>>> =
+            Rc::new(RefCell::new(None));
+        let failure = Rc::clone(&settle_failure);
+        host_loop.post_event(Box::new(move |context| {
+            for (import, root) in batch.into_iter().zip(roots) {
+                if let Err(error) =
+                    settle_dynamic_import(context, &mut *loader.borrow_mut(), import, root, limits)
+                {
+                    *failure.borrow_mut() = Some(error);
+                    break;
+                }
+            }
+            Ok(())
+        }));
+        host_loop
+            .run_one_turn()
+            .map_err(ModuleEvaluationError::from)?;
+        if let Some(error) = settle_failure.replace(None) {
+            return Err(error);
         }
     }
 }
@@ -82,13 +125,15 @@ pub(crate) async fn drain_pending_imports(
 #[cfg(test)]
 mod tests {
     use std::{
+        cell::RefCell,
         fs,
         path::PathBuf,
+        rc::Rc,
         sync::atomic::{AtomicU64, Ordering},
     };
 
     use fusor::{evaluate_preloaded_module_graph, evaluate_script};
-    use fusor_runtime::{Runtime, RuntimeLimits};
+    use fusor_host::overlay::HostRuntime;
 
     use super::*;
     use crate::cli::loader::gather_static_graph;
@@ -112,31 +157,61 @@ mod tests {
         }
     }
 
-    /// Gathers and evaluates `source` as a module, drains parked dynamic
-    /// imports through the async driver, then runs `probe` as a script
-    /// (throwing on mismatch).
+    /// Gathers and evaluates `source` as a module inside a host-loop turn,
+    /// drains parked dynamic imports through the loop-driven driver, then
+    /// runs `probe` as a script (throwing on mismatch) inside a final turn.
     async fn run_entry(
         directory: &std::path::Path,
         source: &str,
         probe: &str,
     ) -> Result<(), String> {
-        let mut runtime = Runtime::try_new(RuntimeLimits::default()).map_err(|e| e.to_string())?;
-        let realm = runtime.create_realm().map_err(|e| e.to_string())?;
-        let mut context = runtime.context(&realm).map_err(|e| e.to_string())?;
-        let mut resolver = NodeLikeResolver::new(directory.to_path_buf(), Vec::new());
+        let mut host = HostRuntime::builder().build().map_err(|e| e.to_string())?;
+        let mut host_loop = host.into_loop().map_err(|e| e.to_string())?;
+        let resolver = Rc::new(RefCell::new(NodeLikeResolver::new(
+            directory.to_path_buf(),
+            Vec::new(),
+        )));
         let limits = ScriptLimits::default();
         let root_name = format!("file://{}/entry.mjs", directory.display());
-        let edges = gather_static_graph(&resolver, source, &root_name, limits)
+        let edges = gather_static_graph(&resolver.borrow(), source, &root_name, limits)
             .await
             .map_err(|error| format!("gather: {error}"))?;
-        evaluate_preloaded_module_graph(&mut context, source, &root_name, edges, limits)
+        let source = source.to_owned();
+        let name = root_name.clone();
+        let evaluate_outcome: Rc<RefCell<Option<Result<(), ModuleEvaluationError>>>> =
+            Rc::new(RefCell::new(None));
+        let outcome = Rc::clone(&evaluate_outcome);
+        host_loop.post_event(Box::new(move |context| {
+            let result = evaluate_preloaded_module_graph(context, &source, &name, edges, limits)
+                .map(|_| ());
+            *outcome.borrow_mut() = Some(result);
+            Ok(())
+        }));
+        host_loop
+            .run_one_turn()
+            .map_err(|error| format!("evaluate turn: {error}"))?;
+        evaluate_outcome
+            .replace(None)
+            .expect("evaluation completed")
             .map_err(|error| format!("evaluate: {error}"))?;
-        drain_pending_imports(&mut context, &mut resolver, limits)
+        drain_pending_imports(&mut host_loop, &resolver, limits)
             .await
             .map_err(|error| format!("drain: {error}"))?;
-        evaluate_script(&mut context, probe, "probe.js", limits)
-            .map(|_| ())
-            .map_err(|error| format!("probe: {error}"))
+
+        let probe = probe.to_owned();
+        let probe_outcome: Rc<RefCell<Option<Result<(), String>>>> = Rc::new(RefCell::new(None));
+        let outcome = Rc::clone(&probe_outcome);
+        host_loop.post_event(Box::new(move |context| {
+            let result = evaluate_script(context, &probe, "probe.js", limits)
+                .map(|_| ())
+                .map_err(|error| error.to_string());
+            *outcome.borrow_mut() = Some(result);
+            Ok(())
+        }));
+        host_loop
+            .run_one_turn()
+            .map_err(|error| format!("probe turn: {error}"))?;
+        probe_outcome.replace(None).expect("probe completed")
     }
 
     #[tokio::test(flavor = "current_thread")]

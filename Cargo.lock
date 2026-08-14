@@ -361,6 +361,7 @@ dependencies = [
  "fusor-compiler",
  "fusor-diagnostics",
  "fusor-frontend",
+ "fusor-host",
  "fusor-runtime",
  "miette",
  "rustyline",

@@ -9,12 +9,17 @@
 mod cdp;
 mod cli;
 
-use std::{error::Error, path::Path, process::ExitCode, sync::Arc};
+use std::{
+    cell::RefCell,
+    error::Error,
+    path::Path,
+    process::ExitCode,
+    rc::Rc,
+    sync::Arc,
+};
 
 use fusor::{ScriptLimits, evaluate_preloaded_module_graph, evaluate_script};
-use fusor_runtime::{Runtime, RuntimeLimits};
 
-use crate::cdp::format::format_argument;
 use crate::cli::resolver::NodeLikeResolver;
 
 const USAGE: &str = "\
@@ -185,10 +190,17 @@ async fn run_file(
             return 2;
         }
     };
-    let mut runtime = match Runtime::try_new(RuntimeLimits::default()) {
-        Ok(runtime) => runtime,
+    // The CLI assembles "core overlay + CLI overlay" through fusor-host
+    // (§9 step 4): no hand-installed host globals — the CLI overlay's init
+    // script shims `print` over `Fusor.ops.op_core_print`.
+    let mut host = match fusor_host::overlay::HostRuntime::builder()
+        .with_overlay(fusor_host::overlay::CoreOverlay)
+        .with_overlay(cli::overlay::CliOverlay)
+        .build()
+    {
+        Ok(host) => host,
         Err(error) => {
-            eprintln!("fusor: cannot create the runtime: {error}");
+            eprintln!("fusor: cannot assemble the host runtime: {error}");
             return 2;
         }
     };
@@ -198,7 +210,7 @@ async fn run_file(
             session.request_initial_pause();
         }
         let debugger_hook: Arc<dyn fusor_runtime::DebuggerHook> = session.clone();
-        runtime.set_debugger_hook(debugger_hook);
+        host.runtime_mut().set_debugger_hook(debugger_hook);
         let bound_port = match cdp::start(port, Arc::clone(&session)) {
             Ok(port) => port,
             Err(error) => {
@@ -211,99 +223,136 @@ async fn run_file(
     } else {
         None
     };
-    let realm = match runtime.create_realm() {
-        Ok(realm) => realm,
+    let mut host_loop = match host.into_loop() {
+        Ok(host_loop) => host_loop,
         Err(error) => {
-            eprintln!("fusor: cannot create a realm: {error}");
+            eprintln!("fusor: cannot install the host event loop: {error}");
             return 2;
         }
     };
-    let mut context = match runtime.context(&realm) {
-        Ok(context) => context,
-        Err(error) => {
-            eprintln!("fusor: cannot create a context: {error}");
-            return 2;
-        }
-    };
-
-    let print = match context.create_host_function("print", |ctx, call| {
-        let rendered: Vec<String> = call.arguments().iter().map(format_argument).collect();
-        println!("{}", rendered.join(" "));
-        Ok(ctx.undefined_value())
-    }) {
-        Ok(function) => function,
-        Err(error) => {
-            eprintln!("fusor: cannot install print: {error}");
-            return 1;
-        }
-    };
-    if let Err(error) = context.set_global("print", print.as_value()) {
-        eprintln!("fusor: cannot install the print global: {error}");
-        return 1;
-    }
 
     let display_name = path.display().to_string();
     if as_script {
-        match evaluate_script(
-            &mut context,
-            &source,
-            &display_name,
-            ScriptLimits::default(),
-        ) {
-            Ok(_) => 0,
-            Err(error) => {
-                report_error(&display_name, &error);
-                1
-            }
+        // Evaluation happens inside a host-loop turn (§6); pending timers
+        // fire before the process exits.
+        let outcome: Rc<RefCell<Option<Result<(), fusor::ScriptEvaluationError>>>> =
+            Rc::new(RefCell::new(None));
+        let outcome_slot = Rc::clone(&outcome);
+        let source = source.clone();
+        let name = display_name.clone();
+        host_loop.post_event(Box::new(move |context| {
+            let result =
+                evaluate_script(context, &source, &name, ScriptLimits::default()).map(|_| ());
+            *outcome_slot.borrow_mut() = Some(result);
+            Ok(())
+        }));
+        if let Err(error) = host_loop.run_one_turn() {
+            report_error(&display_name, &error);
+            return 1;
         }
+        match outcome.replace(None) {
+            Some(Ok(())) => {}
+            Some(Err(error)) => {
+                report_error(&display_name, &error);
+                return 1;
+            }
+            None => return 1,
+        }
+        if let Err(error) = host_loop.run_until_idle() {
+            report_error(&display_name, &error);
+            return 1;
+        }
+        // The loop's uncaught/unhandled default paths request the exit code
+        // (§7.2); honor it on the way out.
+        if let Some(code) = host_loop.pending_exit_code() {
+            return u8::try_from(code).unwrap_or(1);
+        }
+        0
     } else {
         // The root key is canonical: the absolute, lexically normalized path
         // prefixed with `file://`, matching the keys the resolver issues.
         let cwd = std::env::current_dir().unwrap_or_else(|_| Path::new("/").to_path_buf());
         let root_path = cli::resolver::normalize_path(&cwd.join(&path));
         let root_name = format!("file://{}", root_path.display());
-        let mut process_argv = vec!["fusor".to_owned(), display_name];
+        let mut process_argv = vec!["fusor".to_owned(), display_name.clone()];
         process_argv.extend(argv);
-        let mut resolver = NodeLikeResolver::new(cwd, process_argv);
+        let resolver = Rc::new(RefCell::new(NodeLikeResolver::new(cwd, process_argv)));
         let limits = ScriptLimits::default();
         // Load the static graph asynchronously (concurrent per-level reads on
-        // this runtime), evaluate it synchronously, then drain parked
-        // dynamic `import()` loads.
-        let result = match cli::loader::gather_static_graph(&resolver, &source, &root_name, limits)
-            .await
+        // this runtime), evaluate it inside a turn, then drain parked dynamic
+        // `import()` loads across turns.
+        let edges = match cli::loader::gather_static_graph(
+            &resolver.borrow(),
+            &source,
+            &root_name,
+            limits,
+        )
+        .await
         {
-            Ok(edges) => {
-                evaluate_preloaded_module_graph(&mut context, &source, &root_name, edges, limits)
-                    .map(|_| ())
-            }
-            Err(error) => Err(error),
-        };
-        match result {
-            Ok(()) => {
-                match cli::imports::drain_pending_imports(&mut context, &mut resolver, limits)
-                    .await
-                {
-                    // A top-level-await graph settles asynchronously while the
-                    // drain runs its continuations; a rejection recorded on the
-                    // root is the evaluation failure.
-                    Ok(()) => match fusor::module_evaluation_error(&context, &root_name) {
-                        Some(error) => {
-                            report_error(&root_name, &error);
-                            1
-                        }
-                        None => 0,
-                    },
-                    Err(error) => {
-                        report_error(&root_name, &error);
-                        1
-                    }
-                }
-            }
+            Ok(edges) => edges,
             Err(error) => {
                 report_error(&root_name, &error);
-                1
+                return 1;
             }
+        };
+        let outcome: Rc<RefCell<Option<Result<(), fusor::ModuleEvaluationError>>>> =
+            Rc::new(RefCell::new(None));
+        let outcome_slot = Rc::clone(&outcome);
+        let source = source.clone();
+        let name = root_name.clone();
+        host_loop.post_event(Box::new(move |context| {
+            let result = evaluate_preloaded_module_graph(context, &source, &name, edges, limits)
+                .map(|_| ());
+            *outcome_slot.borrow_mut() = Some(result);
+            Ok(())
+        }));
+        if let Err(error) = host_loop.run_one_turn() {
+            report_error(&root_name, &error);
+            return 1;
         }
+        match outcome.replace(None) {
+            Some(Ok(())) => {}
+            Some(Err(error)) => {
+                report_error(&root_name, &error);
+                return 1;
+            }
+            None => return 1,
+        }
+        if let Err(error) =
+            cli::imports::drain_pending_imports(&mut host_loop, &resolver, limits).await
+        {
+            report_error(&root_name, &error);
+            return 1;
+        }
+        // A top-level-await graph settles asynchronously while the drain runs
+        // its continuations; a rejection recorded on the root is the
+        // evaluation failure.
+        let error_slot: Rc<RefCell<Option<fusor::ModuleEvaluationError>>> =
+            Rc::new(RefCell::new(None));
+        let slot = Rc::clone(&error_slot);
+        let name = root_name.clone();
+        host_loop.post_event(Box::new(move |context| {
+            *slot.borrow_mut() = fusor::module_evaluation_error(context, &name);
+            Ok(())
+        }));
+        if let Err(error) = host_loop.run_one_turn() {
+            report_error(&root_name, &error);
+            return 1;
+        }
+        if let Some(error) = error_slot.replace(None) {
+            report_error(&root_name, &error);
+            return 1;
+        }
+        if let Err(error) = host_loop.run_until_idle() {
+            report_error(&root_name, &error);
+            return 1;
+        }
+        // The loop's uncaught/unhandled default paths request the exit code
+        // (§7.2); honor it on the way out.
+        if let Some(code) = host_loop.pending_exit_code() {
+            return u8::try_from(code).unwrap_or(1);
+        }
+        0
     }
 }
 

@@ -9,5 +9,6 @@
 pub(crate) mod builtins;
 pub(crate) mod imports;
 pub(crate) mod loader;
+pub(crate) mod overlay;
 pub(crate) mod repl;
 pub(crate) mod resolver;

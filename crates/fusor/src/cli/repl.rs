@@ -26,14 +26,16 @@ use std::{
     thread,
 };
 
-use fusor::{ScriptLimits, evaluate_preloaded_module_graph, evaluate_script};
-use fusor_runtime::{Runtime, RuntimeLimits};
+use fusor::{ModuleEvaluationError, ScriptEvaluationError, ScriptLimits, evaluate_preloaded_module_graph, evaluate_script};
+use fusor_host::r#loop::HostLoop;
+use fusor_host::ops::set_print_sink;
+use fusor_host::overlay::{CoreOverlay, HostRuntime};
 use tokio::sync::mpsc;
 
-use crate::{cli::resolver::NodeLikeResolver, report_error};
+use crate::{cli::overlay::CliOverlay, cli::resolver::NodeLikeResolver, report_error};
 use crate::cdp::{
     self as cdp,
-    format::{format_argument, format_value},
+    format::format_value,
     inspector,
 };
 
@@ -49,10 +51,16 @@ pub(crate) async fn run(inspect_port: Option<u16>, inspect_break: bool) -> u8 {
             return 2;
         }
     };
-    let mut runtime = match Runtime::try_new(RuntimeLimits::default()) {
-        Ok(runtime) => runtime,
+    // The REPL assembles the same "core overlay + CLI overlay" host the run
+    // path uses (§9 step 4); the CLI overlay's init script provides `print`.
+    let mut host = match HostRuntime::builder()
+        .with_overlay(CoreOverlay)
+        .with_overlay(CliOverlay)
+        .build()
+    {
+        Ok(host) => host,
         Err(error) => {
-            eprintln!("fusor: cannot create the runtime: {error}");
+            eprintln!("fusor: cannot assemble the host runtime: {error}");
             return 2;
         }
     };
@@ -63,7 +71,7 @@ pub(crate) async fn run(inspect_port: Option<u16>, inspect_break: bool) -> u8 {
             session.request_initial_pause();
         }
         let debugger_hook: Arc<dyn fusor_runtime::DebuggerHook> = session.clone();
-        runtime.set_debugger_hook(debugger_hook);
+        host.runtime_mut().set_debugger_hook(debugger_hook);
         let bound_port = match cdp::start(port, Arc::clone(&session)) {
             Ok(port) => port,
             Err(error) => {
@@ -76,42 +84,41 @@ pub(crate) async fn run(inspect_port: Option<u16>, inspect_break: bool) -> u8 {
     } else {
         (None, None)
     };
-    let realm = match runtime.create_realm() {
-        Ok(realm) => realm,
+    let mut host_loop = match host.into_loop() {
+        Ok(host_loop) => host_loop,
         Err(error) => {
-            eprintln!("fusor: cannot create a realm: {error}");
+            eprintln!("fusor: cannot install the host event loop: {error}");
             return 2;
         }
     };
-    let mut context = match runtime.context(&realm) {
-        Ok(context) => context,
-        Err(error) => {
-            eprintln!("fusor: cannot create a context: {error}");
-            return 2;
-        }
-    };
-    let mut resolver = NodeLikeResolver::new(cwd.clone(), vec!["fusor".to_owned()]);
+    let resolver = Rc::new(RefCell::new(NodeLikeResolver::new(
+        cwd.clone(),
+        vec!["fusor".to_owned()],
+    )));
     let entry_prefix = format!("file://{}", cwd.display());
 
     eprintln!("fusor REPL (host sugar, not a spec module record). .exit or Ctrl-D to quit.");
 
     if let (Some(session), Some(debug_requests)) = (debug_session, debug_requests) {
+        // The inspector path installs a suppression-gated print sink: eager
+        // evaluation with `throwOnSideEffect` flips the flag so probes stay
+        // silent (§7.5).
+        let print_suppressed: Rc<Cell<bool>> = Rc::new(Cell::new(false));
+        let flag = Rc::clone(&print_suppressed);
+        let _ = set_print_sink(Box::new(move |line: &str| {
+            if !flag.get() {
+                println!("{line}");
+            }
+        }));
         return run_with_inspector(
-            &mut context,
+            &mut host_loop,
             debug_requests,
             session,
             resolver,
             entry_prefix,
+            print_suppressed,
         )
         .await;
-    }
-
-    // Host `print`: renders each argument like the REPL's completion printer
-    // and writes it to stdout. Installed as a global so both script and module
-    // entries can reach it.
-    if let Err(error) = install_print(&mut context, None, None) {
-        eprintln!("fusor: cannot install print: {error}");
-        return 1;
     }
 
     let mut editor = match rustyline::DefaultEditor::new() {
@@ -155,53 +162,36 @@ pub(crate) async fn run(inspect_port: Option<u16>, inspect_break: bool) -> u8 {
         }
         entry_index += 1;
         evaluate_repl_entry(
-            &mut context,
+            &mut host_loop,
             &entry,
-            &mut resolver,
+            &resolver,
             &entry_prefix,
             &mut imports,
             entry_index,
             true,
         )
         .await;
+        // The loop's uncaught/unhandled default paths request the exit code
+        // (§7.2); honor the request and leave the session.
+        if let Some(code) = host_loop.pending_exit_code() {
+            return u8::try_from(code).unwrap_or(1);
+        }
     }
 }
 
-/// Installs the host `print` global: renders each argument like the REPL's
-/// completion printer and writes it to stdout. With a capture buffer (the
-/// inspector path), the raw argument values are also retained so they can be
-/// surfaced as `Runtime.consoleAPICalled` events in DevTools. While the
-/// suppression flag is set (`throwOnSideEffect` eager evaluation), the print
-/// is a silent no-op.
-fn install_print(
-    context: &mut fusor_runtime::Context<'_>,
-    capture: Option<Rc<RefCell<Vec<fusor_runtime::JsValue>>>>,
-    suppress: Option<Rc<Cell<bool>>>,
-) -> Result<(), fusor_runtime::ExecutionError> {
-    let print = context.create_host_function("print", move |ctx, call| {
-        if suppress.as_ref().is_some_and(|flag| flag.get()) {
-            return Ok(ctx.undefined_value());
-        }
-        let rendered: Vec<String> = call.arguments().iter().map(format_argument).collect();
-        println!("{}", rendered.join(" "));
-        if let Some(capture) = &capture {
-            capture
-                .borrow_mut()
-                .extend(call.arguments().iter().cloned());
-        }
-        Ok(ctx.undefined_value())
-    })?;
-    context.set_global("print", print.as_value())
-}
-
 /// Runs the REPL with CDP requests and stdin entries multiplexed on the owning
-/// runtime task. The input thread transports only owned source text.
+/// runtime task. The input thread transports only owned source text. The
+/// caller installed the suppression-gated print sink (§9: `print` is the CLI
+/// overlay's shim, not a host-installed global). Every engine interaction
+/// (CDP protocol handling and entry evaluation) happens inside a host-loop
+/// turn (§6).
 async fn run_with_inspector(
-    context: &mut fusor_runtime::Context<'_>,
+    host_loop: &mut HostLoop,
     mut debug_requests: mpsc::UnboundedReceiver<cdp::EngineRequest>,
     session: Arc<cdp::DebugSession>,
-    mut resolver: NodeLikeResolver,
+    resolver: Rc<RefCell<NodeLikeResolver>>,
     entry_prefix: String,
+    print_suppressed: Rc<Cell<bool>>,
 ) -> u8 {
     let (input_sender, mut input_receiver) = mpsc::unbounded_channel();
     thread::spawn(move || {
@@ -238,37 +228,66 @@ async fn run_with_inspector(
     let mut entry_index = 0_u64;
     let mut imports = Vec::new();
     let mut pending = String::new();
-    let mut inspect = inspector::InspectState::new();
-    let intrinsics = match inspector::InspectIntrinsics::new(context) {
-        Ok(intrinsics) => intrinsics,
-        Err(error) => {
-            eprintln!("fusor: cannot prepare CDP inspection: {error}");
-            return 1;
+
+    // CDP inspection state lives in one owner (this task); the engine-side
+    // intrinsics are created inside a turn and held across turns.
+    let inspect: Rc<RefCell<inspector::InspectState>> =
+        Rc::new(RefCell::new(inspector::InspectState::new()));
+    let intrinsics: Rc<RefCell<Option<inspector::InspectIntrinsics>>> =
+        Rc::new(RefCell::new(None));
+    let intrinsic_failure: Rc<RefCell<Option<inspector::InspectSetupError>>> =
+        Rc::new(RefCell::new(None));
+    let intrinsic_slot = Rc::clone(&intrinsics);
+    let failure = Rc::clone(&intrinsic_failure);
+    host_loop.post_event(Box::new(move |context| {
+        match inspector::InspectIntrinsics::new(context) {
+            Ok(created) => *intrinsic_slot.borrow_mut() = Some(created),
+            Err(error) => *failure.borrow_mut() = Some(error),
         }
-    };
-    let console_buffer: Rc<RefCell<Vec<fusor_runtime::JsValue>>> =
-        Rc::new(RefCell::new(Vec::new()));
-    let print_suppressed: Rc<Cell<bool>> = Rc::new(Cell::new(false));
-    if let Err(error) = install_print(
-        context,
-        Some(Rc::clone(&console_buffer)),
-        Some(Rc::clone(&print_suppressed)),
-    ) {
-        eprintln!("fusor: cannot install print: {error}");
+        Ok(())
+    }));
+    if let Err(error) = host_loop.run_one_turn() {
+        eprintln!("fusor: cannot prepare CDP inspection: {error}");
         return 1;
     }
+    if let Some(error) = intrinsic_failure.replace(None) {
+        eprintln!("fusor: cannot prepare CDP inspection: {error}");
+        return 1;
+    }
+    if intrinsics.borrow().is_none() {
+        eprintln!("fusor: cannot prepare CDP inspection: the intrinsic setup did not run");
+        return 1;
+    }
+
     loop {
         tokio::select! {
             Some(request) = debug_requests.recv() => {
-                let response = session.handle_engine_protocol(
-                    context,
-                    &mut inspect,
-                    &intrinsics,
-                    &print_suppressed,
-                    request.message,
-                );
-                let _ = request.response.send(response);
-                drain_console_events(&session, context, &mut inspect, &intrinsics, &console_buffer);
+                let response_slot: Rc<RefCell<Option<serde_json::Value>>> =
+                    Rc::new(RefCell::new(None));
+                let slot = Rc::clone(&response_slot);
+                let session = Arc::clone(&session);
+                let inspect = Rc::clone(&inspect);
+                let intrinsics = Rc::clone(&intrinsics);
+                let suppressed = Rc::clone(&print_suppressed);
+                let message = request.message;
+                host_loop.post_event(Box::new(move |context| {
+                    let response = session.handle_engine_protocol(
+                        context,
+                        &mut inspect.borrow_mut(),
+                        intrinsics.borrow().as_ref().expect("CDP intrinsics prepared"),
+                        &suppressed,
+                        message,
+                    );
+                    *slot.borrow_mut() = Some(response);
+                    Ok(())
+                }));
+                if let Err(error) = host_loop.run_one_turn() {
+                    eprintln!("fusor: CDP request failed: {error}");
+                    continue;
+                }
+                let _ = request
+                    .response
+                    .send(response_slot.replace(None).expect("CDP response rendered"));
             }
             Some(line) = input_receiver.recv() => {
                 let Some(line) = line else {
@@ -289,42 +308,29 @@ async fn run_with_inspector(
                 }
                 entry_index += 1;
                 evaluate_repl_entry(
-                    context,
+                    host_loop,
                     &entry,
-                    &mut resolver,
+                    &resolver,
                     &entry_prefix,
                     &mut imports,
                     entry_index,
                     true,
                 ).await;
-                drain_console_events(&session, context, &mut inspect, &intrinsics, &console_buffer);
+                // The loop's uncaught/unhandled default paths request the exit
+                // code (§7.2); honor the request and leave the session.
+                if let Some(code) = host_loop.pending_exit_code() {
+                    return u8::try_from(code).unwrap_or(1);
+                }
             }
             else => return 0,
         }
     }
 }
 
-/// Emits one `Runtime.consoleAPICalled` event per buffered `print` call so
-/// printed values also appear in the DevTools console.
-fn drain_console_events(
-    session: &Arc<cdp::DebugSession>,
-    context: &mut fusor_runtime::Context<'_>,
-    inspect: &mut inspector::InspectState,
-    intrinsics: &inspector::InspectIntrinsics,
-    buffer: &Rc<RefCell<Vec<fusor_runtime::JsValue>>>,
-) {
-    let messages = buffer.replace(Vec::new());
-    if messages.is_empty() {
-        return;
-    }
-    let event = inspector::console_api_event(context, &mut inspect.objects, intrinsics, &messages);
-    session.emit_event(event);
-}
-
 async fn evaluate_repl_entry(
-    context: &mut fusor_runtime::Context<'_>,
+    host_loop: &mut HostLoop,
     entry: &str,
-    resolver: &mut NodeLikeResolver,
+    resolver: &Rc<RefCell<NodeLikeResolver>>,
     entry_prefix: &str,
     imports: &mut Vec<String>,
     entry_index: u64,
@@ -338,43 +344,118 @@ async fn evaluate_repl_entry(
         }
         source.push_str(entry);
         let name = format!("{entry_prefix}/__repl_entry_{entry_index}.mjs");
-        let result = match crate::cli::loader::gather_static_graph(resolver, &source, &name, limits)
-            .await
+        let gathered = match crate::cli::loader::gather_static_graph(
+            &resolver.borrow(),
+            &source,
+            &name,
+            limits,
+        )
+        .await
         {
-            Ok(edges) => evaluate_preloaded_module_graph(context, &source, &name, edges, limits),
-            Err(error) => Err(error),
-        };
-        match result {
-            Ok(value) => {
-                if let Err(error) =
-                    crate::cli::imports::drain_pending_imports(context, resolver, limits).await
-                {
-                    report_error("module entry", &error);
-                }
-                if let Some(error) = fusor::module_evaluation_error(context, &name) {
-                    report_error("module entry", &error);
-                }
-                if print_completion {
-                    println!("{}", format_value(&value));
-                }
-                imports.extend(extract_imports(entry));
+            Ok(edges) => edges,
+            Err(error) => {
+                report_error("module entry", &error);
+                return;
             }
-            Err(error) => report_error("module entry", &error),
+        };
+        // Evaluation happens inside a turn (§6); the completion value is a
+        // rooted handle, safe to print after the turn.
+        let completion: Rc<RefCell<Option<fusor_runtime::JsValue>>> =
+            Rc::new(RefCell::new(None));
+        let value_slot = Rc::clone(&completion);
+        let outcome: Rc<RefCell<Option<Result<(), ModuleEvaluationError>>>> =
+            Rc::new(RefCell::new(None));
+        let outcome_slot = Rc::clone(&outcome);
+        let source = source.clone();
+        let evaluate_name = name.clone();
+        host_loop.post_event(Box::new(move |context| {
+            let result =
+                evaluate_preloaded_module_graph(context, &source, &evaluate_name, gathered, limits)
+                    .map(|value| *value_slot.borrow_mut() = Some(value));
+            *outcome_slot.borrow_mut() = Some(result);
+            Ok(())
+        }));
+        if let Err(error) = host_loop.run_one_turn() {
+            report_error("module entry", &error);
+            return;
         }
+        match outcome.replace(None) {
+            Some(Ok(())) => {}
+            Some(Err(error)) => {
+                report_error("module entry", &error);
+                return;
+            }
+            None => return,
+        }
+        if let Err(error) =
+            crate::cli::imports::drain_pending_imports(host_loop, resolver, limits).await
+        {
+            report_error("module entry", &error);
+        }
+        // Probe the module's evaluation error inside a turn.
+        let error_slot: Rc<RefCell<Option<ModuleEvaluationError>>> = Rc::new(RefCell::new(None));
+        let slot = Rc::clone(&error_slot);
+        let probe_name = name.clone();
+        host_loop.post_event(Box::new(move |context| {
+            *slot.borrow_mut() = fusor::module_evaluation_error(context, &probe_name);
+            Ok(())
+        }));
+        if let Err(error) = host_loop.run_one_turn() {
+            report_error("module entry", &error);
+            return;
+        }
+        if let Some(error) = error_slot.replace(None) {
+            report_error("module entry", &error);
+        }
+        // Pending timers fire before the next prompt (virtual clock).
+        if let Err(error) = host_loop.run_until_idle() {
+            report_error("module entry", &error);
+        }
+        if print_completion {
+            if let Some(value) = completion.replace(None) {
+                println!("{}", format_value(&value));
+            }
+        }
+        imports.extend(extract_imports(entry));
     } else {
         let name = format!("<repl>:{entry_index}");
-        match evaluate_script(context, entry, &name, limits) {
-            Ok(value) => {
-                if let Err(error) =
-                    crate::cli::imports::drain_pending_imports(context, resolver, limits).await
-                {
-                    report_error("script entry", &error);
-                }
-                if print_completion {
-                    println!("{}", format_value(&value));
-                }
+        let completion: Rc<RefCell<Option<fusor_runtime::JsValue>>> =
+            Rc::new(RefCell::new(None));
+        let value_slot = Rc::clone(&completion);
+        let outcome: Rc<RefCell<Option<Result<(), ScriptEvaluationError>>>> =
+            Rc::new(RefCell::new(None));
+        let outcome_slot = Rc::clone(&outcome);
+        let entry = entry.to_owned();
+        host_loop.post_event(Box::new(move |context| {
+            let result = evaluate_script(context, &entry, &name, limits)
+                .map(|value| *value_slot.borrow_mut() = Some(value));
+            *outcome_slot.borrow_mut() = Some(result);
+            Ok(())
+        }));
+        if let Err(error) = host_loop.run_one_turn() {
+            report_error("script entry", &error);
+            return;
+        }
+        match outcome.replace(None) {
+            Some(Ok(())) => {}
+            Some(Err(error)) => {
+                report_error("script entry", &error);
+                return;
             }
-            Err(error) => report_error("script entry", &error),
+            None => return,
+        }
+        if let Err(error) =
+            crate::cli::imports::drain_pending_imports(host_loop, resolver, limits).await
+        {
+            report_error("script entry", &error);
+        }
+        if let Err(error) = host_loop.run_until_idle() {
+            report_error("script entry", &error);
+        }
+        if print_completion {
+            if let Some(value) = completion.replace(None) {
+                println!("{}", format_value(&value));
+            }
         }
     }
 }

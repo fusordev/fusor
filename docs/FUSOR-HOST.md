@@ -516,12 +516,20 @@ pub struct OverlaySource { pub specifier: String, pub text: &'static str }
 CLI 自身成为"核心 overlay + CLI overlay"的组合(`CoreOverlay` 已落地:5 个
 timer op + print op + queueMicrotask op),不再手写安装逻辑。引擎侧零改动。
 
+已落地(2026-08-14):fusor 主包 CLI 与 REPL 均经
+`HostRuntime::builder().with_overlay(CoreOverlay).with_overlay(CliOverlay)`
+组装;`fusor:cli` overlay 以 Global Script init 提供 `print` shim(委托
+`Fusor.ops.op_core_print`,经可安装 print sink 输出)——宿主不再安装 `print`
+全局,差分语料与 REPL 的裸 `print` 拼写保持可用;REPL 的 `throwOnSideEffect`
+抑制改为对 sink 门控;`HostRuntime::runtime_mut()` 供 CLI 装调试器钩子。
+
 2026-08-14 决策:模块加载器属 CLI——resolver/loader/`node:` 内建已随 fusor-cli
 并入 fusor 主包(CLI 为 bin target,模块在 `src/cli/`;fusor-cdp 同为 CLI 唯一
 消费者,一并并入 `src/cdp/`;facade lib 依赖不变)。fusor-host 不提供模块加载。
 
-迁移备注:现 REPL 的 `print` 捕获缓冲(DevTools `Runtime.consoleAPICalled` 事件源)
-改由 console overlay 承担。
+迁移备注:原 REPL 的 `print` 捕获缓冲(DevTools `Runtime.consoleAPICalled` 事件源)
+随重组暂时卸下,改由 console overlay 承担(条目 118)——console overlay 落地后
+恢复捕获,原始参数渲染一并升级。
 
 ## 10. 子项目 7:node_modules 解析(fusor 主包 CLI loader)
 

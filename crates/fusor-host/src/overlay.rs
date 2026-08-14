@@ -113,6 +113,16 @@ impl HostRuntime {
         Ok(self.runtime.context(&self.realm)?)
     }
 
+    /// Returns mutable access to the engine [`Runtime`], for hosts that
+    /// need engine-level services this wrapper does not expose (for
+    /// example installing a debugger hook before evaluation starts).
+    ///
+    /// The borrow lasts as long as the returned reference; no JavaScript
+    /// runs while this wrapper is borrowed.
+    pub fn runtime_mut(&mut self) -> &mut Runtime {
+        &mut self.runtime
+    }
+
     /// Wraps the assembled runtime into the host event loop (§6).
     ///
     /// # Errors

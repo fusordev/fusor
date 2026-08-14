@@ -163,13 +163,15 @@ pub(crate) async fn gather_static_graph(
 #[cfg(test)]
 mod tests {
     use std::{
+        cell::RefCell,
         fs,
         path::{Path, PathBuf},
+        rc::Rc,
         sync::atomic::{AtomicU64, Ordering},
     };
 
     use fusor::{evaluate_preloaded_module_graph, evaluate_script};
-    use fusor_runtime::{Runtime, RuntimeLimits};
+    use fusor_host::overlay::HostRuntime;
 
     use super::*;
     use crate::cli::imports::drain_pending_imports;
@@ -193,30 +195,60 @@ mod tests {
         }
     }
 
-    /// Gathers the static graph below `root_name`, evaluates it, drains parked
-    /// dynamic imports, then runs `probe` as a script (throwing on mismatch).
+    /// Gathers the static graph below `root_name`, evaluates it inside a
+    /// host-loop turn, drains parked dynamic imports through the loop-driven
+    /// driver, then runs `probe` as a script (throwing on mismatch).
     async fn run_entry(
         directory: &Path,
         root_name: &str,
         source: &str,
         probe: &str,
     ) -> Result<(), String> {
-        let mut runtime = Runtime::try_new(RuntimeLimits::default()).map_err(|e| e.to_string())?;
-        let realm = runtime.create_realm().map_err(|e| e.to_string())?;
-        let mut context = runtime.context(&realm).map_err(|e| e.to_string())?;
-        let mut resolver = NodeLikeResolver::new(directory.to_path_buf(), Vec::new());
+        let mut host = HostRuntime::builder().build().map_err(|e| e.to_string())?;
+        let mut host_loop = host.into_loop().map_err(|e| e.to_string())?;
+        let resolver = Rc::new(RefCell::new(NodeLikeResolver::new(
+            directory.to_path_buf(),
+            Vec::new(),
+        )));
         let limits = ScriptLimits::default();
-        let edges = gather_static_graph(&resolver, source, root_name, limits)
+        let edges = gather_static_graph(&resolver.borrow(), source, root_name, limits)
             .await
             .map_err(|error| format!("gather: {error}"))?;
-        evaluate_preloaded_module_graph(&mut context, source, root_name, edges, limits)
+        let source = source.to_owned();
+        let name = root_name.to_owned();
+        let evaluate_outcome: Rc<RefCell<Option<Result<(), fusor::ModuleEvaluationError>>>> =
+            Rc::new(RefCell::new(None));
+        let outcome = Rc::clone(&evaluate_outcome);
+        host_loop.post_event(Box::new(move |context| {
+            let result = evaluate_preloaded_module_graph(context, &source, &name, edges, limits)
+                .map(|_| ());
+            *outcome.borrow_mut() = Some(result);
+            Ok(())
+        }));
+        host_loop
+            .run_one_turn()
+            .map_err(|error| format!("evaluate turn: {error}"))?;
+        evaluate_outcome
+            .replace(None)
+            .expect("evaluation completed")
             .map_err(|error| format!("evaluate: {error}"))?;
-        drain_pending_imports(&mut context, &mut resolver, limits)
+        drain_pending_imports(&mut host_loop, &resolver, limits)
             .await
             .map_err(|error| format!("drain: {error}"))?;
-        evaluate_script(&mut context, probe, "probe.js", limits)
-            .map(|_| ())
-            .map_err(|error| format!("probe: {error}"))
+        let probe = probe.to_owned();
+        let probe_outcome: Rc<RefCell<Option<Result<(), String>>>> = Rc::new(RefCell::new(None));
+        let outcome = Rc::clone(&probe_outcome);
+        host_loop.post_event(Box::new(move |context| {
+            let result = evaluate_script(context, &probe, "probe.js", limits)
+                .map(|_| ())
+                .map_err(|error| error.to_string());
+            *outcome.borrow_mut() = Some(result);
+            Ok(())
+        }));
+        host_loop
+            .run_one_turn()
+            .map_err(|error| format!("probe turn: {error}"))?;
+        probe_outcome.replace(None).expect("probe completed")
     }
 
     #[tokio::test(flavor = "current_thread")]
