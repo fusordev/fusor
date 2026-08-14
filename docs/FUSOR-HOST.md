@@ -44,7 +44,8 @@
 | 组装机制 | Overlay(Deno Extension 式;曾用名 Plugin) |
 | 全局暴露 | `Fusor` 命名空间对象,op 平铺为 `Fusor.ops.<snake_case 名>`;移除 `print` 全局 |
 | 诊断渲染 | miette + 彩色,单一渲染管线 |
-| 初始化脚本 | ESM 模块图,warmup / startup 双模式 |
+| 初始化脚本 | Global Script 载体(2026-08-14:不需要 ESM),warmup / startup 双模式 |
+| 模块加载器 | 属 CLI(fusor 主包 bin),不落 fusor-host;fusor-cli 与 fusor-cdp 并入 fusor 主包(2026-08-14) |
 | 成功标准 | conformance suite + 精选真实脚本 |
 
 ## 2. 审查基线(设计动机)
@@ -93,14 +94,14 @@ fusor-host     (新 crate,宿主适配器)
     ├─ ops       op 注册表 + JsValue↔serde 桥接 + 资源表
     ├─ loop      ECMA-262 Host Hooks 事件循环 + timers
     ├─ process   信号/exit codes/uncaught 策略/取消与 shutdown
-    ├─ overlay   组装机制(ops + 内嵌 ESM init)
-    └─ loader    node_modules 解析(现 CLI resolver 迁入)
+    └─ overlay   组装机制(ops + 内嵌 Global Script init)
 fusor-runtime  (引擎核心:嵌入 API 改进 + snapshot 模块,不感知 fusor-host)
 fusor-frontend (TypeScript 剥离 pass)
-fusor-cli      (瘦客户端,迁移到 fusor-host)
+fusor          (facade lib + CLI bin:resolver/loader/node: 内建/REPL/CDP;
+                fusor-cli 与 fusor-cdp 已并入,2026-08-14)
 ```
 
-**依赖方向**:`fusor-cli → fusor-host → fusor-runtime`,无反向依赖;serde 与 Tokio
+**依赖方向**:`fusor(CLI) → fusor-host → fusor-runtime`,无反向依赖;serde 与 Tokio
 全量不进引擎核心(ARCHITECTURE.md:41 信任边界);快照 codec 自写、引擎零新依赖。
 
 | # | 子项目 | 落点 | 依赖 |
@@ -109,9 +110,9 @@ fusor-cli      (瘦客户端,迁移到 fusor-host)
 | 2 | ops 绑定层 + 资源管理 | fusor-ops + fusor-host::ops | #1 |
 | 3 | 事件循环核心 | fusor-host::loop | #1(Promise resolver) |
 | 4 | 进程生命周期与诊断 | fusor-host::process | #3 |
-| 5 | Snapshot 与初始化脚本(ESM) | fusor-runtime + fusor-host | #1、#2 |
+| 5 | Snapshot 与初始化脚本 | fusor-runtime + fusor-host | #1、#2 |
 | 6 | Overlay 组装机制 | fusor-host::overlay | #2、#3、#5 |
-| 7 | node_modules 解析 | fusor-host::loader + CLI 迁移 | #6(loader 落点) |
+| 7 | node_modules 解析 | fusor 主包 CLI loader | #6(CLI 重组) |
 | 8 | TypeScript 类型剥离 | fusor-frontend + loader 集成 | #7(goal 判定) |
 
 **建议执行顺序**:1 → 2 → 3 → 4 → 5 → 6 → 7 → 8;#7/#8 可与 #4–#6 并行。
@@ -514,18 +515,25 @@ pub struct OverlaySource { pub specifier: String, pub text: &'static str }
 
 CLI 自身成为"核心 overlay + CLI overlay"的组合(`CoreOverlay` 已落地:5 个
 timer op + print op + queueMicrotask op),不再手写安装逻辑。引擎侧零改动。
+
+2026-08-14 决策:模块加载器属 CLI——resolver/loader/`node:` 内建已随 fusor-cli
+并入 fusor 主包(CLI 为 bin target,模块在 `src/cli/`;fusor-cdp 同为 CLI 唯一
+消费者,一并并入 `src/cdp/`;facade lib 依赖不变)。fusor-host 不提供模块加载。
+
 迁移备注:现 REPL 的 `print` 捕获缓冲(DevTools `Runtime.consoleAPICalled` 事件源)
 改由 console overlay 承担。
 
-## 10. 子项目 7:node_modules 解析(fusor-host::loader + CLI 迁移)
+## 10. 子项目 7:node_modules 解析(fusor 主包 CLI loader)
 
-现 CLI resolver(相对/绝对路径、`node:` 内建)迁入 fusor-host::loader,新增:
+模块加载器属 CLI(2026-08-14 决策,§9):resolver 已随 fusor-cli 并入 fusor 主包
+(`src/cli/resolver.rs`:相对/绝对路径、`node:` 内建、`.mjs/.js` 回退),本子项目
+只在该 resolver 上增强,不迁入 fusor-host。新增:
 
 - **裸说明符**(`foo`、`@scope/pkg`)→ 从 referrer 目录逐级向上找 `node_modules/`;命中后读 `package.json`:
   - v1 支持:`main` 字段、`exports`(字符串/简单对象,条件匹配仅 `default` + `import`)、`index.js` 回退、`.js/.mjs` 扩展名回退、`type` 字段决定 Script/Module goal(与 §11 联动)
   - 不支持:`exports` 条件数组/`require` 条件、symlink 真实路径解析(后续)
 - 失败 fail closed,诊断注明解析步;与相对/绝对路径解析、`node:` 内建并列
-- 依赖 #6(loader 落点);可注入 fixture 树测试
+- 依赖 #6(CLI 重组);可注入 fixture 树测试
 
 ## 11. 子项目 8:TypeScript 类型剥离(fusor-frontend + loader 集成)
 

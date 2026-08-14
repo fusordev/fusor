@@ -113,14 +113,14 @@
 - [x] `Overlay` trait + `OverlaySource`(2026-08-14;`#[op]` 同名 mod + `register_op!`,首参 `&mut Context` 注入)
 - [x] 拓扑排序 + 环检测(构建期报错;重复 overlay 名/未知依赖/重复 init 源一并 fail closed)
 - [x] op 注册 → `Fusor.ops` 安装;init 按序求值(2026-08-14 已改造:init 为 Global Script 载体,按拓扑序+声明序求值,specifier 作 location)
-- [ ] `PluginModuleLoader`(内嵌虚拟模块说明符 + 文件系统回退)
-- [ ] CLI 重组为"核心 overlay + CLI overlay";`print` 全局移除
+- [x] `PluginModuleLoader`(2026-08-14:模块加载器属 CLI——`node:*` 内嵌虚拟模块说明符 + 文件系统回退随 fusor-cli 并入 fusor 主包 `src/cli/`,不落 fusor-host)
+- [ ] CLI 重组为"核心 overlay + CLI overlay";`print` 全局移除(fusor-cli/fusor-cdp 已并入 fusor 主包 bin,overlay 化待做)
 - [ ] DevTools `Runtime.consoleAPICalled` 捕获改由 console overlay 承担
 - [ ] 测试:拓扑/环/冲突;init 模块互 import;快照交互(§8.5)
 
-## 子项目 7:node_modules 解析(fusor-host::loader)§10
+## 子项目 7:node_modules 解析(fusor 主包 CLI loader)§10
 
-- [ ] 现 CLI resolver 迁入 fusor-host::loader
+- [ ] 现 CLI resolver 增强(已随 fusor-cli 并入 fusor 主包 `src/cli/resolver.rs`,不迁 fusor-host)
 - [ ] 裸说明符从 referrer 逐级向上查找 `node_modules/`
 - [ ] `package.json`:`main`、`exports`(字符串/简单对象,条件 `default`+`import`)、`index.js` 回退、`.js/.mjs` 扩展名回退、`type` 字段
 - [ ] 解析失败诊断注明解析步,与相对/绝对路径、`node:` 内建并列

@@ -46,9 +46,7 @@ compatibility boundaries.
 | `fusor-bytecode` | Instructions, verifier, codec, and debug data |
 | `fusor-compiler` | Oxc lowering to verified bytecode |
 | `fusor-runtime` | Values, heap, realms, VM, and built-ins |
-| `fusor-cdp` | Loopback-only Chrome DevTools Protocol server |
-| `fusor-cli` | Node-like module runner, ESM REPL, and DevTools entry point |
-| `fusor` | Ergonomic host facade |
+| `fusor` | Ergonomic host facade; plus the `fusor` CLI bin (module runner, ESM REPL, node: builtins, DevTools CDP server — the former `fusor-cli`/`fusor-cdp` crates, merged 2026-08-14) |
 
 Architecture and trust-boundary details are in
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and

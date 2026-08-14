@@ -16,13 +16,13 @@ use fusor::{
 };
 use fusor_runtime::{Context, ModuleKey};
 
-use crate::resolver::NodeLikeResolver;
+use crate::cli::resolver::NodeLikeResolver;
 
 /// Drains parked dynamic `import()` loads to quiescence, reading module
 /// sources concurrently on the caller's Tokio runtime.
 ///
 /// Call this after the static graph has been evaluated (see
-/// [`crate::loader::gather_static_graph`] and
+/// [`crate::cli::loader::gather_static_graph`] and
 /// [`fusor::evaluate_preloaded_module_graph`]). Mirrors
 /// `fusor::pump_dynamic_imports` semantics: registry dedup, linking,
 /// evaluation, and Promise settlement all happen inside the engine; only the
@@ -91,7 +91,7 @@ mod tests {
     use fusor_runtime::{Runtime, RuntimeLimits};
 
     use super::*;
-    use crate::loader::gather_static_graph;
+    use crate::cli::loader::gather_static_graph;
 
     fn temp_dir(tag: &str) -> PathBuf {
         static COUNTER: AtomicU64 = AtomicU64::new(0);

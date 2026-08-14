@@ -1,20 +1,21 @@
 //! `fusor`: Node-like module runner and ESM REPL for the Experimental JavaScript Engine.
+//!
+//! The binary target of the `fusor` package; the CLI modules (module loader,
+//! builtin table, REPL) live in [`cli`](crate::cli) and the DevTools CDP
+//! server in [`cdp`](crate::cdp), kept out of the facade library (`fusor`).
 
 #![forbid(unsafe_code)]
 
-mod builtins;
-mod imports;
-mod loader;
-mod repl;
-mod resolver;
+mod cdp;
+mod cli;
 
 use std::{error::Error, path::Path, process::ExitCode, sync::Arc};
 
 use fusor::{ScriptLimits, evaluate_preloaded_module_graph, evaluate_script};
-use fusor_cdp::{self as cdp, format::format_argument};
 use fusor_runtime::{Runtime, RuntimeLimits};
 
-use crate::resolver::NodeLikeResolver;
+use crate::cdp::format::format_argument;
+use crate::cli::resolver::NodeLikeResolver;
 
 const USAGE: &str = "\
 usage:
@@ -36,7 +37,7 @@ async fn main() -> ExitCode {
         Ok(Command::Repl {
             inspect_port,
             inspect_break,
-        }) => ExitCode::from(repl::run(inspect_port, inspect_break).await),
+        }) => ExitCode::from(cli::repl::run(inspect_port, inspect_break).await),
         Ok(Command::Run {
             file,
             as_script,
@@ -259,7 +260,7 @@ async fn run_file(
         // The root key is canonical: the absolute, lexically normalized path
         // prefixed with `file://`, matching the keys the resolver issues.
         let cwd = std::env::current_dir().unwrap_or_else(|_| Path::new("/").to_path_buf());
-        let root_path = resolver::normalize_path(&cwd.join(&path));
+        let root_path = cli::resolver::normalize_path(&cwd.join(&path));
         let root_name = format!("file://{}", root_path.display());
         let mut process_argv = vec!["fusor".to_owned(), display_name];
         process_argv.extend(argv);
@@ -268,7 +269,8 @@ async fn run_file(
         // Load the static graph asynchronously (concurrent per-level reads on
         // this runtime), evaluate it synchronously, then drain parked
         // dynamic `import()` loads.
-        let result = match loader::gather_static_graph(&resolver, &source, &root_name, limits).await
+        let result = match cli::loader::gather_static_graph(&resolver, &source, &root_name, limits)
+            .await
         {
             Ok(edges) => {
                 evaluate_preloaded_module_graph(&mut context, &source, &root_name, edges, limits)
@@ -278,7 +280,9 @@ async fn run_file(
         };
         match result {
             Ok(()) => {
-                match imports::drain_pending_imports(&mut context, &mut resolver, limits).await {
+                match cli::imports::drain_pending_imports(&mut context, &mut resolver, limits)
+                    .await
+                {
                     // A top-level-await graph settles asynchronously while the
                     // drain runs its continuations; a rejection recorded on the
                     // root is the evaluation failure.

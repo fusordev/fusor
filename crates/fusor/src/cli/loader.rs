@@ -6,7 +6,7 @@
 //! specifiers stay synchronous, while the file reads of one level run
 //! concurrently as spawned Tokio tasks — only pure data (paths, file bytes)
 //! crosses the await boundary, exactly like the dynamic-import drain in
-//! [`crate::imports`]. The resulting [`PreloadedModuleEdge`] set feeds
+//! [`crate::cli::imports`]. The resulting [`PreloadedModuleEdge`] set feeds
 //! [`fusor::evaluate_preloaded_module_graph`], which compiles, registers,
 //! links, and evaluates the graph with the same semantics as the synchronous
 //! loader path.
@@ -18,7 +18,7 @@ use fusor::{
     PreloadedModuleEdge, ScriptLimits, module_import_requests,
 };
 
-use crate::resolver::{NodeLikeResolver, ResolvedModuleRequest};
+use crate::cli::resolver::{NodeLikeResolver, ResolvedModuleRequest};
 
 /// Where a resolved request's source comes from at this BFS level.
 enum Target {
@@ -172,7 +172,7 @@ mod tests {
     use fusor_runtime::{Runtime, RuntimeLimits};
 
     use super::*;
-    use crate::imports::drain_pending_imports;
+    use crate::cli::imports::drain_pending_imports;
 
     fn temp_dir(tag: &str) -> PathBuf {
         static COUNTER: AtomicU64 = AtomicU64::new(0);

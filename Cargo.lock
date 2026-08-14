@@ -356,42 +356,22 @@ checksum = "e6d5a32815ae3f33302d95fdcb2ce17862f8c65363dcfd29360480ba1001fc9c"
 name = "fusor"
 version = "0.0.1"
 dependencies = [
+ "base64",
  "fusor-bytecode",
  "fusor-compiler",
  "fusor-diagnostics",
  "fusor-frontend",
  "fusor-runtime",
- "serde_json",
-]
-
-[[package]]
-name = "fusor-bytecode"
-version = "0.0.1"
-
-[[package]]
-name = "fusor-cdp"
-version = "0.0.1"
-dependencies = [
- "base64",
- "fusor",
- "fusor-runtime",
+ "miette",
+ "rustyline",
  "serde_json",
  "sha1",
  "tokio",
 ]
 
 [[package]]
-name = "fusor-cli"
+name = "fusor-bytecode"
 version = "0.0.1"
-dependencies = [
- "fusor",
- "fusor-cdp",
- "fusor-runtime",
- "miette",
- "rustyline",
- "serde_json",
- "tokio",
-]
 
 [[package]]
 name = "fusor-compiler"

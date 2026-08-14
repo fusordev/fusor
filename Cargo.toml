@@ -1,9 +1,7 @@
 [workspace]
 members = [
-    "crates/fusor-cli",
     "crates/fusor-host",
     "crates/fusor-ops",
-    "crates/fusor-cdp",
     "crates/fusor",
     "crates/fusor-bytecode",
     "crates/fusor-compiler",

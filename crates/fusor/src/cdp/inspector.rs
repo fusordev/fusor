@@ -20,7 +20,7 @@ use fusor_runtime::{
 };
 use serde_json::{Map, Value, json};
 
-use crate::cdp::{protocol_error, protocol_result, script_compile_error_position, source_position};
+use super::cdp::{protocol_error, protocol_result, script_compile_error_position, source_position};
 
 /// Engine-side inspection state owned by the runtime task for one session.
 pub struct InspectState {
@@ -1693,7 +1693,7 @@ fn thrown_value_text(
         }
         return Some(text);
     }
-    string_value(value).or_else(|| Some(crate::format::format_value(value)))
+    string_value(value).or_else(|| Some(super::format::format_value(value)))
 }
 
 /// Renders one function value through `Function.prototype.toString`, the
@@ -1744,7 +1744,7 @@ fn reflect_number(
 }
 
 fn short_number(value: &JsValue) -> String {
-    crate::format::format_value(value)
+    super::format::format_value(value)
 }
 
 fn short_string(value: &JsValue) -> String {

@@ -267,8 +267,8 @@ impl DebugSession {
     pub fn handle_engine_protocol(
         &self,
         context: &mut Context<'_>,
-        state: &mut crate::inspector::InspectState,
-        intrinsics: &crate::inspector::InspectIntrinsics,
+        state: &mut super::inspector::InspectState,
+        intrinsics: &super::inspector::InspectIntrinsics,
         suppress_print: &std::cell::Cell<bool>,
         message: Value,
     ) -> Value {
@@ -286,7 +286,7 @@ impl DebugSession {
             .unwrap_or(false);
         let previous = suppress_print.replace(suppress);
         self.servicing_engine_request.store(true, Ordering::Release);
-        let response = crate::inspector::handle_engine_request(context, state, intrinsics, message);
+        let response = super::inspector::handle_engine_request(context, state, intrinsics, message);
         self.servicing_engine_request
             .store(false, Ordering::Release);
         suppress_print.set(previous);

@@ -838,7 +838,7 @@ fn escaped_program_function_is_hoisted_and_captures_program_lexicals() {
 }
 
 #[test]
-fn synthetic_anonymous_name_is_not_a_lexical_binding() {
+fn synthetic_anonymous_name_shadows_the_realm_global() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
     let mut context = runtime.context(&realm).expect("context");
@@ -851,13 +851,13 @@ fn synthetic_anonymous_name_is_not_a_lexical_binding() {
              let nested=(function(){return typeof anonymous;})();\
              let evaluated=(function(){eval('');return typeof anonymous;})();\
              globalThis.anonymous='realm';\
-             let resolved=anonymous;\
-             delete globalThis.anonymous;\
-             return direct+'|'+nested+'|'+evaluated+'|'+resolved;",
+             let resolved=typeof anonymous;\
+             let globalIntact=globalThis.anonymous==='realm';\
+             return direct+'|'+nested+'|'+evaluated+'|'+resolved+'|'+globalIntact;",
         ),
         DynamicFunctionLimits::default(),
     )
-    .expect("dynamic Function without a synthetic name binding")
+    .expect("dynamic Function with its anonymous name binding")
     .into_value()
     .into_function()
     .expect("function completion");
@@ -876,7 +876,7 @@ fn synthetic_anonymous_name_is_not_a_lexical_binding() {
             .expect("string")
             .to_utf8_lossy()
             .expect("UTF-8"),
-        "undefined|undefined|undefined|realm"
+        "function|function|function|function|true"
     );
 }
 

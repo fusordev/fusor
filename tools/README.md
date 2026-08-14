@@ -7,7 +7,7 @@ runtime, and fixtures run in deterministic path order.
 Build the pinned upstream release outside this repository, then run:
 
 ```console
-cargo build -p fusor-cli
+cargo build -p fusor
 cargo xtask differential \
   --oracle /path/to/quickjs-2026-06-04/qjs \
   --candidate target/debug/fusor
@@ -16,9 +16,9 @@ cargo xtask differential \
 The oracle is optional development input and is never linked or copied
 into the Rust artifacts.
 
-## `fusor` (crates/fusor-cli)
+## `fusor` (crates/fusor, bin target)
 
-`cargo build -p fusor-cli` produces `target/debug/fusor`:
+`cargo build -p fusor` produces `target/debug/fusor`:
 
 ```console
 target/debug/fusor run file.mjs    # evaluate file.mjs as an ES module

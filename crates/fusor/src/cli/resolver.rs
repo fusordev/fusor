@@ -36,7 +36,7 @@ use std::{
 use fusor::{LoadedModuleSource, ModuleSourceError, ModuleSourceLoader};
 use fusor_runtime::ModuleKey;
 
-use crate::builtins;
+use crate::cli::builtins;
 
 const FILE_SCHEME: &str = "file://";
 const NODE_SCHEME: &str = "node:";

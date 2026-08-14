@@ -30,8 +30,8 @@ use fusor::{ScriptLimits, evaluate_preloaded_module_graph, evaluate_script};
 use fusor_runtime::{Runtime, RuntimeLimits};
 use tokio::sync::mpsc;
 
-use crate::{report_error, resolver::NodeLikeResolver};
-use fusor_cdp::{
+use crate::{cli::resolver::NodeLikeResolver, report_error};
+use crate::cdp::{
     self as cdp,
     format::{format_argument, format_value},
     inspector,
@@ -43,7 +43,7 @@ use fusor_cdp::{
 /// Tokio runtime; script entries stay fully synchronous.
 pub(crate) async fn run(inspect_port: Option<u16>, inspect_break: bool) -> u8 {
     let cwd = match std::env::current_dir() {
-        Ok(cwd) => crate::resolver::normalize_path(&cwd),
+        Ok(cwd) => crate::cli::resolver::normalize_path(&cwd),
         Err(error) => {
             eprintln!("fusor: cannot determine the current directory: {error}");
             return 2;
@@ -338,7 +338,7 @@ async fn evaluate_repl_entry(
         }
         source.push_str(entry);
         let name = format!("{entry_prefix}/__repl_entry_{entry_index}.mjs");
-        let result = match crate::loader::gather_static_graph(resolver, &source, &name, limits)
+        let result = match crate::cli::loader::gather_static_graph(resolver, &source, &name, limits)
             .await
         {
             Ok(edges) => evaluate_preloaded_module_graph(context, &source, &name, edges, limits),
@@ -347,7 +347,7 @@ async fn evaluate_repl_entry(
         match result {
             Ok(value) => {
                 if let Err(error) =
-                    crate::imports::drain_pending_imports(context, resolver, limits).await
+                    crate::cli::imports::drain_pending_imports(context, resolver, limits).await
                 {
                     report_error("module entry", &error);
                 }
@@ -366,7 +366,7 @@ async fn evaluate_repl_entry(
         match evaluate_script(context, entry, &name, limits) {
             Ok(value) => {
                 if let Err(error) =
-                    crate::imports::drain_pending_imports(context, resolver, limits).await
+                    crate::cli::imports::drain_pending_imports(context, resolver, limits).await
                 {
                     report_error("script entry", &error);
                 }
