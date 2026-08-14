@@ -55,12 +55,18 @@ impl ResourceId {
 pub enum ResourceTableError {
     /// Every `u32` id has been issued; no further resources can be added.
     IdDomainExhausted,
+    /// No resource table is installed in the op-state registry (the host
+    /// builder installs one during assembly, §5.6).
+    NotInstalled,
 }
 
 impl std::fmt::Display for ResourceTableError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::IdDomainExhausted => formatter.write_str("resource id domain is exhausted"),
+            Self::NotInstalled => {
+                formatter.write_str("no resource table is installed in the op-state registry")
+            }
         }
     }
 }

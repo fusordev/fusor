@@ -6,9 +6,11 @@ mod op_runtime;
 mod process;
 mod resources;
 mod serde;
+mod state;
 mod timers;
 
 pub use core::{install_core_ops, set_print_sink};
+pub use state::{OpStateError, OpStateRegistry};
 
 pub use op_runtime::{
     OpRuntime, OpRuntimeError, install_op_runtime, pending_op_count, poll_op_completions,
@@ -25,52 +27,48 @@ use fusor_runtime::{Context, JsValue};
 use std::collections::HashMap;
 use std::rc::Rc;
 
-thread_local! {
-    static RESOURCE_TABLE: std::cell::RefCell<ResourceTable> =
-        std::cell::RefCell::new(ResourceTable::new());
-}
-
-/// Installs the host-runtime-wide resource table shared by every op (§5.6).
+/// Installs the host-runtime-wide resource table shared by every op
+/// (§5.6) into the op-state registry.
 ///
 /// # Errors
 ///
 /// Returns the table unchanged when one is already installed.
 pub fn install_resource_table(table: ResourceTable) -> Result<(), ResourceTable> {
-    RESOURCE_TABLE.with(|slot| {
-        if !slot.borrow().is_empty() {
-            return Err(table);
-        }
-        *slot.borrow_mut() = table;
-        Ok(())
-    })
+    OpStateRegistry::install(table)
 }
 
 /// Looks up one live resource through the installed table (the
 /// `ResourceId`-parameter specialization of the `#[op]` macro).
 #[must_use]
 pub fn lookup_resource(id: u32) -> Option<Rc<dyn Resource>> {
-    RESOURCE_TABLE.with(|slot| {
-        slot.borrow()
-            .get(ResourceId::from_u32(id))
-            .cloned()
+    OpStateRegistry::with::<ResourceTable, _>(|table| {
+        table.get(ResourceId::from_u32(id)).cloned()
     })
+    .ok()
+    .flatten()
 }
 
 /// Adds one resource to the installed table (host bootstrap path).
 ///
 /// # Errors
 ///
-/// Returns the resource unchanged when the id domain is exhausted.
+/// Returns [`ResourceTableError::NotInstalled`] when no table is
+/// installed and [`ResourceTableError::IdDomainExhausted`] when the id
+/// domain is exhausted.
 pub fn add_resource(
     resource: Rc<dyn Resource>,
 ) -> Result<ResourceId, resources::ResourceTableError> {
-    RESOURCE_TABLE.with(|slot| slot.borrow_mut().add(resource))
+    OpStateRegistry::with_mut::<ResourceTable, _>(|table| table.add(resource))
+        .map_err(|_| resources::ResourceTableError::NotInstalled)?
 }
 
 /// Closes one resource in the installed table (the JS-side close op path).
 #[must_use]
 pub fn close_resource(id: u32) -> bool {
-    RESOURCE_TABLE.with(|slot| slot.borrow_mut().close(ResourceId::from_u32(id)))
+    OpStateRegistry::with_mut::<ResourceTable, _>(|table| {
+        table.close(ResourceId::from_u32(id))
+    })
+    .unwrap_or(false)
 }
 
 /// Closes every table-exclusive resource in the installed table
@@ -81,12 +79,12 @@ pub fn close_resource(id: u32) -> bool {
 /// contract.
 #[must_use]
 pub fn close_all_resources() -> usize {
-    RESOURCE_TABLE.with(|slot| {
-        let mut table = slot.borrow_mut();
+    OpStateRegistry::with_mut::<ResourceTable, _>(|table| {
         let count = table.len();
         table.close_all();
         count
     })
+    .unwrap_or(0)
 }
 
 /// Static declaration metadata for one `#[op]` function.

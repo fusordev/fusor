@@ -116,6 +116,8 @@ fn shutdown_closes_table_exclusive_resources() {
     let resource = Rc::new(TestResource {
         closed: Rc::clone(&closed),
     });
+    fusor_host::ops::install_resource_table(fusor_host::ops::ResourceTable::new())
+        .expect("table installed");
     fusor_host::ops::add_resource(resource.clone()).expect("added");
     drop(resource);
     let host = fixture();

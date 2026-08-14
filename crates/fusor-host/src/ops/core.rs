@@ -8,19 +8,33 @@ use std::cell::RefCell;
 
 use fusor_runtime::{Context, ExecutionError, HostCall, JsValue, ValueKind};
 
-use super::{OpDeclaration, install_op};
+use super::{OpDeclaration, OpError, OpStateRegistry, install_op};
 
-thread_local! {
-    /// The current print sink; stdout by default. Installable so the
-    /// console overlay (subproject 6) can redirect output.
-    static PRINT_SINK: RefCell<Box<dyn FnMut(&str)>> =
-        RefCell::new(Box::new(|line: &str| println!("{line}")));
+/// The current print sink: stdout by default. Installed into the
+/// op-state registry by the host builder; the console overlay
+/// (subproject 6) replaces it to redirect output.
+pub struct PrintSink(Box<dyn FnMut(&str)>);
+
+impl Default for PrintSink {
+    fn default() -> Self {
+        Self(Box::new(|line: &str| println!("{line}")))
+    }
 }
 
-/// Replaces the print sink, returning the previous one.
+impl std::fmt::Debug for PrintSink {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("PrintSink(..)")
+    }
+}
+
+/// Installs the print sink, returning the previous one (or `None` when
+/// no sink was installed yet).
 #[must_use]
-pub fn set_print_sink(sink: Box<dyn FnMut(&str)>) -> Box<dyn FnMut(&str)> {
-    PRINT_SINK.with(|slot| std::mem::replace(&mut *slot.borrow_mut(), sink))
+pub fn set_print_sink(sink: Box<dyn FnMut(&str)>) -> Option<Box<dyn FnMut(&str)>> {
+    if !OpStateRegistry::has::<PrintSink>() {
+        let _ = OpStateRegistry::install(PrintSink::default());
+    }
+    OpStateRegistry::with_mut::<PrintSink, _>(|slot| std::mem::replace(&mut slot.0, sink)).ok()
 }
 
 /// Renders one print argument: strings raw, everything else through the
@@ -54,7 +68,11 @@ fn op_core_print_glue(
         .map(|value| format_print_argument(context, value))
         .collect();
     let line = rendered.join(" ");
-    PRINT_SINK.with(|slot| (slot.borrow_mut())(&line));
+    if !OpStateRegistry::has::<PrintSink>() {
+        let _ = OpStateRegistry::install(PrintSink::default());
+    }
+    OpStateRegistry::with_mut::<PrintSink, _>(|sink| (sink.0)(&line))
+        .map_err(|error| super::op_error_value(context, OpError::new(error.to_string())))?;
     Ok(context.undefined())
 }
 

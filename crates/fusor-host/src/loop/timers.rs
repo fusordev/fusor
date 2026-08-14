@@ -1,7 +1,6 @@
 //! Timer and `setImmediate` state (§6.4): a deadline-ordered heap plus the
 //! per-turn immediate queue, hosted by [`super::HostLoop`].
 
-use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, VecDeque};
 use std::time::{Duration, Instant};
@@ -133,24 +132,14 @@ impl TimerState {
     }
 }
 
-thread_local! {
-    static TIMER_STATE: RefCell<Option<TimerState>> = const { RefCell::new(None) };
-}
-
-/// Installs a fresh timer state for one [`super::HostLoop`] (owner-task
-/// bootstrap).
+/// Installs a fresh timer state for one [`super::HostLoop`] into the
+/// op-state registry (owner-task bootstrap).
 ///
 /// # Errors
 ///
 /// Returns the state unchanged when one is already installed.
 pub(crate) fn install_timer_state(state: TimerState) -> Result<(), TimerState> {
-    TIMER_STATE.with(|slot| {
-        if slot.borrow().is_some() {
-            return Err(state);
-        }
-        *slot.borrow_mut() = Some(state);
-        Ok(())
-    })
+    crate::ops::OpStateRegistry::install(state)
 }
 
 /// Removes the installed timer state (shutdown teardown, §7.4), dropping
@@ -158,36 +147,12 @@ pub(crate) fn install_timer_state(state: TimerState) -> Result<(), TimerState> {
 /// thread.
 #[must_use]
 pub(crate) fn take_timer_state() -> Option<TimerState> {
-    TIMER_STATE.with(|slot| slot.borrow_mut().take())
+    crate::ops::OpStateRegistry::take::<TimerState>()
 }
 
 /// Borrows the installed timer state mutably (the op entry points).
 pub(crate) fn with_timer_state<R>(
     operation: impl FnOnce(&mut TimerState) -> R,
-) -> Result<R, TimerError> {
-    TIMER_STATE.with(|slot| {
-        slot.borrow_mut()
-            .as_mut()
-            .map(operation)
-            .ok_or(TimerError::NotInstalled)
-    })
+) -> Result<R, crate::ops::OpStateError> {
+    crate::ops::OpStateRegistry::with_mut::<TimerState, R>(operation)
 }
-
-/// Timer-state failures.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum TimerError {
-    /// No timer state is installed on the owner task.
-    NotInstalled,
-}
-
-impl std::fmt::Display for TimerError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::NotInstalled => formatter.write_str(
-                "no timer state is installed (create the HostLoop first)",
-            ),
-        }
-    }
-}
-
-impl std::error::Error for TimerError {}

@@ -18,7 +18,6 @@
 //! any pending interrupt request. SIGTERM is not interceptable in the
 //! alpha host (documented).
 
-use std::cell::RefCell;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 
@@ -153,63 +152,29 @@ impl SignalState {
     }
 }
 
-thread_local! {
-    static SIGNAL_STATE: RefCell<Option<SignalState>> = const { RefCell::new(None) };
-}
-
-/// Installs the owner-task [`SignalState`] clone (the `process.on` op
-/// entry point).
+/// Installs the owner-task [`SignalState`] clone into the op-state
+/// registry (the `process.on` op entry point).
 ///
 /// # Errors
 ///
 /// Returns the state unchanged when one is already installed.
 pub(crate) fn install_signal_state(state: SignalState) -> Result<(), SignalState> {
-    SIGNAL_STATE.with(|slot| {
-        if slot.borrow().is_some() {
-            return Err(state);
-        }
-        *slot.borrow_mut() = Some(state);
-        Ok(())
-    })
+    crate::ops::OpStateRegistry::install(state)
 }
 
 /// Removes the installed signal state (shutdown teardown, §7.4) so a
 /// fresh loop can install on the same thread.
 #[must_use]
 pub(crate) fn take_signal_state() -> Option<SignalState> {
-    SIGNAL_STATE.with(|slot| slot.borrow_mut().take())
+    crate::ops::OpStateRegistry::take::<SignalState>()
 }
 
 /// Borrows the installed signal state (the `process.on` op entry point).
 pub(crate) fn with_signal_state<R>(
     operation: impl FnOnce(&SignalState) -> R,
-) -> Result<R, SignalStateError> {
-    SIGNAL_STATE.with(|slot| {
-        slot.borrow()
-            .as_ref()
-            .map(operation)
-            .ok_or(SignalStateError::NotInstalled)
-    })
+) -> Result<R, crate::ops::OpStateError> {
+    crate::ops::OpStateRegistry::with::<SignalState, R>(operation)
 }
-
-/// Signal-state failures.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum SignalStateError {
-    /// No signal state is installed on the owner task.
-    NotInstalled,
-}
-
-impl std::fmt::Display for SignalStateError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::NotInstalled => formatter.write_str(
-                "no signal state is installed (create the HostLoop first)",
-            ),
-        }
-    }
-}
-
-impl std::error::Error for SignalStateError {}
 
 /// Failures while attaching the OS signal forwarder.
 #[derive(Debug)]

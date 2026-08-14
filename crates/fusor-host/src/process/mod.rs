@@ -16,6 +16,6 @@ pub use exit_codes::ExitCode;
 pub use signals::{Signal, SignalForwardError, SignalForwarder, SignalState, spawn_signal_forwarder};
 pub(crate) use signals::{install_signal_state, take_signal_state, with_signal_state};
 pub(crate) use state::{
-    ProcessState, has_pending_rejections, install_process_state, push_rejection_event,
-    take_process_state, take_rejection_events, with_process_state,
+    ProcessState, RejectionQueue, has_pending_rejections, install_process_state,
+    push_rejection_event, take_process_state, take_rejection_events, with_process_state,
 };

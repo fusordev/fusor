@@ -140,7 +140,8 @@ impl OpRuntime {
     }
 }
 
-/// Installs the owner-task [`OpRuntime`] used by `#[op(async)]` glue.
+/// Installs the owner-task [`OpRuntime`] used by `#[op(async)]` glue
+/// into the op-state registry.
 ///
 /// Installation is a one-time host bootstrap step.
 ///
@@ -148,13 +149,7 @@ impl OpRuntime {
 ///
 /// Returns the runtime unchanged when one is already installed.
 pub fn install_op_runtime(runtime: OpRuntime) -> Result<(), OpRuntime> {
-    OP_RUNTIME.with(|slot| {
-        if slot.borrow().is_some() {
-            return Err(runtime);
-        }
-        *slot.borrow_mut() = Some(runtime);
-        Ok(())
-    })
+    super::OpStateRegistry::install(runtime)
 }
 
 /// Removes the installed owner-task [`OpRuntime`], returning it for the
@@ -166,7 +161,7 @@ pub fn install_op_runtime(runtime: OpRuntime) -> Result<(), OpRuntime> {
 /// [`OpRuntimeError::NotInstalled`].
 #[must_use]
 pub fn take_op_runtime() -> Option<OpRuntime> {
-    OP_RUNTIME.with(|slot| slot.borrow_mut().take())
+    super::OpStateRegistry::take::<OpRuntime>()
 }
 
 /// Spawns one async op future through the installed owner-task runtime.
@@ -180,12 +175,8 @@ where
     T: serde::Serialize + Send + 'static,
     F: Future<Output = Result<T, OpError>> + Send + 'static,
 {
-    OP_RUNTIME.with(|slot| {
-        slot.borrow_mut()
-            .as_mut()
-            .ok_or(OpRuntimeError::NotInstalled)?
-            .spawn(resolver, future)
-    })
+    super::OpStateRegistry::with_mut::<OpRuntime, _>(|runtime| runtime.spawn(resolver, future))
+        .map_err(|_| OpRuntimeError::NotInstalled)?
 }
 
 /// Polls the installed owner-task runtime's completion channel, settling
@@ -196,27 +187,15 @@ where
 ///
 /// Returns [`OpRuntimeError::NotInstalled`] when no runtime is installed.
 pub fn poll_op_completions(context: &mut Context<'_>) -> Result<usize, OpRuntimeError> {
-    OP_RUNTIME.with(|slot| {
-        slot.borrow_mut()
-            .as_mut()
-            .ok_or(OpRuntimeError::NotInstalled)
-            .map(|runtime| runtime.poll_completions(context))
-    })
+    super::OpStateRegistry::with_mut::<OpRuntime, _>(|runtime| runtime.poll_completions(context))
+        .map_err(|_| OpRuntimeError::NotInstalled)
 }
 
 /// Returns the number of op futures still running (§6.5 alive source).
 #[must_use]
 pub fn pending_op_count() -> Result<usize, OpRuntimeError> {
-    OP_RUNTIME.with(|slot| {
-        slot.borrow()
-            .as_ref()
-            .map(OpRuntime::pending_count)
-            .ok_or(OpRuntimeError::NotInstalled)
-    })
-}
-
-thread_local! {
-    static OP_RUNTIME: std::cell::RefCell<Option<OpRuntime>> = std::cell::RefCell::new(None);
+    super::OpStateRegistry::with::<OpRuntime, _>(OpRuntime::pending_count)
+        .map_err(|_| OpRuntimeError::NotInstalled)
 }
 
 /// Settles one finished op promise with its stored outcome.

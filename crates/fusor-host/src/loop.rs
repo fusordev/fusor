@@ -21,9 +21,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::process::{
-    ExitCode, ProcessState, Signal, SignalState, has_pending_rejections, install_process_state,
-    install_signal_state, push_rejection_event, take_process_state, take_rejection_events,
-    take_signal_state, with_process_state,
+    ExitCode, ProcessState, RejectionQueue, Signal, SignalState, has_pending_rejections,
+    install_process_state, install_signal_state, push_rejection_event, take_process_state,
+    take_rejection_events, take_signal_state, with_process_state,
 };
 use fusor_runtime::{
     CallError, Context, ErrorObjectKind, ExceptionKind, ExecutionError, ExecutionLimits,
@@ -92,6 +92,8 @@ impl HostLoop {
         install_timer_state(TimerState::default())
             .map_err(|_| HostLoopError::AlreadyInstalled)?;
         install_process_state(ProcessState::default())
+            .map_err(|_| HostLoopError::AlreadyInstalled)?;
+        crate::ops::OpStateRegistry::install(RejectionQueue::default())
             .map_err(|_| HostLoopError::AlreadyInstalled)?;
         let signals = SignalState::default();
         install_signal_state(signals.clone()).map_err(|_| HostLoopError::AlreadyInstalled)?;
@@ -626,6 +628,7 @@ impl HostLoop {
         // handler roots release while the runtime mailbox is still
         // alive), then drop the Runtime. No drain happens in between.
         drop(take_process_state());
+        drop(crate::ops::OpStateRegistry::take::<RejectionQueue>());
         drop(take_timer_state());
         drop(take_signal_state());
         drop(self);
