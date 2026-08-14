@@ -72,7 +72,8 @@ pub use function::{
     VerifiedFunctionHeader,
 };
 pub use verified_bytecode::{
-    BindingPolicyViolationReason, BindingSlot, BytecodeGraphResource, BytecodeGraphUsage,
+    BYTECODE_CODEC_MAGIC, BYTECODE_CODEC_STAMP, BindingPolicyViolationReason, BindingSlot,
+    BytecodeCodecError, BytecodeGraphResource, BytecodeGraphUsage,
     BytecodeGraphVerificationLimits, BytecodeVerificationError, BytecodeVerificationErrorKind,
     ClosureVariableDefinition, CompilerBindingKind, CompilerBindingPolicy, CompilerClosureBinding,
     CompilerExecutableKind, CompilerInitializationPolicy, CompilerSource, CompilerWritePolicy,
@@ -82,7 +83,7 @@ pub use verified_bytecode::{
     UnverifiedCompilerBytecodeGraph, UnverifiedFunctionMetadata, UnverifiedModuleBindingDescriptor,
     UnverifiedModuleDeclarationRecord, VariableDefinition, VerifiedBytecode,
     VerifiedBytecodeFunction, VerifiedCompilerSource, VerifiedFunctionMetadata,
-    verify_compiler_bytecode_graph,
+    frame_sections, read_sections, verify_compiler_bytecode_graph,
 };
 pub use verifier::{
     CompilerCaptureLayout, CompilerCapturedBinding, CompilerConstantKind, CompilerConstantLayout,

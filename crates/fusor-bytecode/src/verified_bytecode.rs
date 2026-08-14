@@ -19,8 +19,14 @@ use crate::{
     verifier::{CompilerCaptureLayout, CompilerCapturedBinding, InstructionIndex},
 };
 
+mod codec;
 mod lexical_environment;
 mod object_provenance;
+
+pub use codec::{
+    BYTECODE_CODEC_MAGIC, BYTECODE_CODEC_STAMP, BytecodeCodecError, frame_sections,
+    read_sections,
+};
 
 use lexical_environment::verify_lexical_arrow_environments;
 use object_provenance::{charge_frame_state_entries, verify_object_definition_provenance};
