@@ -36,6 +36,10 @@
 //!           4 BigInt + limb count u32 + u32 limbs LE,
 //!           5 String units, 6 GlobalSymbol units, 7 Object + index u32,
 //!           8 Function + index u32
+//!   tag 3 = binding cells:
+//!     count u32 LE, then per cell:
+//!       value u8 (0 = uninitialized, 1 = value) + [the value encoding],
+//!       forward u8 (0 = none, 1 = target cell index u32 LE)
 //! ```
 //!
 //! The atoms section records the live dynamic atoms deterministically;
@@ -57,8 +61,10 @@ use std::{error::Error, fmt};
 use crate::{
     ArrayIndex, AtomError, AtomKind, JsBigInt, JsNumber, JsString, JsStringError, PredefinedAtom,
     PropertyKey, PropertyLayout, Runtime,
+    ids::ObjectId,
     object::{HeapObject, HeapObjectKind, ObjectRecord, PropertySlot, ShapeProperty},
-    value::{HeapReference, StoredValue},
+    runtime::BindingCell,
+    value::{HeapReference, SlotValue, StoredValue},
 };
 
 /// The snapshot magic: every blob starts with these bytes.
@@ -73,6 +79,9 @@ const SECTION_ATOMS: u8 = 1;
 
 /// The objects section tag.
 const SECTION_OBJECTS: u8 = 2;
+
+/// The binding-cells section tag.
+const SECTION_CELLS: u8 = 3;
 
 /// Snapshot serialization and restoration failures (§8.3, §8.6 negative
 /// matrix). Every failure is typed; none panic.
@@ -165,6 +174,11 @@ impl Runtime {
             codec::write_section(&mut buffer, SECTION_OBJECTS, &payload);
             sections += 1;
         }
+        if self.cells.len() > 0 {
+            let payload = encode_cells(self)?;
+            codec::write_section(&mut buffer, SECTION_CELLS, &payload);
+            sections += 1;
+        }
         buffer[count_position..count_position + 4].copy_from_slice(&sections.to_le_bytes());
         Ok(buffer)
     }
@@ -193,23 +207,34 @@ impl Runtime {
             return Err(SnapshotError::AlreadyPopulated);
         }
         let sections = reader.read_u32()?;
+        // Two-phase restore: every section decodes first, then the staged
+        // records resolve in dependency order (objects before cells, cells
+        // before functions once those sections land).
+        let mut atoms = None;
+        let mut staged_objects = None;
+        let mut staged_cells = None;
         for _ in 0..sections {
             let tag = reader.read_u8()?;
             let payload = codec::read_section_payload(&mut reader)?;
             match tag {
-                SECTION_ATOMS => {
-                    let atoms = decode_atoms(payload)?;
-                    self.atoms.restore_atoms(&atoms).map_err(SnapshotError::Atom)?;
-                }
-                SECTION_OBJECTS => {
-                    let staged = decode_objects(payload)?;
-                    restore_objects(self, staged)?;
-                }
+                SECTION_ATOMS => atoms = Some(decode_atoms(payload)?),
+                SECTION_OBJECTS => staged_objects = Some(decode_objects(payload)?),
+                SECTION_CELLS => staged_cells = Some(decode_cells(payload)?),
                 other => return Err(SnapshotError::FormatMismatch { found: u32::from(other) }),
             }
         }
         if reader.remaining() != 0 {
             return Err(SnapshotError::IntegrityViolation);
+        }
+        if let Some(atoms) = atoms {
+            self.atoms.restore_atoms(&atoms).map_err(SnapshotError::Atom)?;
+        }
+        let object_ids = match staged_objects {
+            Some(staged) => restore_objects(self, staged)?,
+            None => Vec::new(),
+        };
+        if let Some(staged) = staged_cells {
+            restore_cells(self, staged, &object_ids)?;
         }
         Ok(())
     }
@@ -292,6 +317,12 @@ struct StagedObject {
     is_html_dda: bool,
     shape: Vec<(StagedKey, PropertyLayout)>,
     slots: Vec<StagedValue>,
+}
+
+/// One staged (not yet resolved) binding cell.
+struct StagedCell {
+    value: Option<StagedValue>,
+    forward: Option<usize>,
 }
 
 /// Encodes every object into the objects-section payload (format above);
@@ -584,7 +615,7 @@ fn decode_staged_value(reader: &mut codec::Reader<'_>) -> Result<StagedValue, Sn
 fn restore_objects(
     runtime: &mut Runtime,
     staged: Vec<StagedObject>,
-) -> Result<(), SnapshotError> {
+) -> Result<Vec<ObjectId>, SnapshotError> {
     let mut ids = Vec::new();
     for _ in &staged {
         let placeholder = HeapObject::ordinary(ObjectRecord::from_parts(
@@ -632,36 +663,9 @@ fn restore_objects(
         }
         let mut slots = Vec::new();
         for value in staged.slots {
-            slots.push(match value {
-                StagedValue::Undefined => PropertySlot::Data(StoredValue::Undefined),
-                StagedValue::Null => PropertySlot::Data(StoredValue::Null),
-                StagedValue::Boolean(value) => PropertySlot::Data(StoredValue::Boolean(value)),
-                StagedValue::Number(value) => {
-                    PropertySlot::Data(StoredValue::Number(JsNumber::from_f64(value)))
-                }
-                StagedValue::BigInt(limbs) => PropertySlot::Data(StoredValue::BigInt(
-                    std::sync::Arc::new(JsBigInt::from_normalized_limbs(limbs)),
-                )),
-                StagedValue::String(units) => {
-                    let string =
-                        JsString::from_code_units(units).map_err(SnapshotError::String)?;
-                    PropertySlot::Data(StoredValue::String(string))
-                }
-                StagedValue::GlobalSymbol(units) => {
-                    let description =
-                        JsString::from_code_units(units).map_err(SnapshotError::String)?;
-                    let atom = runtime
-                        .atoms
-                        .intern_global_symbol(&description)
-                        .map_err(SnapshotError::Atom)?;
-                    PropertySlot::Data(StoredValue::Symbol(atom))
-                }
-                StagedValue::Object(index) => {
-                    let target = *ids.get(index).ok_or(SnapshotError::IntegrityViolation)?;
-                    PropertySlot::Data(StoredValue::Object(target))
-                }
-                StagedValue::Function(_) => return Err(SnapshotError::IntegrityViolation),
-            });
+            slots.push(PropertySlot::Data(resolve_staged_value(
+                runtime, value, &ids,
+            )?));
         }
         let prototype = match staged.prototype {
             None => None,
@@ -684,5 +688,131 @@ fn restore_objects(
             slots,
         ));
     }
+    Ok(ids)
+}
+
+/// Encodes every binding cell into the cells-section payload: per cell a
+/// value tag (uninitialized or a stored value) and an optional forwarding
+/// target.
+fn encode_cells(runtime: &Runtime) -> Result<Vec<u8>, SnapshotError> {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&(runtime.cells.len() as u32).to_le_bytes());
+    for (id, cell) in runtime.cells.iter() {
+        match &cell.value {
+            SlotValue::Uninitialized => payload.push(0),
+            SlotValue::Value(value) => {
+                payload.push(1);
+                encode_stored_value(&mut payload, value).map_err(|what| {
+                    SnapshotError::Unsupported {
+                        index: id.index(),
+                        what,
+                    }
+                })?;
+            }
+        }
+        match cell.forward {
+            None => payload.push(0),
+            Some(target) => {
+                payload.push(1);
+                payload.extend_from_slice(&(target.index() as u32).to_le_bytes());
+            }
+        }
+    }
+    Ok(payload)
+}
+
+/// Decodes the cells-section payload into staged cells (format above).
+fn decode_cells(payload: &[u8]) -> Result<Vec<StagedCell>, SnapshotError> {
+    let mut reader = codec::Reader::new(payload);
+    let count = reader.read_u32()?;
+    let mut staged = Vec::new();
+    for _ in 0..count {
+        let value = match reader.read_u8()? {
+            0 => None,
+            1 => Some(decode_staged_value(&mut reader)?),
+            other => return Err(SnapshotError::FormatMismatch { found: u32::from(other) }),
+        };
+        let forward = match reader.read_u8()? {
+            0 => None,
+            1 => Some(reader.read_u32()? as usize),
+            other => return Err(SnapshotError::FormatMismatch { found: u32::from(other) }),
+        };
+        staged.push(StagedCell { value, forward });
+    }
+    if reader.remaining() != 0 {
+        return Err(SnapshotError::Truncated);
+    }
+    Ok(staged)
+}
+
+/// Resolves the staged cells into the cell arena: cells insert in decode
+/// order so their restored identities match the encoded indices, values
+/// resolve against the restored objects, then forwarding targets patch
+/// once every cell exists.
+fn restore_cells(
+    runtime: &mut Runtime,
+    staged: Vec<StagedCell>,
+    object_ids: &[ObjectId],
+) -> Result<(), SnapshotError> {
+    let mut forwards = Vec::new();
+    let mut ids = Vec::new();
+    for cell in staged {
+        if let Some(target) = cell.forward {
+            forwards.push((ids.len(), target));
+        }
+        let value = match cell.value {
+            None => SlotValue::Uninitialized,
+            Some(value) => SlotValue::Value(resolve_staged_value(runtime, value, object_ids)?),
+        };
+        let id = runtime
+            .cells
+            .try_insert(BindingCell { value, forward: None })
+            .map_err(|_| SnapshotError::IntegrityViolation)?;
+        ids.push(id);
+    }
+    for (index, forward) in forwards {
+        let target = *ids.get(forward).ok_or(SnapshotError::IntegrityViolation)?;
+        let cell = runtime
+            .cells
+            .get_mut(ids[index])
+            .ok_or(SnapshotError::IntegrityViolation)?;
+        cell.forward = Some(target);
+    }
     Ok(())
+}
+
+/// Resolves one staged slot value into a heap value, mapping object
+/// references through the restored object identities. Function references
+/// resolve once the functions section lands (fail closed until then).
+fn resolve_staged_value(
+    runtime: &mut Runtime,
+    value: StagedValue,
+    object_ids: &[ObjectId],
+) -> Result<StoredValue, SnapshotError> {
+    Ok(match value {
+        StagedValue::Undefined => StoredValue::Undefined,
+        StagedValue::Null => StoredValue::Null,
+        StagedValue::Boolean(value) => StoredValue::Boolean(value),
+        StagedValue::Number(value) => StoredValue::Number(JsNumber::from_f64(value)),
+        StagedValue::BigInt(limbs) => StoredValue::BigInt(std::sync::Arc::new(
+            JsBigInt::from_normalized_limbs(limbs),
+        )),
+        StagedValue::String(units) => {
+            let string = JsString::from_code_units(units).map_err(SnapshotError::String)?;
+            StoredValue::String(string)
+        }
+        StagedValue::GlobalSymbol(units) => {
+            let description = JsString::from_code_units(units).map_err(SnapshotError::String)?;
+            let atom = runtime
+                .atoms
+                .intern_global_symbol(&description)
+                .map_err(SnapshotError::Atom)?;
+            StoredValue::Symbol(atom)
+        }
+        StagedValue::Object(index) => {
+            let target = *object_ids.get(index).ok_or(SnapshotError::IntegrityViolation)?;
+            StoredValue::Object(target)
+        }
+        StagedValue::Function(_) => return Err(SnapshotError::IntegrityViolation),
+    })
 }

@@ -7847,6 +7847,83 @@ fn snapshot_round_trips_ordinary_objects_and_shapes() {
 }
 
 #[test]
+fn snapshot_round_trips_binding_cells() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let object = runtime
+        .objects
+        .try_insert(HeapObject::ordinary(ObjectRecord::from_parts(
+            None,
+            true,
+            false,
+            Arc::new(Vec::new()),
+            None,
+            Vec::new(),
+        )))
+        .expect("object");
+    let first = runtime
+        .cells
+        .try_insert(crate::runtime::BindingCell {
+            value: crate::value::SlotValue::Value(StoredValue::Object(object)),
+            forward: None,
+        })
+        .expect("cell");
+    runtime
+        .cells
+        .try_insert(crate::runtime::BindingCell {
+            value: crate::value::SlotValue::Value(StoredValue::Number(
+                JsNumber::from_f64(2.5),
+            )),
+            forward: None,
+        })
+        .expect("cell");
+    runtime
+        .cells
+        .try_insert(crate::runtime::BindingCell {
+            value: crate::value::SlotValue::Uninitialized,
+            forward: None,
+        })
+        .expect("cell");
+    runtime
+        .cells
+        .try_insert(crate::runtime::BindingCell {
+            value: crate::value::SlotValue::Uninitialized,
+            forward: Some(first),
+        })
+        .expect("cell");
+
+    let blob = runtime.snapshot().expect("snapshot");
+    let mut restored = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    restored.from_snapshot(&blob).expect("restore");
+
+    let restored_cells: Vec<_> = restored.cells.iter().collect();
+    assert_eq!(restored_cells.len(), 4, "all four cells restored");
+    match &restored_cells[0].1.value {
+        crate::value::SlotValue::Value(StoredValue::Object(target)) => {
+            assert_eq!(target.index(), 0, "the cell's object reference resolved");
+        }
+        other => panic!("unexpected first cell value"),
+    }
+    match &restored_cells[1].1.value {
+        crate::value::SlotValue::Value(StoredValue::Number(number)) => {
+            assert_eq!(number.as_f64(), 2.5);
+        }
+        other => panic!("unexpected second cell value"),
+    }
+    assert!(
+        matches!(
+            &restored_cells[2].1.value,
+            crate::value::SlotValue::Uninitialized
+        ),
+        "the uninitialized cell restored"
+    );
+    assert_eq!(
+        restored_cells[3].1.forward.map(|cell| cell.index()),
+        Some(0),
+        "the forwarding chain preserved"
+    );
+}
+
+#[test]
 fn snapshot_fails_closed_on_unsupported_heap_content() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     // An accessor slot is not serializable yet (§8.2 intermediate).
