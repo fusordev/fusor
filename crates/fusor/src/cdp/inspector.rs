@@ -2059,10 +2059,62 @@ fn object_preview(
         "overflow": overflow,
         "properties": properties,
     });
+    if collection {
+        // The frontend renders collection previews from the dedicated
+        // `entries` field (`Map(2) {1 => 2, 3 => 4}`); the key/value rows
+        // above stay for the [[Entries]] internal-property preview.
+        preview["entries"] = Value::Array(collection_entry_previews(context, intrinsics, value, cap));
+    }
     if let Some(subtype) = class.subtype {
         preview["subtype"] = Value::String(subtype.to_owned());
     }
     Some(preview)
+}
+
+/// The `EntryPreview` rows of one collection: `{key, value}` pairs for
+/// Maps, `{value}` rows for Sets — the shape the frontend renders as
+/// `key => value` in collapsed collection previews.
+fn collection_entry_previews(
+    context: &mut Context<'_>,
+    intrinsics: &InspectIntrinsics,
+    value: &JsValue,
+    cap: usize,
+) -> Vec<Value> {
+    let mut entries = Vec::new();
+    let object_preview = |entry: Value| {
+        let mut preview = json!({"type": entry["type"], "value": entry["value"]});
+        if let Some(subtype) = entry.get("subtype") {
+            preview["subtype"] = subtype.clone();
+        }
+        preview
+    };
+    match context.collection_inspection(value).ok().flatten() {
+        Some(fusor_runtime::CollectionInspection::Entries(rows)) => {
+            for (key, entry_value) in rows.iter().take(cap) {
+                let Some(key_entry) = preview_entry(context, intrinsics, "key", key, 0) else {
+                    continue;
+                };
+                let Some(value_entry) =
+                    preview_entry(context, intrinsics, "value", entry_value, 0)
+                else {
+                    continue;
+                };
+                entries.push(json!({
+                    "key": object_preview(key_entry),
+                    "value": object_preview(value_entry),
+                }));
+            }
+        }
+        Some(fusor_runtime::CollectionInspection::Values(values)) => {
+            for entry_value in values.iter().take(cap) {
+                if let Some(entry) = preview_entry(context, intrinsics, "value", entry_value, 0) {
+                    entries.push(json!({"value": object_preview(entry)}));
+                }
+            }
+        }
+        None => {}
+    }
+    entries
 }
 
 fn is_array_index_key(key: &str) -> bool {
