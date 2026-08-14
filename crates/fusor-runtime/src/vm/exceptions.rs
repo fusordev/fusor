@@ -1125,21 +1125,22 @@ fn freeze_pending_engine_stack(
     frames: &[Frame],
     pending: &mut PendingException,
 ) -> Result<(), ExecutionError> {
-    if !matches!(
-        &pending.payload,
-        PendingExceptionPayload::EngineError { .. }
-    ) {
+    let PendingExceptionPayload::EngineError { kind, message } = &pending.payload else {
         return Ok(());
-    }
+    };
     let snapshot = capture_error_stack(runtime, frames, &pending.origin)?;
-    let stack = render_error_stack(runtime, &snapshot)?;
-    let payload = std::mem::replace(
+    let frames_rendered = render_error_stack(runtime, &snapshot)?;
+    // V8's stack format opens with the `Name: message` header line, then the
+    // frame lines.
+    let mut header = JsString::from_utf8(&format!("{}: ", kind.name()))?;
+    header = header.concat(message)?;
+    header = header.concat(&JsString::from_utf8("\n")?)?;
+    let stack = header.concat(&frames_rendered)?;
+    let (kind, message) = (*kind, message.clone());
+    let _ = std::mem::replace(
         &mut pending.payload,
         PendingExceptionPayload::ThrownValue(StoredValue::Undefined),
     );
-    let PendingExceptionPayload::EngineError { kind, message } = payload else {
-        unreachable!("engine-error payload was checked before replacement")
-    };
     pending.payload = PendingExceptionPayload::FrozenEngineError {
         kind,
         message,

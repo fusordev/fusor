@@ -12,12 +12,12 @@ use fusor_runtime::{
     ValueKind,
 };
 
-const REALM_ERROR_GRAPH_OBJECTS: u64 = 70;
-const REALM_ERROR_GRAPH_FUNCTIONS: u64 = 722;
-const REALM_ERROR_GRAPH_PROPERTIES: u64 = 2_407;
-const REALM_DYNAMIC_ATOMS: u32 = 344;
-const REALM_DYNAMIC_ATOM_CODE_UNITS: u64 = 2_977;
-const REALM_DYNAMIC_INTERNER_SLOTS: u32 = 344;
+const REALM_ERROR_GRAPH_OBJECTS: u64 = 85;
+const REALM_ERROR_GRAPH_FUNCTIONS: u64 = 844;
+const REALM_ERROR_GRAPH_PROPERTIES: u64 = 2_814;
+const REALM_DYNAMIC_ATOMS: u32 = 419;
+const REALM_DYNAMIC_ATOM_CODE_UNITS: u64 = 3_806;
+const REALM_DYNAMIC_INTERNER_SLOTS: u32 = 419;
 
 fn compile_dynamic(body: &str) -> Arc<VerifiedBytecode> {
     let parameters = [];

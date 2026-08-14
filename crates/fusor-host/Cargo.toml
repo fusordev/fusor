@@ -1,0 +1,17 @@
+[package]
+name = "fusor-host"
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.97"
+license = "MIT"
+description = "Host adapter for Project Fusor: ops binding, event loop, process lifecycle, overlays, module loading"
+
+[dependencies]
+fusor-runtime = { path = "../fusor-runtime" }
+fusor-ops = { path = "../fusor-ops" }
+fusor-bytecode = { path = "../fusor-bytecode" }
+fusor-compiler = { path = "../fusor-compiler" }
+fusor-frontend = { path = "../fusor-frontend" }
+miette = { workspace = true }
+serde = { workspace = true }
+tokio = { workspace = true }

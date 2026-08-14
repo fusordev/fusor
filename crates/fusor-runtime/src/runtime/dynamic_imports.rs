@@ -25,7 +25,7 @@ pub(crate) struct PendingDynamicImportRecord {
     pub(crate) specifier: JsString,
     pub(crate) attributes: Vec<(JsString, JsString)>,
     pub(crate) promise: ObjectId,
-    /// `import.defer()` phase (ECMA-262 DynamicImportState [[Phase]] ~defer~).
+    /// `import.defer()` phase (ECMA-262 `DynamicImportState` [[Phase]] ~defer~).
     pub(crate) deferred: bool,
 }
 
@@ -150,7 +150,7 @@ impl Runtime {
 
     /// Returns the recorded evaluation error of the module registered under
     /// `key` in `realm`, if its evaluation failed (ECMA-262
-    /// [[EvaluationError]]).
+    /// [[`EvaluationError`]]).
     #[must_use]
     pub fn module_evaluation_error(
         &self,

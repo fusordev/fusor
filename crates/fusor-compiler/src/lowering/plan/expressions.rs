@@ -20,8 +20,8 @@ use super::super::{
 use super::abrupt::{AbruptMarker, AbruptMarkerKind, AbruptMarkerTag};
 use super::bindings::{WithObjectSource, plan_external_put_init};
 use super::calls::MemberCallee;
-use oxc_ast::ast::{SpreadElement, StaticBlock};
 use fusor_bytecode::CompilerBindingKind;
+use oxc_ast::ast::{SpreadElement, StaticBlock};
 use std::collections::HashSet;
 
 pub(in crate::lowering) fn anonymous_named_evaluation_span(
@@ -932,6 +932,25 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         // `.prototype`, but `null` uses the separate null-prototype path.
         // Keep both values on the operand stack for `define_class`:
         // `[superclass-or-null, prototype-parent-or-null]`.
+        //
+        // A `null` literal heritage is known at compile time: emit the
+        // null-prototype pair directly instead of the runtime `is_null`
+        // dispatch. The constant-folding optimizer would rewrite that
+        // dispatch into a shape the derived-heritage structural verifier
+        // does not model.
+        if matches!(heritage, Expression::NullLiteral(_)) {
+            flow.emit(PlannedInstruction::new(
+                FinalOpcode::Null,
+                Operands::None,
+                heritage.span(),
+            ))?;
+            flow.emit(PlannedInstruction::new(
+                FinalOpcode::Null,
+                Operands::None,
+                heritage.span(),
+            ))?;
+            return Ok(true);
+        }
         self.plan_expression(heritage, layout, tree_layout, constants, &[], flow)?;
         let null_heritage = flow.new_label(heritage.span())?;
         let heritage_ready = flow.new_label(heritage.span())?;

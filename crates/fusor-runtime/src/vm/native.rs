@@ -428,6 +428,9 @@ pub(super) fn resume_native_continuations(
         let suspended_values =
             active_frame_values.saturating_add(native_continuation_values(&continuations));
         let dispatch = match continuation {
+            NativeContinuation::HostConstruct(state) => {
+                finish_host_construct(runtime, *state, &value)?
+            }
             NativeContinuation::FunctionSource(state) => {
                 let Some(compiler) = compiler else {
                     return Err(NativeFailure::Execution(
@@ -2533,6 +2536,208 @@ fn legacy_restricted_function_getter_returns_undefined(
     Ok(!header.mode().is_strict() && header.flags().has_prototype())
 }
 
+/// The suspended `[[Construct]]` half of a host callback: the receiver is
+/// created by `OrdinaryCreateFromConstructor(new_target, "%Object.prototype%")`
+/// once the observable `Get(newTarget, "prototype")` completes.
+pub(super) struct HostConstructContinuation {
+    id: crate::HostFunctionId,
+    realm: RealmId,
+    arguments: Vec<StoredValue>,
+    new_target: FunctionId,
+    origin: JsStackFrame,
+}
+
+impl HostConstructContinuation {
+    pub(super) const fn retained_values(&self) -> u64 {
+        (self.arguments.len().saturating_add(1)) as u64
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        for argument in &self.arguments {
+            trace_stored_value_root(argument, mark);
+        }
+        mark(CollectionRoot::Heap(HeapReference::Function(
+            self.new_target,
+        )));
+    }
+}
+
+/// Starts the construct half of a host callback: ECMA-262
+/// `OrdinaryCreateFromConstructor(new_target, "%Object.prototype%")` first
+/// reads the observable `prototype` property of `new.target`.
+pub(super) fn begin_host_construct(
+    runtime: &mut Runtime,
+    id: crate::HostFunctionId,
+    realm: RealmId,
+    arguments: Vec<StoredValue>,
+    new_target: FunctionId,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let prototype_key = runtime.predefined_property_key(PredefinedAtom::Prototype);
+    let dispatch = begin_internal_get(
+        runtime,
+        HeapReference::Function(new_target),
+        StoredValue::Function(new_target),
+        prototype_key,
+        realm,
+        None,
+        origin.clone(),
+        execution_budget,
+    )?;
+    let state = HostConstructContinuation {
+        id,
+        realm,
+        arguments,
+        new_target,
+        origin,
+    };
+    match dispatch {
+        NativeDispatch::Immediate(requested) => finish_host_construct(runtime, state, &requested),
+        NativeDispatch::Call(mut call) => {
+            prepend_native_continuations(
+                &mut call,
+                vec![NativeContinuation::HostConstruct(Box::new(state))],
+            )?;
+            Ok(NativeDispatch::Call(call))
+        }
+        NativeDispatch::Frame(mut frame) => {
+            attach_native_continuations(
+                &mut frame,
+                vec![NativeContinuation::HostConstruct(Box::new(state))],
+            )?;
+            Ok(NativeDispatch::Frame(frame))
+        }
+        NativeDispatch::Pair(_, _)
+        | NativeDispatch::ForOfRecord { .. }
+        | NativeDispatch::ForOfStep { .. }
+        | NativeDispatch::ForOfClosed
+        | NativeDispatch::CopyDataPropertiesDone
+        | NativeDispatch::AsyncAwait { .. } => Err(EngineFault::RuntimeInvariant {
+            message: "host construct prototype Get produced a structured result",
+        }
+        .into()),
+    }
+}
+
+/// Finishes the construct half of a host callback: creates the fresh `this`,
+/// invokes the callback with it, and applies ECMA-262 9.2.2 step 5 — an
+/// object result replaces `this`, a primitive result falls back to `this`.
+pub(super) fn finish_host_construct(
+    runtime: &mut Runtime,
+    state: HostConstructContinuation,
+    requested_prototype: &StoredValue,
+) -> Result<NativeDispatch, NativeFailure> {
+    let prototype = requested_prototype.heap_reference().map_or_else(
+        || {
+            runtime
+                .realm_object_prototype(state.realm)
+                .map(HeapReference::Object)
+        },
+        Ok,
+    )?;
+    let this = runtime.allocate_ordinary_object_with_prototype(prototype)?;
+    let this_root = runtime.public_value(StoredValue::Object(this))?;
+    let mut arguments = Vec::with_capacity(state.arguments.len());
+    for value in state.arguments {
+        arguments.push(runtime.public_value(value)?);
+    }
+    let new_target = Some(Function::from_root(
+        runtime.public_value(StoredValue::Function(state.new_target))?,
+    ));
+    let result = call_host_callback(
+        runtime,
+        state.realm,
+        state.id,
+        this_root,
+        arguments,
+        new_target,
+        state.origin,
+    );
+    match result {
+        Ok(value) => {
+            let stored = value
+                .stored()
+                .map_err(|error| NativeFailure::Execution(error.into()))?;
+            match stored {
+                StoredValue::Function(_) | StoredValue::Object(_) => {
+                    Ok(NativeDispatch::Immediate(stored.duplicate()))
+                }
+                _ => Ok(NativeDispatch::Immediate(StoredValue::Object(this))),
+            }
+        }
+        Err(thrown) => Err(thrown),
+    }
+}
+
+/// Takes the host callback out of its registry slot, invokes it, and restores
+/// the slot; returns the callback result or the thrown value.
+fn call_host_callback(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    id: crate::HostFunctionId,
+    this: JsValue,
+    arguments: Vec<JsValue>,
+    new_target: Option<Function>,
+    origin: JsStackFrame,
+) -> Result<JsValue, NativeFailure> {
+    // The slot is taken for the duration of the callback so the `&mut Runtime`
+    // can be handed over as a `Context`. The slot is therefore empty only
+    // while this very callback is executing: re-entering a host callback —
+    // directly, or through JavaScript that calls it back — is defined to fail
+    // closed with a `TypeError` instead of an engine fault.
+    let Some(callback) = runtime
+        .host_functions
+        .get_mut(id.index())
+        .and_then(Option::take)
+    else {
+        return Err(NativeFailure::Abrupt(PendingException {
+            realm,
+            payload: PendingExceptionPayload::EngineError {
+                kind: ExceptionKind::TypeError,
+                message: JsString::from_utf8("host callback re-entered itself")?,
+            },
+            origin,
+        }));
+    };
+
+    let mut context = Context { runtime, realm };
+    let result = callback(
+        &mut context,
+        crate::HostCall::new(this, arguments, new_target),
+    );
+    context.runtime.host_functions[id.index()] = Some(callback);
+
+    // A host callback must not smuggle a value from another runtime (or a
+    // stale root) back into this one; reject it before it touches the heap.
+    let validate = |value: &JsValue| -> Result<(), NativeFailure> {
+        let owner = value
+            .owner()
+            .map_err(|error| NativeFailure::Execution(error.into()))?;
+        context
+            .runtime
+            .validate_owner(&owner, HandleKind::Value)
+            .map_err(|error| NativeFailure::Execution(error.into()))
+    };
+    match result {
+        Ok(value) => {
+            validate(&value)?;
+            Ok(value)
+        }
+        Err(thrown) => {
+            validate(&thrown)?;
+            let stored = thrown
+                .stored()
+                .map_err(|error| NativeFailure::Execution(error.into()))?;
+            Err(NativeFailure::Abrupt(PendingException {
+                realm,
+                payload: PendingExceptionPayload::ThrownValue(stored.duplicate()),
+                origin,
+            }))
+        }
+    }
+}
+
 /// Invokes a host-installed callback (ECMA-262 host function): roots the
 /// receiver, arguments, and `new.target` as public handles, calls the stored
 /// Rust closure with a [`crate::Context`], and re-materializes the result as
@@ -2543,38 +2748,29 @@ fn dispatch_host_function(
     id: crate::HostFunctionId,
     inputs: CallInputs,
     origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
+    if let Some(new_target) = inputs.new_target {
+        // ECMA-262 [[Construct]]: `this` is created by
+        // `OrdinaryCreateFromConstructor(new_target, "%Object.prototype%")`
+        // after the observable prototype Get.
+        return begin_host_construct(
+            runtime,
+            id,
+            realm,
+            inputs.arguments.into_remaining_values(),
+            new_target,
+            origin,
+            execution_budget,
+        );
+    }
     let this = runtime.public_value(inputs.receiver.duplicate())?;
     let stored_arguments = inputs.arguments.into_remaining_values();
     let mut arguments = Vec::with_capacity(stored_arguments.len());
     for value in stored_arguments {
         arguments.push(runtime.public_value(value)?);
     }
-    let new_target = match inputs.new_target {
-        Some(function) => Some(Function::from_root(
-            runtime.public_value(StoredValue::Function(function))?,
-        )),
-        None => None,
-    };
-
-    // Take the closure out of the registry so the `&mut Runtime` can be handed
-    // to the callback as a `Context`; restore it afterwards so repeated calls
-    // (and cycles) reuse the same slot.
-    let callback = runtime
-        .host_functions
-        .get_mut(id.index())
-        .and_then(Option::take)
-        .ok_or(EngineFault::RuntimeInvariant {
-            message: "host function callback slot is empty",
-        })?;
-
-    let mut context = crate::Context { runtime, realm };
-    let result = callback(
-        &mut context,
-        crate::HostCall::new(this, arguments, new_target),
-    );
-    context.runtime.host_functions[id.index()] = Some(callback);
-
+    let result = call_host_callback(runtime, realm, id, this, arguments, None, origin);
     match result {
         Ok(value) => {
             let stored = value
@@ -2582,16 +2778,7 @@ fn dispatch_host_function(
                 .map_err(|error| NativeFailure::Execution(error.into()))?;
             Ok(NativeDispatch::Immediate(stored.duplicate()))
         }
-        Err(thrown) => {
-            let stored = thrown
-                .stored()
-                .map_err(|error| NativeFailure::Execution(error.into()))?;
-            Err(NativeFailure::Abrupt(PendingException {
-                realm,
-                payload: PendingExceptionPayload::ThrownValue(stored.duplicate()),
-                origin,
-            }))
-        }
+        Err(thrown) => Err(thrown),
     }
 }
 
@@ -3244,6 +3431,7 @@ pub(super) fn dispatch_native_call_with_frames(
             id,
             inputs,
             origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
         ),
         NativeFunctionKind::Reflect(method) => begin_reflect_method(
             runtime,

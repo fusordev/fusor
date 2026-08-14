@@ -1,0 +1,15 @@
+[package]
+name = "fusor-ops"
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.97"
+license = "MIT"
+description = "Proc-macro declarations for Project Fusor host operations"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }

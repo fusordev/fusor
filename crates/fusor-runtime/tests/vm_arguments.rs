@@ -450,7 +450,7 @@ fn static_anonymous_function_data_properties_receive_canonical_names() {
                 'quoted':(function(){}),\
                 1:function(){},\
                 1n:function(){},\
-                '__proto__':function(){}\
+                ['__proto__']:function(){}\
             };\
             const descriptor=Object.getOwnPropertyDescriptor(object.identifier,'name');\
             return object.identifier.name+':'+object.quoted.name+':'+object[1].name+':'+\

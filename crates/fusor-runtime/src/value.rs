@@ -30,7 +30,8 @@ use std::{
 };
 
 use crate::{
-    Atom, HandleError, HandleKind, JsBigInt, JsNumber, JsString, ValueKind,
+    Atom, ExecutionError, HandleError, HandleKind, JsBigInt, JsNumber, JsString,
+    PropertyDescriptor, PropertyKey, ValueKind,
     ids::{FunctionId, ObjectId},
 };
 
@@ -369,6 +370,21 @@ impl JsValue {
         Ok(&self.0.value)
     }
 
+    /// Returns whether both handles root the same heap object.
+    ///
+    /// This is heap identity, not ECMA-262 `===`: primitives never compare
+    /// equal here, and two public roots of the same heap object match even
+    /// though the roots themselves are distinct allocations. The host's
+    /// Promise rejection reconciliation (§7.3 of the host design) needs
+    /// exactly this to pair a `Handle` notification with its `Reject`.
+    #[must_use]
+    pub fn same_object(&self, other: &JsValue) -> bool {
+        match (&self.0.value, &other.0.value) {
+            (StoredValue::Object(left), StoredValue::Object(right)) => left == right,
+            _ => false,
+        }
+    }
+
     /// Returns the observable value family.
     ///
     /// # Errors
@@ -424,6 +440,112 @@ impl JsValue {
             StoredValue::Symbol(value) => Some(value),
             _ => None,
         })
+    }
+
+    /// Returns the `BigInt` payload, or `None` for another live value kind.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an orphaned handle.
+    pub fn as_bigint(&self) -> Result<Option<&JsBigInt>, HandleError> {
+        Ok(match self.stored()? {
+            StoredValue::BigInt(value) => Some(value),
+            _ => None,
+        })
+    }
+
+    /// Returns the Number payload as an `f64`, or `None` for another live
+    /// value kind.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an orphaned handle.
+    pub fn as_f64(&self) -> Result<Option<f64>, HandleError> {
+        Ok(match self.stored()? {
+            StoredValue::Number(value) => Some(value.as_f64()),
+            _ => None,
+        })
+    }
+
+    /// Applies ECMA-262 `ToInt32` (7.1.6) to a Number payload; every other
+    /// value kind returns `None`.
+    ///
+    /// `NaN` and the infinities narrow to `0`; values outside the domain wrap
+    /// modulo 2³² and then re-interpret as signed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an orphaned handle.
+    pub fn as_i32(&self) -> Result<Option<i32>, HandleError> {
+        Ok(match self.stored()? {
+            StoredValue::Number(value) => Some(crate::conversion::number_to_int32(*value)),
+            _ => None,
+        })
+    }
+
+    /// Applies ECMA-262 `ToUint32` (7.1.7) to a Number payload; every other
+    /// value kind returns `None`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an orphaned handle.
+    pub fn as_u32(&self) -> Result<Option<u32>, HandleError> {
+        Ok(match self.stored()? {
+            StoredValue::Number(value) => Some(crate::conversion::number_to_uint32(*value)),
+            _ => None,
+        })
+    }
+
+    /// Applies ECMA-262 `ToBoolean` (7.1.2) without invoking user code: only
+    /// `undefined`, `null`, `false`, `±0`, `NaN`, the empty string, and `0n`
+    /// are falsy; every object and function is truthy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an orphaned handle.
+    pub fn to_boolean(&self) -> Result<bool, HandleError> {
+        let stored = self.stored()?;
+        Ok(stored.primitive_to_boolean().unwrap_or(true))
+    }
+
+    /// Applies ECMA-262 `ToString` (7.1.17) to a primitive payload.
+    ///
+    /// Objects and functions are rejected with a `TypeError`: a synchronous
+    /// host conversion cannot run the user code an object `ToPrimitive`
+    /// requires (fail closed).
+    ///
+    /// This function never panics.
+    ///
+    /// # Errors
+    ///
+    /// Returns a handle error for an orphaned or foreign value, a `TypeError`
+    /// exception for an object/function/Symbol conversion, and a string or
+    /// engine error for a conversion failure.
+    pub fn to_string(&self, ctx: &mut crate::Context<'_>) -> Result<JsString, ExecutionError> {
+        let owner = self.owner()?;
+        ctx.runtime.validate_owner(&owner, HandleKind::Value)?;
+        let stored = self.stored()?.duplicate();
+        crate::vm::host_to_string(ctx.runtime, stored, ctx.realm)
+    }
+
+    /// Applies ECMA-262 `ToNumber` (7.1.4) to a primitive payload.
+    ///
+    /// Objects and functions are rejected with a `TypeError`: a synchronous
+    /// host conversion cannot run the user code an object `ToPrimitive`
+    /// requires (fail closed).
+    ///
+    /// This function never panics.
+    ///
+    /// # Errors
+    ///
+    /// Returns a handle error for an orphaned or foreign value, a `TypeError`
+    /// exception for an object/function/BigInt/Symbol conversion, and a
+    /// string or engine error for a conversion failure.
+    pub fn to_number(&self, ctx: &mut crate::Context<'_>) -> Result<JsNumber, ExecutionError> {
+        let owner = self.owner()?;
+        ctx.runtime.validate_owner(&owner, HandleKind::Value)?;
+        let stored = self.stored()?.duplicate();
+        crate::vm::host_to_number(ctx.runtime, stored, ctx.realm)
     }
 
     /// Converts a live function value into its typed embedding handle.
@@ -599,6 +721,239 @@ impl Object {
         }
         Ok(self.id()? == other.id()?)
     }
+
+    /// Executes ECMA-262 `Get(O, P)` with the object itself as the receiver
+    /// (ECMA-262 7.3.1, `[[Get]]` in 10.1.8).
+    ///
+    /// The read walks the prototype chain, invokes getters with `this` bound
+    /// to this object, and runs Proxy `get` traps with the full validation the
+    /// interpreter applies. A missing property returns the runtime-local
+    /// `undefined` value. The returned value is a fresh public root; drop it
+    /// to release the root.
+    ///
+    /// Observable user code runs under [`ExecutionLimits::default()`] with no
+    /// dynamic-function compiler available.
+    ///
+    /// This function never panics.
+    ///
+    /// # Errors
+    ///
+    /// Returns a handle error for an orphaned, foreign, or stale object, an
+    /// exception when observable code throws (a throwing getter or Proxy
+    /// trap), and a limit, allocation, or engine error for runtime failures.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use fusor_runtime::{Runtime, RuntimeLimits};
+    /// # let mut runtime = Runtime::try_new(RuntimeLimits::default()).unwrap();
+    /// # let realm = runtime.create_realm().unwrap();
+    /// # let mut context = runtime.context(&realm).unwrap();
+    /// let object = context.global_object().unwrap().into_object().unwrap();
+    /// let key = context.property_key("name").unwrap();
+    /// assert!(object.get(&mut context, key).is_ok());
+    /// ```
+    pub fn get(
+        &self,
+        ctx: &mut crate::Context<'_>,
+        key: PropertyKey,
+    ) -> Result<JsValue, ExecutionError> {
+        let object = self.admitted_id(ctx)?;
+        let stored = crate::vm::host_get_property(
+            ctx.runtime,
+            HeapReference::Object(object),
+            key,
+            ctx.realm,
+        )?;
+        ctx.runtime.public_value(stored)
+    }
+
+    /// Executes ECMA-262 `Set(O, P, V, O)` with strict semantics (ECMA-262
+    /// 7.3.4, `[[Set]]` in 10.1.9).
+    ///
+    /// A host write has no sloppy mode: a failed assignment (non-writable
+    /// property, absent setter, rejected Proxy trap) raises a `TypeError`
+    /// instead of failing silently, so embedding code observes every rejected
+    /// write. Setters run with `this` bound to this object.
+    ///
+    /// Observable user code runs under [`ExecutionLimits::default()`] with no
+    /// dynamic-function compiler available.
+    ///
+    /// This function never panics.
+    ///
+    /// # Errors
+    ///
+    /// Returns a handle error for an orphaned, foreign, or stale object or
+    /// value, a `TypeError` exception when the write is rejected or observable
+    /// code throws, and a limit, allocation, or engine error for runtime
+    /// failures.
+    pub fn set(
+        &self,
+        ctx: &mut crate::Context<'_>,
+        key: PropertyKey,
+        value: JsValue,
+    ) -> Result<(), ExecutionError> {
+        let object = self.admitted_id(ctx)?;
+        let owner = value.owner()?;
+        ctx.runtime.validate_owner(&owner, HandleKind::Value)?;
+        let stored = value.stored()?.duplicate();
+        crate::vm::host_set_property(
+            ctx.runtime,
+            HeapReference::Object(object),
+            key,
+            stored,
+            ctx.realm,
+        )
+    }
+
+    /// Executes ECMA-262 `O.[[DefineOwnProperty]](P, desc)` and returns its
+    /// Boolean result (ECMA-262 10.1.6, algorithm in 10.4.9).
+    ///
+    /// The full `ValidateAndApplyPropertyDescriptor` machinery applies:
+    /// non-configurable and non-writable properties reject incompatible
+    /// changes with `Ok(false)`, non-extensible objects reject new
+    /// properties with `Ok(false)`, and a rejected Proxy trap reports
+    /// `Ok(false)` (the `Reflect.defineProperty` contract). Getter and setter
+    /// values must be callable functions or `undefined`; anything else raises
+    /// a `TypeError`, exactly like `Object.defineProperty`.
+    ///
+    /// Observable user code runs under [`ExecutionLimits::default()`] with no
+    /// dynamic-function compiler available.
+    ///
+    /// This function never panics.
+    ///
+    /// # Errors
+    ///
+    /// Returns a handle error for an orphaned, foreign, or stale object or
+    /// descriptor value, a `TypeError` exception for an invalid accessor or
+    /// throwing observable code, and a limit, allocation, or engine error for
+    /// runtime failures.
+    pub fn define_own_property(
+        &self,
+        ctx: &mut crate::Context<'_>,
+        key: PropertyKey,
+        descriptor: PropertyDescriptor<JsValue>,
+    ) -> Result<bool, ExecutionError> {
+        let object = self.admitted_id(ctx)?;
+        let stored_field =
+            |value: Option<&JsValue>| -> Result<Option<StoredValue>, ExecutionError> {
+                let Some(value) = value else {
+                    return Ok(None);
+                };
+                let owner = value.owner()?;
+                ctx.runtime.validate_owner(&owner, HandleKind::Value)?;
+                Ok(Some(value.stored()?.duplicate()))
+            };
+        let value = stored_field(descriptor.value())?;
+        let get = stored_field(descriptor.getter())?;
+        let set = stored_field(descriptor.setter())?;
+        crate::vm::host_define_own_property(
+            ctx.runtime,
+            HeapReference::Object(object),
+            key,
+            value,
+            descriptor.writable(),
+            get,
+            set,
+            descriptor.enumerable(),
+            descriptor.configurable(),
+            ctx.realm,
+        )
+    }
+
+    /// Executes ECMA-262 `HasProperty(O, P)` (ECMA-262 7.3.11, `[[HasProperty]]`
+    /// in 10.1.7).
+    ///
+    /// The prototype chain is walked and Proxy `has` traps run with full
+    /// validation; only the Boolean presence result is reported.
+    ///
+    /// Observable user code runs under [`ExecutionLimits::default()`] with no
+    /// dynamic-function compiler available.
+    ///
+    /// This function never panics.
+    ///
+    /// # Errors
+    ///
+    /// Returns a handle error for an orphaned, foreign, or stale object, an
+    /// exception when observable code throws, and a limit, allocation, or
+    /// engine error for runtime failures.
+    pub fn has(
+        &self,
+        ctx: &mut crate::Context<'_>,
+        key: PropertyKey,
+    ) -> Result<bool, ExecutionError> {
+        let object = self.admitted_id(ctx)?;
+        crate::vm::host_has_property(ctx.runtime, HeapReference::Object(object), key, ctx.realm)
+    }
+
+    /// Executes ECMA-262 `O.[[Delete]](P)` and returns its Boolean result
+    /// (ECMA-262 10.1.10, algorithm in 10.4.10).
+    ///
+    /// `Ok(false)` reports a non-configurable own property or a rejected Proxy
+    /// trap (`Reflect.deleteProperty` semantics); it never raises for an
+    /// ordinary refusal.
+    ///
+    /// Observable user code runs under [`ExecutionLimits::default()`] with no
+    /// dynamic-function compiler available.
+    ///
+    /// This function never panics.
+    ///
+    /// # Errors
+    ///
+    /// Returns a handle error for an orphaned, foreign, or stale object, an
+    /// exception when observable code throws, and a limit, allocation, or
+    /// engine error for runtime failures.
+    pub fn delete(
+        &self,
+        ctx: &mut crate::Context<'_>,
+        key: PropertyKey,
+    ) -> Result<bool, ExecutionError> {
+        let object = self.admitted_id(ctx)?;
+        crate::vm::host_delete_property(ctx.runtime, HeapReference::Object(object), key, ctx.realm)
+    }
+
+    /// Executes ECMA-262 `O.[[OwnPropertyKeys]]()` (ECMA-262 10.1.11, algorithm
+    /// in 10.4.11) and returns every own key.
+    ///
+    /// Ordinary objects report integer indices ascending, then string keys and
+    /// symbol keys in creation order. A Proxy reports its validated `ownKeys`
+    /// trap order (duplicate or missing keys raise a `TypeError` per the trap
+    /// invariants).
+    ///
+    /// Observable user code runs under [`ExecutionLimits::default()`] with no
+    /// dynamic-function compiler available.
+    ///
+    /// This function never panics.
+    ///
+    /// # Errors
+    ///
+    /// Returns a handle error for an orphaned, foreign, or stale object, an
+    /// exception when observable code throws, and a limit, allocation, or
+    /// engine error for runtime failures.
+    pub fn own_property_keys(
+        &self,
+        ctx: &mut crate::Context<'_>,
+    ) -> Result<Vec<PropertyKey>, ExecutionError> {
+        let object = self.admitted_id(ctx)?;
+        crate::vm::host_own_property_keys(ctx.runtime, HeapReference::Object(object), ctx.realm)
+    }
+
+    /// Validates that this handle is live in `ctx`'s runtime and returns its
+    /// object identity.
+    fn admitted_id(&self, ctx: &crate::Context<'_>) -> Result<ObjectId, ExecutionError> {
+        let owner = self.owner()?;
+        ctx.runtime.validate_owner(&owner, HandleKind::Object)?;
+        let object = self.id()?;
+        if !ctx.runtime.objects.contains(object) {
+            return Err(HandleError::Stale {
+                kind: HandleKind::Object,
+                index: object.index(),
+                generation: object.generation(),
+            }
+            .into());
+        }
+        Ok(object)
+    }
 }
 
 /// The receiver, arguments, and `new.target` exposed to a host-installed
@@ -642,6 +997,109 @@ impl HostCall {
     #[must_use]
     pub fn new_target(&self) -> Option<Function> {
         self.new_target.clone()
+    }
+}
+
+/// A rooted runtime-local ECMAScript Promise.
+///
+/// Created through [`crate::Context::new_promise`]; the paired
+/// [`PromiseResolver`] settles it. Like every value handle, the wrapper is
+/// an immutable [`Arc`]-backed public root: the Promise object stays
+/// reachable for as long as any handle (or JavaScript reference) survives.
+#[derive(Clone, Debug)]
+pub struct Promise(JsValue);
+
+impl Promise {
+    pub(crate) const fn from_root(value: JsValue) -> Self {
+        Self(value)
+    }
+
+    /// Returns this promise as an arbitrary value root.
+    #[must_use]
+    pub fn as_value(&self) -> JsValue {
+        self.0.clone()
+    }
+}
+
+/// Settles a host-created Promise ([`crate::Context::new_promise`]).
+///
+/// The resolver owns public roots for the engine's resolve and reject
+/// functions, so both stay reachable for as long as the resolver survives
+/// (the Arc-rooting analogue of the dynamic-import park queue). Dropping the
+/// resolver releases them; the Promise itself is rooted by its own handle.
+///
+/// ECMA-262 Promise semantics apply: the first `resolve`/`reject` wins and
+/// every later call is ignored (26.6.1.1, `[[Resolve]]`/`[[Reject]]`), and
+/// queued reactions run at the next host-job drain.
+#[derive(Debug)]
+pub struct PromiseResolver {
+    resolve: JsValue,
+    reject: JsValue,
+}
+
+impl PromiseResolver {
+    pub(crate) const fn from_roots(resolve: JsValue, reject: JsValue) -> Self {
+        Self { resolve, reject }
+    }
+
+    /// Settles the promise with `value` (ECMA-262 `[[Resolve]]`).
+    ///
+    /// This function never panics.
+    ///
+    /// # Errors
+    ///
+    /// Returns a handle error for a foreign value or a limit, allocation, or
+    /// engine error while the resolving function runs; a rejecting value is
+    /// delivered through the promise's reactions, not this error.
+    pub fn resolve(
+        &self,
+        ctx: &mut crate::Context<'_>,
+        value: JsValue,
+    ) -> Result<(), ExecutionError> {
+        self.settle(ctx, &self.resolve, value)
+    }
+
+    /// Settles the promise with the rejection `reason` (ECMA-262
+    /// `[[Reject]]`).
+    ///
+    /// This function never panics.
+    ///
+    /// # Errors
+    ///
+    /// Returns a handle error for a foreign value or a limit, allocation, or
+    /// engine error while the rejecting function runs.
+    pub fn reject(
+        &self,
+        ctx: &mut crate::Context<'_>,
+        reason: JsValue,
+    ) -> Result<(), ExecutionError> {
+        self.settle(ctx, &self.reject, reason)
+    }
+
+    fn settle(
+        &self,
+        ctx: &mut crate::Context<'_>,
+        function: &JsValue,
+        value: JsValue,
+    ) -> Result<(), ExecutionError> {
+        let owner = function.owner()?;
+        ctx.runtime.validate_owner(&owner, HandleKind::Value)?;
+        let owner = value.owner()?;
+        ctx.runtime.validate_owner(&owner, HandleKind::Value)?;
+        let resolve = Function::from_root(function.clone());
+        match ctx.call_function(
+            &resolve,
+            ctx.undefined(),
+            vec![value],
+            crate::ExecutionLimits::default(),
+        ) {
+            Ok(_completion) => Ok(()),
+            Err(crate::CallError::Execution(error)) => Err(error),
+            Err(crate::CallError::Thrown(_)) => Err(crate::EngineFault::RuntimeInvariant {
+                message: "promise resolving function threw a value",
+            }
+            .into()),
+        }
     }
 }
 

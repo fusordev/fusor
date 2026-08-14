@@ -9,6 +9,11 @@
 
 use std::{collections::HashMap, error::Error, fmt};
 
+use fusor_diagnostics::{
+    Diagnostic as SharedDiagnostic, DiagnosticCode as SharedDiagnosticCode, DiagnosticCodeError,
+    DiagnosticLabel as SharedDiagnosticLabel, DiagnosticSeverity, SourceError, SourceId,
+    SourceRegistry,
+};
 pub use oxc_allocator::Allocator;
 pub use oxc_ast::ast::Program;
 use oxc_ast::{
@@ -27,11 +32,6 @@ pub use oxc_span::Span;
 use oxc_span::{GetSpan, SourceType};
 pub use oxc_syntax::module_record::ModuleRecord;
 use oxc_syntax::node::NodeId;
-use fusor_diagnostics::{
-    Diagnostic as SharedDiagnostic, DiagnosticCode as SharedDiagnosticCode, DiagnosticCodeError,
-    DiagnosticLabel as SharedDiagnosticLabel, DiagnosticSeverity, SourceError, SourceId,
-    SourceRegistry,
-};
 
 use crate::module_syntax::{ModuleSyntaxLoweringError, ModuleSyntaxRecord};
 
@@ -1857,12 +1857,8 @@ impl FrontendDiagnosticCode {
             Self::UnsupportedImportDefer => "fusor::frontend::profile::import_defer",
             Self::UnsupportedDecorator => "fusor::frontend::profile::decorator",
             Self::UnsupportedClassAccessor => "fusor::frontend::profile::class_accessor",
-            Self::UnsupportedAnnexBHtmlComment => {
-                "fusor::frontend::profile::annex_b_html_comment"
-            }
-            Self::UnsupportedAnnexBLegacyOctal => {
-                "fusor::frontend::profile::annex_b_legacy_octal"
-            }
+            Self::UnsupportedAnnexBHtmlComment => "fusor::frontend::profile::annex_b_html_comment",
+            Self::UnsupportedAnnexBLegacyOctal => "fusor::frontend::profile::annex_b_legacy_octal",
             Self::UnsupportedLegacyImportAssertion => {
                 "fusor::frontend::profile::legacy_import_assertion"
             }
@@ -3592,9 +3588,9 @@ where
 /// # Errors
 ///
 /// Returns the exact frontend rejection for an unparseable source.
-pub fn has_top_level_declarations<'scope, 'arena>(
+pub fn has_top_level_declarations(
     source_text: &str,
-    options: FrontendOptions<'scope>,
+    options: FrontendOptions<'_>,
 ) -> Result<bool, FrontendError> {
     with_parsed_program(source_text, options, |unit| {
         unit.program().body.iter().any(|statement| {
@@ -3750,8 +3746,8 @@ mod tests {
         FrontendError, FrontendLimitError, FrontendLimits, FrontendSourceError,
         MAX_OXC_SOURCE_BYTES, enforce_source_limit,
     };
-    use oxc_span::Span;
     use fusor_diagnostics::SourceRegistry;
+    use oxc_span::Span;
 
     #[test]
     fn configured_source_limit_cannot_exceed_oxc_span_capacity() {

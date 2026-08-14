@@ -1,7 +1,7 @@
 [workspace]
 members = [
-    "crates/fusor-cli",
-    "crates/fusor-cdp",
+    "crates/fusor-host",
+    "crates/fusor-ops",
     "crates/fusor",
     "crates/fusor-bytecode",
     "crates/fusor-compiler",
@@ -21,6 +21,7 @@ license = "MIT"
 
 [workspace.dependencies]
 base64 = "=0.22.1"
+serde = { version = "=1.0.228", features = ["derive"] }
 emojis = "=0.9.0"
 fixed_decimal = { version = "=0.7.2", features = ["ryu"] }
 icu = { version = "=2.2.0", default-features = false }
@@ -44,7 +45,7 @@ sha1 = "=0.10.6"
 serde_yaml_ng = "=0.10.0"
 sourcemap = { version = "=9.3.2", default-features = false }
 temporal_rs = "=0.2.5"
-tokio = { version = "=1.53.1", default-features = false, features = ["rt", "sync", "time", "net", "io-util"] }
+tokio = { version = "=1.53.1", default-features = false, features = ["rt", "rt-multi-thread", "sync", "time", "net", "io-util", "signal", "macros"] }
 writeable = "=0.6.3"
 
 [workspace.lints.rust]

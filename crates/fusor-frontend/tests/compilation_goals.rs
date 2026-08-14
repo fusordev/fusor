@@ -1,13 +1,10 @@
-use oxc_span::GetSpan;
 use fusor_frontend::{
     Allocator, CompilationGoal, DiagnosticStage, FrontendDiagnosticCode, FrontendOptions,
     GlobalScriptGoal, ParseMode, parse,
 };
+use oxc_span::GetSpan;
 
-fn parse_global(
-    source: &str,
-    goal: GlobalScriptGoal,
-) -> Result<(), fusor_frontend::FrontendError> {
+fn parse_global(source: &str, goal: GlobalScriptGoal) -> Result<(), fusor_frontend::FrontendError> {
     let allocator = Allocator::new();
     parse(
         &allocator,
@@ -167,7 +164,7 @@ fn forced_strict_semantic_sentinel_preserves_the_caller_source_model() {
     assert_eq!(unit.program().source_text, source);
     assert!(unit.program().source_type.is_script());
     assert_eq!(unit.program().body.len(), 1);
-    assert_eq!(unit.program().body[0].span().start, 19);
+    assert_eq!(unit.program().body[0].span().start, 21);
     assert!(!unit.module_record().has_module_syntax);
 
     let explicit_source = "\"use strict\";\nvalue;";

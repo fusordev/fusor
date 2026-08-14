@@ -88,7 +88,7 @@ fn stage_constant(constant: &CompilerConstant) -> Result<InstalledConstant, Inst
 
 impl Runtime {
     /// Installs module code and creates the module root function with a
-    /// pre-built module environment. Returns (code_id, function_id).
+    /// pre-built module environment. Returns (`code_id`, `function_id`).
     pub(crate) fn install_module_root(
         &mut self,
         realm: RealmId,
@@ -198,7 +198,7 @@ impl Runtime {
     }
 
     /// Creates a hoisted module-level function from its template, capturing the
-    /// module environment cells. Used during InitializeEnvironment.
+    /// module environment cells. Used during `InitializeEnvironment`.
     ///
     /// `parent_environment` is the installed module root function's closure
     /// environment: a descendant forwards realm-global and module-binding slots
@@ -429,10 +429,12 @@ impl Runtime {
                 resource,
                 additional,
             },
-            RuntimeError::Atom(_) => crate::EngineFault::RuntimeInvariant {
-                message: "cycle collection returned an atom-table construction error",
+            RuntimeError::Atom(_) | RuntimeError::SchemaValidation(_) => {
+                crate::EngineFault::RuntimeInvariant {
+                    message: "cycle collection returned a construction error",
+                }
+                .into()
             }
-            .into(),
         })
     }
 
@@ -455,6 +457,9 @@ impl Runtime {
                 additional,
             },
             RuntimeError::Atom(source) => InstallError::Atom(source),
+            RuntimeError::SchemaValidation(_) => InstallError::AuthorityInvariant {
+                message: "realm intrinsic schema validation failed",
+            },
         })
     }
 
@@ -771,7 +776,7 @@ impl Runtime {
             sources.iter().zip(root.metadata().closures()).enumerate()
         {
             match *source {
-                fusor_bytecode::CompilerClosureSource::ConstructorRealmGlobal(atom) => {
+                CompilerClosureSource::ConstructorRealmGlobal(atom) => {
                     let CompilerClosureBinding::RealmGlobal(policy) = definition.binding() else {
                         return Err(InstallError::AuthorityInvariant {
                             message: "root constructor-realm source has captured-cell metadata",
@@ -795,11 +800,11 @@ impl Runtime {
                         })?,
                     ));
                 }
-                fusor_bytecode::CompilerClosureSource::DirectEvalBinding {
+                CompilerClosureSource::DirectEvalBinding {
                     index,
                     environment_size,
                 }
-                | fusor_bytecode::CompilerClosureSource::DirectEvalVariable {
+                | CompilerClosureSource::DirectEvalVariable {
                     index,
                     environment_size,
                 } => {
@@ -834,13 +839,13 @@ impl Runtime {
                     }
                     binding_slots[closure] = Some(binding);
                 }
-                fusor_bytecode::CompilerClosureSource::ParentVariableReference(_)
-                | fusor_bytecode::CompilerClosureSource::ParentClosure(_) => {
+                CompilerClosureSource::ParentVariableReference(_)
+                | CompilerClosureSource::ParentClosure(_) => {
                     return Err(InstallError::AuthorityInvariant {
                         message: "root closure source requires an omitted parent",
                     });
                 }
-                fusor_bytecode::CompilerClosureSource::Module { index } => {
+                CompilerClosureSource::Module { index } => {
                     if !matches!(definition.binding(), CompilerClosureBinding::Captured(_)) {
                         return Err(InstallError::AuthorityInvariant {
                             message: "module closure source has realm-global metadata",

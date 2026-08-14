@@ -805,9 +805,7 @@ fn module_export_default_expression_stores_at_statement_position() {
 
 #[test]
 fn module_declaration_record_lists_expected_binding_policies() {
-    use fusor_bytecode::{
-        CompilerBindingKind, CompilerInitializationPolicy, ModuleBindingOrigin,
-    };
+    use fusor_bytecode::{CompilerBindingKind, CompilerInitializationPolicy, ModuleBindingOrigin};
     with_parsed_program(
         "var v; let l; const c = 1; function f(){} export default 0;",
         FrontendOptions::for_goal(CompilationGoal::Module),

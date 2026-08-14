@@ -5,6 +5,9 @@ use std::{
     sync::Arc,
 };
 
+use fusor_frontend::{
+    CompilationGoal, DynamicFunctionKind, ModuleExportLocalName, ParsedUnit, Span,
+};
 use oxc_ast::{
     AstKind,
     ast::{
@@ -14,9 +17,6 @@ use oxc_ast::{
 };
 use oxc_semantic::{AstNodes, NodeId, ReferenceId, ScopeId, SymbolFlags, SymbolId};
 use oxc_span::GetSpan;
-use fusor_frontend::{
-    CompilationGoal, DynamicFunctionKind, ModuleExportLocalName, ParsedUnit, Span,
-};
 
 /// Dense plan-local compiler identity of one executable body.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -890,6 +890,8 @@ struct ExecutableDraft {
 struct DynamicFunctionWrapperName {
     symbol: SymbolId,
     span: Span,
+    /// The wrapper function-body executable whose frame owns the name binding.
+    executable: ExecutableId,
 }
 
 struct BindingDraft {
@@ -1206,7 +1208,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             class_private_method_bindings,
             class_static_receiver_bindings,
             with_object_bindings,
-        } = self.freeze_binding_drafts(binding_drafts, dynamic_function_wrapper_name)?;
+        } = self.freeze_binding_drafts(binding_drafts)?;
         let annex_b_functions = Self::freeze_annex_b_functions(
             &annex_b_sources,
             &symbol_bindings,
@@ -1227,7 +1229,6 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             &annex_b_functions,
             &annex_b_outer_scope_overrides,
             &bindings,
-            dynamic_function_wrapper_name,
         )?;
         let with_object_binding_by_scope =
             Self::with_object_binding_by_scope(&with_object_bindings, &scope_by_binding)?;
@@ -1240,7 +1241,6 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             &annex_b_functions,
             &bindings,
             &implicit_arguments_references,
-            dynamic_function_wrapper_name,
         )?;
         let mut unresolved_drafts = self.unresolved_drafts()?;
         unresolved_drafts.extend(remapped_unresolved_references);
@@ -1375,13 +1375,8 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
     fn freeze_binding_drafts(
         &self,
         drafts: Vec<BindingDraft>,
-        dynamic_function_wrapper_name: Option<DynamicFunctionWrapperName>,
     ) -> Result<FrozenBindings, CompilerError> {
-        freeze_bindings(
-            drafts,
-            self.unit.semantic().scoping().symbols_len(),
-            dynamic_function_wrapper_name,
-        )
+        freeze_bindings(drafts, self.unit.semantic().scoping().symbols_len())
     }
 
     fn freeze_annex_b_functions(
@@ -1498,25 +1493,19 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         source_symbols: &[Option<SymbolId>],
         scope_overrides: &HashMap<BindingId, ScopeId>,
         bindings: &[BindingStorage],
-        dynamic_function_wrapper_name: Option<DynamicFunctionWrapperName>,
     ) -> Result<Vec<Option<ScopeId>>, CompilerError> {
         let scoping = self.unit.semantic().scoping();
         let mut scopes = reverse_binding_scopes(
             symbol_bindings,
             bindings.len(),
             scoping.scopes_len(),
-            scoping
-                .symbol_ids()
-                .filter(|symbol| {
-                    dynamic_function_wrapper_name.is_none_or(|name| name.symbol != *symbol)
-                })
-                .map(|symbol| {
-                    (
-                        symbol,
-                        scoping.symbol_scope_id(symbol),
-                        scoping.symbol_span(symbol),
-                    )
-                }),
+            scoping.symbol_ids().map(|symbol| {
+                (
+                    symbol,
+                    scoping.symbol_scope_id(symbol),
+                    scoping.symbol_span(symbol),
+                )
+            }),
         )?;
         for (&binding, &scope) in scope_overrides {
             let target =
@@ -1590,7 +1579,6 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         annex_b_functions: &HashMap<NodeId, AnnexBFunctionBinding>,
         annex_b_outer_scope_overrides: &HashMap<BindingId, ScopeId>,
         bindings: &[BindingStorage],
-        dynamic_function_wrapper_name: Option<DynamicFunctionWrapperName>,
     ) -> Result<Vec<Option<ScopeId>>, CompilerError> {
         let mut scope_overrides = annex_b_outer_scope_overrides.clone();
         for function in annex_b_functions.values() {
@@ -1609,7 +1597,6 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             source_symbols,
             &scope_overrides,
             bindings,
-            dynamic_function_wrapper_name,
         )?;
         for binding in bindings.iter().filter(|binding| binding.arguments_object) {
             let scope = self
@@ -2434,6 +2421,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         Ok(Some(DynamicFunctionWrapperName {
             symbol,
             span: identifier.span,
+            executable: candidate.executable.id(),
         }))
     }
 
@@ -2456,7 +2444,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             .id
             .as_ref()
             .map(|identifier| identifier.span)
-            .or_else(|| anonymous_default.then(|| function.span));
+            .or_else(|| anonymous_default.then_some(function.span));
         self.inventory_executable(
             node_id,
             ExecutableKind::Function {
@@ -3415,6 +3403,36 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 declaration_identity_spans,
                 placement,
                 policy,
+                arguments_object: false,
+            });
+        }
+        if let Some(wrapper) = dynamic_function_wrapper_name {
+            // ES2018+ `CreateDynamicFunction` (ECMA-262 20.2.1.1.1): the body
+            // resolves its synthetic `anonymous` name to the wrapper function
+            // object itself. The binding is a FunctionName local on the
+            // wrapper body executable, initialized by the runtime when the
+            // function object's frame is planned, exactly like an ordinary
+            // named function expression.
+            drafts.push(BindingDraft {
+                symbol_id: Some(wrapper.symbol),
+                primary_symbol_binding: true,
+                class_node: None,
+                class_field_node: None,
+                class_instance_initializer_node: None,
+                class_private_name_nodes: Arc::from([]),
+                class_private_method_node: None,
+                class_static_receiver_node: None,
+                with_statement_node: None,
+                executable: wrapper.executable,
+                name: Arc::from("anonymous"),
+                declaration_spans: Arc::from([wrapper.span]),
+                declaration_identity_spans: Arc::from([wrapper.span]),
+                placement: StoragePlacement::Local,
+                policy: self.declaration_policy(
+                    wrapper.executable,
+                    DeclarationKind::FunctionName,
+                    false,
+                ),
                 arguments_object: false,
             });
         }
@@ -4953,7 +4971,6 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         annex_b_functions: &HashMap<NodeId, AnnexBFunctionBinding>,
         bindings: &[BindingStorage],
         implicit_arguments_references: &HashMap<ReferenceId, ExecutableId>,
-        dynamic_function_wrapper_name: Option<DynamicFunctionWrapperName>,
     ) -> Result<(Vec<ResolvedDraft>, Vec<UnresolvedDraft>), CompilerError> {
         let semantic = self.unit.semantic();
         let scoping = semantic.scoping();
@@ -4969,26 +4986,6 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         let mut drafts = Vec::with_capacity(scoping.references_len());
         let mut remapped_unresolved_references = Vec::new();
         for symbol_id in scoping.symbol_ids() {
-            if dynamic_function_wrapper_name.is_some_and(|name| name.symbol == symbol_id) {
-                for &reference_id in scoping.get_resolved_reference_ids(symbol_id) {
-                    let reference = scoping.get_reference(reference_id);
-                    let span = semantic.reference_span(reference);
-                    let executable = self
-                        .instance_field_initializer_owner(reference.node_id())?
-                        .unwrap_or(self.scope_owner(reference.scope_id(), Some(span))?);
-                    remapped_unresolved_references.push(UnresolvedDraft {
-                        reference_id,
-                        executable,
-                        name: Arc::from(scoping.symbol_name(symbol_id)),
-                        span,
-                        access: ReferenceAccess {
-                            read: reference.is_read(),
-                            write: reference.is_write(),
-                        },
-                    });
-                }
-                continue;
-            }
             let source_binding = symbol_bindings
                 .get(symbol_id.index())
                 .and_then(|binding| *binding)
@@ -5944,7 +5941,6 @@ fn placement_order(placement: StoragePlacement) -> u8 {
 fn freeze_bindings(
     drafts: Vec<BindingDraft>,
     symbol_count: usize,
-    omitted_symbol: Option<DynamicFunctionWrapperName>,
 ) -> Result<FrozenBindings, CompilerError> {
     let mut bindings = Vec::with_capacity(drafts.len());
     let mut symbol_bindings = vec![None; symbol_count];
@@ -6064,23 +6060,13 @@ fn freeze_bindings(
             arguments_object: draft.arguments_object,
         });
     }
-    for (index, binding) in symbol_bindings.iter().enumerate() {
-        if binding.is_none() && omitted_symbol.is_none_or(|name| name.symbol.index() != index) {
+    for binding in &symbol_bindings {
+        if binding.is_none() {
             return Err(CompilerError::SemanticInvariant {
                 invariant: "every ordinary semantic symbol has compiler binding",
                 span: None,
             });
         }
-    }
-    if omitted_symbol.is_some_and(|name| {
-        symbol_bindings
-            .get(name.symbol.index())
-            .is_none_or(Option::is_some)
-    }) {
-        return Err(CompilerError::SemanticInvariant {
-            invariant: "the dynamic Function wrapper name has no compiler binding",
-            span: omitted_symbol.map(|name| name.span),
-        });
     }
     Ok(FrozenBindings {
         bindings,

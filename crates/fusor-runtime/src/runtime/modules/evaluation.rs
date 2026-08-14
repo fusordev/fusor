@@ -1,11 +1,11 @@
-//! Module evaluation: InnerModuleEvaluation with cycle roots and async status.
+//! Module evaluation: `InnerModuleEvaluation` with cycle roots and async status.
 //!
 //! Iterative explicit-stack DFS implementing ECMA-262 16.6.1.4
 //! (InnerModuleEvaluation): DFS indices, `[[CycleRoot]]` assignment at the
 //! strongly-connected-component pop, `[[EvaluationError]]` propagation to every
 //! module still on the DFS stack, and the Top-Level Await fields
-//! ([[PendingAsyncDependencies]], [[AsyncEvaluationOrder]],
-//! [[AsyncParentModules]], [[TopLevelCapability]]).
+//! ([[`PendingAsyncDependencies`]], [[`AsyncEvaluationOrder`]],
+//! [[`AsyncParentModules`]], [[`TopLevelCapability`]]).
 
 use super::{ModuleError, ModuleRecordId, ModuleStatus};
 use crate::OrdinaryDynamicFunctionCompiler;
@@ -56,7 +56,7 @@ enum EvalWorkItem {
 ///
 /// A synchronous root is `Evaluated` on success. A root whose evaluation is
 /// asynchronous (its own top level awaits, or it depends on an async module)
-/// is left `EvaluatingAsync` with a pending [[TopLevelCapability]]; `Ok` is
+/// is left `EvaluatingAsync` with a pending [[`TopLevelCapability`]]; `Ok` is
 /// returned either way and the capability settles through the async-module
 /// continuation (wired in a later step).
 pub fn evaluate_module(
@@ -275,7 +275,7 @@ pub fn evaluate_module(
 }
 
 /// Marks every module still on the DFS stack `Errored` with `error`, rejects
-/// the root's [[TopLevelCapability]] when one exists, and returns the error.
+/// the root's [[`TopLevelCapability`]] when one exists, and returns the error.
 fn fail_evaluation(
     runtime: &mut Runtime,
     root: ModuleRecordId,
@@ -303,7 +303,7 @@ fn fail_evaluation(
     Err(error)
 }
 
-/// Allocates the root's [[TopLevelCapability]] promise if it does not exist.
+/// Allocates the root's [[`TopLevelCapability`]] promise if it does not exist.
 fn ensure_top_level_capability(
     runtime: &mut Runtime,
     realm: RealmId,
@@ -325,7 +325,7 @@ fn ensure_top_level_capability(
     Ok(())
 }
 
-/// ExecuteAsyncModule (ECMA-262 16.6.1.5): kicks the async module root.
+/// `ExecuteAsyncModule` (ECMA-262 16.6.1.5): kicks the async module root.
 ///
 /// The root frame runs as an async function activation and returns its
 /// activation promise; suspension and resumption ride the existing
@@ -374,7 +374,7 @@ fn execute_async_module(
     }
 }
 
-/// AsyncModuleExecutionFulfilled (ECMA-262 16.6.1.4.2).
+/// `AsyncModuleExecutionFulfilled` (ECMA-262 16.6.1.4.2).
 ///
 /// Runs inside a Promise job with no interpreter frames active. Deferred
 /// module bodies execute under default limits with the self-contained dynamic
@@ -450,8 +450,8 @@ pub(crate) fn async_module_execution_fulfilled(
     Ok(())
 }
 
-/// AsyncModuleExecutionRejected (ECMA-262 16.6.1.4.3): records `value` as the
-/// module's evaluation error and propagates it through [[AsyncParentModules]].
+/// `AsyncModuleExecutionRejected` (ECMA-262 16.6.1.4.3): records `value` as the
+/// module's evaluation error and propagates it through [[`AsyncParentModules`]].
 pub(crate) fn async_module_execution_rejected(
     runtime: &mut Runtime,
     module: ModuleRecordId,
@@ -463,7 +463,7 @@ pub(crate) fn async_module_execution_rejected(
 
 /// Iterative (explicit-stack, spec DFS order) error propagation: every module
 /// still awaiting evaluation becomes Errored with `error` and its
-/// [[TopLevelCapability]] rejects with `value`.
+/// [[`TopLevelCapability`]] rejects with `value`.
 fn reject_async_module_tree(
     runtime: &mut Runtime,
     module: ModuleRecordId,
@@ -498,7 +498,7 @@ fn reject_async_module_tree(
     Ok(())
 }
 
-/// GatherAvailableAncestors (ECMA-262 16.6.1.4.1): collects the modules whose
+/// `GatherAvailableAncestors` (ECMA-262 16.6.1.4.1): collects the modules whose
 /// last pending async dependency just fulfilled, in spec depth-first order.
 fn gather_available_ancestors(
     runtime: &mut Runtime,
@@ -555,7 +555,7 @@ pub(crate) fn module_is_evaluating_async(runtime: &Runtime, module: ModuleRecord
     module_status(runtime, module) == ModuleStatus::EvaluatingAsync
 }
 
-/// Returns the module's [[TopLevelCapability]] promise, when allocated.
+/// Returns the module's [[`TopLevelCapability`]] promise, when allocated.
 pub(crate) fn module_top_level_capability(
     runtime: &Runtime,
     module: ModuleRecordId,
@@ -566,10 +566,10 @@ pub(crate) fn module_top_level_capability(
         .and_then(|r| r.top_level_capability)
 }
 
-/// Builds ECMA-262 InnerModuleEvaluation's `evaluationList` for `module`:
+/// Builds ECMA-262 `InnerModuleEvaluation`'s `evaluationList` for `module`:
 /// eager-phase requests contribute the requested module itself; defer-phase
 /// requests contribute the module's asynchronous transitive dependencies
-/// (GatherAsynchronousTransitiveDependencies) instead, leaving the deferred
+/// (`GatherAsynchronousTransitiveDependencies`) instead, leaving the deferred
 /// module and its synchronous subtree unevaluated.
 pub(crate) fn module_evaluation_list(
     runtime: &Runtime,
@@ -711,11 +711,11 @@ fn execute_module_body(
         Err(crate::ExecutionError::Exception(exception)) => {
             Err(ModuleError::evaluate_exception(runtime, exception))
         }
-        Err(e) => Err(ModuleError::evaluate(format!("execution error: {e}"))),
+        Err(e) => Err(ModuleError::evaluate_execution(e)),
     }
 }
 
-/// [[HasTLA]]: the compiler marks a top-level-await module root by compiling
+/// [[`HasTLA`]]: the compiler marks a top-level-await module root by compiling
 /// it as an async function (see `FunctionKind` of the root function header).
 fn module_has_tla(runtime: &Runtime, module: ModuleRecordId) -> bool {
     runtime.modules.get(module).is_some_and(|record| {
@@ -730,7 +730,7 @@ fn module_has_tla(runtime: &Runtime, module: ModuleRecordId) -> bool {
     })
 }
 
-/// IncrementModuleAsyncEvaluationCount.
+/// `IncrementModuleAsyncEvaluationCount`.
 fn next_module_async_evaluation_order(runtime: &mut Runtime) -> u32 {
     runtime.module_async_evaluation_count += 1;
     runtime.module_async_evaluation_count
@@ -760,8 +760,7 @@ fn module_status(runtime: &Runtime, module: ModuleRecordId) -> ModuleStatus {
     runtime
         .modules
         .get(module)
-        .map(|r| r.status)
-        .unwrap_or(ModuleStatus::New)
+        .map_or(ModuleStatus::New, |r| r.status)
 }
 
 fn set_module_status(runtime: &mut Runtime, module: ModuleRecordId, status: ModuleStatus) {

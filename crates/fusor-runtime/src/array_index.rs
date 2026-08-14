@@ -36,6 +36,12 @@ pub const MAX_ARRAY_INDEX: u32 = u32::MAX - 1;
 pub struct ArrayIndex(u32);
 
 impl ArrayIndex {
+    /// The numeric index value (the snapshot serializer's content, §8.2).
+    #[must_use]
+    pub(crate) const fn value(self) -> u32 {
+        self.0
+    }
+
     /// Creates an array index when `value` is within the JavaScript range.
     #[must_use]
     pub const fn new(value: u32) -> Option<Self> {

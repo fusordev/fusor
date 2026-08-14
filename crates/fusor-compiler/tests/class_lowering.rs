@@ -173,10 +173,17 @@ fn private_fields_after_optional_chains_lower_with_brand_checked_reads() {
             .count(),
         4
     );
+    // Tail-position private calls lower to the tail-call form; the count
+    // covers both spellings.
     assert_eq!(
         opcodes
             .iter()
-            .filter(|&&opcode| opcode == FinalOpcode::CallMethod)
+            .filter(|&&opcode| {
+                matches!(
+                    opcode,
+                    FinalOpcode::CallMethod | FinalOpcode::TailCallMethod
+                )
+            })
             .count(),
         3
     );
@@ -420,8 +427,13 @@ fn optional_and_spread_super_method_calls_keep_the_actual_receiver() {
             .count()
             >= 6
     );
-    assert!(opcodes.contains(&FinalOpcode::CallMethod));
-    assert!(opcodes.contains(&FinalOpcode::Apply));
+    // Positional super calls lower to the tail-call forms when they are in
+    // tail position; the call forms still cover the non-tail shapes.
+    assert!(
+        opcodes.contains(&FinalOpcode::CallMethod)
+            || opcodes.contains(&FinalOpcode::TailCallMethod)
+    );
+    assert!(opcodes.contains(&FinalOpcode::Apply) || opcodes.contains(&FinalOpcode::TailApply));
 }
 
 #[test]
@@ -567,14 +579,12 @@ fn a_parenthesized_class_assignment_target_keeps_the_empty_default_name() {
         .filter_map(|instruction| {
             let instruction = instruction.decoded().instruction();
             match (instruction.opcode(), instruction.operands()) {
-                (FinalOpcode::DefineClass, fusor_bytecode::Operands::AtomU8 { atom, .. }) => {
-                    Some(
-                        tree.root().atoms()[atom.get() as usize]
-                            .string()
-                            .code_units()
-                            .collect::<Vec<_>>(),
-                    )
-                }
+                (FinalOpcode::DefineClass, fusor_bytecode::Operands::AtomU8 { atom, .. }) => Some(
+                    tree.root().atoms()[atom.get() as usize]
+                        .string()
+                        .code_units()
+                        .collect::<Vec<_>>(),
+                ),
                 _ => None,
             }
         })
@@ -625,14 +635,12 @@ fn anonymous_base_class_formal_parameter_defaults_respect_the_binding_shape() {
         .filter_map(|instruction| {
             let instruction = instruction.decoded().instruction();
             match (instruction.opcode(), instruction.operands()) {
-                (FinalOpcode::DefineClass, fusor_bytecode::Operands::AtomU8 { atom, .. }) => {
-                    Some(
-                        tree.root().atoms()[atom.get() as usize]
-                            .string()
-                            .code_units()
-                            .collect::<Vec<_>>(),
-                    )
-                }
+                (FinalOpcode::DefineClass, fusor_bytecode::Operands::AtomU8 { atom, .. }) => Some(
+                    tree.root().atoms()[atom.get() as usize]
+                        .string()
+                        .code_units()
+                        .collect::<Vec<_>>(),
+                ),
                 _ => None,
             }
         })
@@ -1057,12 +1065,17 @@ fn nonlogical_member_class_assignments_use_the_typed_empty_name_path() {
             .iter()
             .any(|atom| atom.is_static_property_only() && atom.string().is_empty())
     );
+    // The read-modify-write pair uses the typed insert forms
+    // (`insert2`/`insert3`) rather than a `dup2` reshuffle.
     assert!(
         root.control_flow()
             .instructions()
             .iter()
             .any(|instruction| {
-                instruction.decoded().instruction().opcode() == FinalOpcode::Dup2
+                matches!(
+                    instruction.decoded().instruction().opcode(),
+                    FinalOpcode::Insert2 | FinalOpcode::Insert3
+                )
             })
     );
 }

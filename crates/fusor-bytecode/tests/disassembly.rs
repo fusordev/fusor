@@ -174,15 +174,15 @@ fn malformed_or_truncated_input_returns_an_explicit_error_with_only_an_untrusted
     let mut invalid_output = String::new();
     assert_eq!(
         render_disassembly(
-            InstructionDecoder::new(&[248]),
+            InstructionDecoder::new(&[255]),
             &mut invalid_output,
             GENEROUS_LIMITS,
         ),
         Err(DisassemblyError::Decode {
             source: DecodeError::InvalidOpcode {
                 pc: BytecodePc::ZERO,
-                opcode_byte: 248,
-                source: FinalOpcodeDecodeError::Unknown { byte: 248 },
+                opcode_byte: 255,
+                source: FinalOpcodeDecodeError::Unknown { byte: 255 },
             },
         })
     );

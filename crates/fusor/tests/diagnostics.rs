@@ -62,11 +62,16 @@ fn registered_frontend_diagnostics_render_at_the_chained_original_source() {
 }
 
 #[test]
-fn registered_compiler_rejections_have_stable_codes_and_mapped_labels() {
-    let (sources, error) = evaluate_failure("with (object) value;", "with (object) value;");
+fn registered_semantic_rejections_have_stable_codes_and_mapped_labels() {
+    // A function declaration as a loop body is an Oxc *semantic* early
+    // error (the compiler now supports `with` statements, Annex B block
+    // functions, and optional chains, so planning-stage rejections are no
+    // longer reachable from Global Script source).
+    let (sources, error) =
+        evaluate_failure("while (x) function f() {}", "while (x) function f() {}");
     assert!(matches!(
         error.failure(),
-        RegisteredScriptFailure::Compiler(_)
+        RegisteredScriptFailure::Frontend(_)
     ));
 
     let report = error
@@ -74,9 +79,14 @@ fn registered_compiler_rejections_have_stable_codes_and_mapped_labels() {
         .expect("diagnostic report");
     assert_eq!(
         report.primary().code().as_str(),
-        "fusor::compiler::planning::unsupported"
+        "fusor::frontend::oxc::semantic"
     );
-    assert!(report.primary().message().contains("WithStatement"));
+    assert!(
+        report
+            .primary()
+            .message()
+            .contains("Invalid function declaration")
+    );
     assert_eq!(
         report.primary().labels()[0].span().source_id(),
         &sources

@@ -275,7 +275,7 @@ fn finish_dynamic_import_attributes(
         matches!(key.to_utf8_lossy().ok().as_deref(), Some("type"))
             && matches!(
                 value.to_utf8_lossy().ok().as_deref(),
-                Some("json") | Some("text")
+                Some("json" | "text")
             )
     });
     if supported {
@@ -377,7 +377,7 @@ fn reject_dynamic_import_pending(
 /// link errors with a `SyntaxError`, and a successful evaluation fulfills with
 /// the module namespace exotic object. A root left in the evaluating-async
 /// status (top-level await) instead attaches reactions to its
-/// [[TopLevelCapability]] and settles the import Promise when the asynchronous
+/// [[`TopLevelCapability`]] and settles the import Promise when the asynchronous
 /// evaluation completes. Promise reactions queue as ordinary Promise jobs and
 /// drain at the next host-job checkpoint; they never run inline here.
 ///
@@ -521,8 +521,11 @@ fn reject_parked_import(
     kind: ExceptionKind,
     message: &str,
 ) -> Result<(), ExecutionError> {
-    let object =
-        runtime.materialize_error_object(realm, kind, JsString::from_utf8(message)?, None)?;
+    let message = JsString::from_utf8(message)?;
+    // Host-driven rejections carry no interpreter frames; the stack still
+    // opens with the V8 `Name: message` header.
+    let stack = JsString::from_utf8(&format!("{}: ", kind.name()))?.concat(&message)?;
+    let object = runtime.materialize_error_object(realm, kind, message, Some(stack))?;
     settle_parked_import(runtime, promise, StoredValue::Object(object), true)
 }
 
@@ -546,7 +549,10 @@ pub(crate) fn module_error_rejection_value(
             return Ok(value.stored()?.duplicate());
         }
         if let (Some(kind), Some(message)) = (exception.kind(), exception.message()) {
-            let object = runtime.materialize_error_object(realm, kind, message.clone(), None)?;
+            let stack =
+                JsString::from_utf8(&format!("{}: ", kind.name()))?.concat(&message.clone())?;
+            let object =
+                runtime.materialize_error_object(realm, kind, message.clone(), Some(stack))?;
             return Ok(StoredValue::Object(object));
         }
     }
@@ -554,12 +560,9 @@ pub(crate) fn module_error_rejection_value(
         crate::ModuleErrorPhase::Link => ExceptionKind::SyntaxError,
         crate::ModuleErrorPhase::Evaluate => ExceptionKind::TypeError,
     };
-    let object = runtime.materialize_error_object(
-        realm,
-        kind,
-        JsString::from_utf8(error.message())?,
-        None,
-    )?;
+    let message = JsString::from_utf8(error.message())?;
+    let stack = JsString::from_utf8(&format!("{}: ", kind.name()))?.concat(&message.clone())?;
+    let object = runtime.materialize_error_object(realm, kind, message, Some(stack))?;
     Ok(StoredValue::Object(object))
 }
 

@@ -406,7 +406,7 @@ pub(super) fn reflect_set_property(
     {
         // OrdinarySetWithOwnDescriptor reads the receiver's [[GetOwnProperty]]
         // first (ECMA-262 10.4.6.3), which triggers deferred evaluation.
-        crate::vm::proxy::ensure_deferred_namespace_access(
+        ensure_deferred_namespace_access(
             runtime,
             object,
             &key,

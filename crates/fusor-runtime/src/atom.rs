@@ -502,6 +502,55 @@ impl AtomTable {
         removed
     }
 
+    /// Collects the live dynamic atoms for snapshotting (§8.2): interner
+    /// entries beyond the predefined set, in a deterministic order.
+    /// Identity atoms (unique symbols, private names) are excluded — like
+    /// resources and Rust closures, identity cannot be serialized.
+    pub(crate) fn snapshot_atoms(&self) -> Vec<(AtomKind, JsString)> {
+        let mut atoms = Vec::new();
+        for bucket in self.buckets.values() {
+            for slot in bucket {
+                let Some(entry) = slot.upgrade() else {
+                    continue;
+                };
+                if entry.predefined.is_some() {
+                    continue;
+                }
+                if matches!(entry.kind, AtomKind::String | AtomKind::GlobalSymbol)
+                    && let Some(description) = &entry.description
+                {
+                    atoms.push((entry.kind, description.clone()));
+                }
+            }
+        }
+        atoms.sort_by(|(kind_a, description_a), (kind_b, description_b)| {
+            kind_order(kind_a)
+                .cmp(&kind_order(kind_b))
+                .then_with(|| compare_code_units(description_a, description_b))
+        });
+        atoms
+    }
+
+    /// Re-installs snapshot atoms into this (fresh) table (§8.3); the
+    /// blob only ever carries `String` and `GlobalSymbol` entries.
+    pub(crate) fn restore_atoms(
+        &mut self,
+        atoms: &[(AtomKind, JsString)],
+    ) -> Result<(), AtomError> {
+        for (kind, description) in atoms {
+            match kind {
+                AtomKind::String => {
+                    self.intern_string(description)?;
+                }
+                AtomKind::GlobalSymbol => {
+                    self.intern_global_symbol(description)?;
+                }
+                AtomKind::Symbol | AtomKind::Private => {}
+            }
+        }
+        Ok(())
+    }
+
     /// Drops one transaction-owned string atom and removes its exact weak
     /// interner slot when no other owner retained the identity.
     pub(crate) fn rollback_interned_string(&mut self, atom: Atom) {
@@ -946,6 +995,32 @@ impl AtomTable {
             interner_slots: current.interner_slots.saturating_sub(removed),
             ..current
         });
+    }
+}
+
+/// The deterministic snapshot ordering key for one atom kind.
+fn kind_order(kind: &AtomKind) -> u8 {
+    match kind {
+        AtomKind::String => 0,
+        AtomKind::GlobalSymbol => 1,
+        AtomKind::Symbol | AtomKind::Private => 2,
+    }
+}
+
+/// Exact code-unit ordering for deterministic snapshot order.
+fn compare_code_units(left: &JsString, right: &JsString) -> std::cmp::Ordering {
+    let mut left_units = left.code_units();
+    let mut right_units = right.code_units();
+    loop {
+        match (left_units.next(), right_units.next()) {
+            (Some(a), Some(b)) => match a.cmp(&b) {
+                std::cmp::Ordering::Equal => continue,
+                ordering => return ordering,
+            },
+            (None, Some(_)) => return std::cmp::Ordering::Less,
+            (Some(_), None) => return std::cmp::Ordering::Greater,
+            (None, None) => return std::cmp::Ordering::Equal,
+        }
     }
 }
 

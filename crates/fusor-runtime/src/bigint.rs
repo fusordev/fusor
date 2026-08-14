@@ -121,6 +121,18 @@ pub struct JsBigInt {
 }
 
 impl JsBigInt {
+    /// The two's-complement limbs, least significant first, always
+    /// normalized (the snapshot serializer's content, §8.2).
+    pub(crate) fn limbs(&self) -> &[u32] {
+        &self.limbs
+    }
+
+    /// Rebuilds a `BigInt` from normalized two's-complement limbs (the
+    /// snapshot restore path; the blob's checksum guards the invariant).
+    pub(crate) fn from_normalized_limbs(limbs: Vec<u32>) -> Self {
+        Self { limbs }
+    }
+
     /// Returns `0n`.
     #[must_use]
     pub fn zero() -> Self {

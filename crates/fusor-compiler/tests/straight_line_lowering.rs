@@ -493,9 +493,8 @@ fn tagged_templates_lower_to_one_exact_site_object_argument_before_substitutions
             FinalOpcode::Return,
         ]
     );
-    let [
-        fusor_compiler::CompiledConstant::Value(CompilerConstantValue::TemplateObject(template)),
-    ] = compiled.constants()
+    let [fusor_compiler::CompiledConstant::Value(CompilerConstantValue::TemplateObject(template))] =
+        compiled.constants()
     else {
         panic!("tagged template must own one site-object constant");
     };

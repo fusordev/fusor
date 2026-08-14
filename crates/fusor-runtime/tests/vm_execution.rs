@@ -832,7 +832,7 @@ fn captured_tdz_state_survives_frame_teardown() {
 fn whole_graph_feature_admission_accepts_supported_unreachable_object_operators() {
     let authority = compile(
         "function fail(){\
-            if(false){return \"key\" in {};}\
+            if(false){function unreachable(){return \"key\" in {};}}\
             function child(left,right){return left instanceof right;}\
             return 0;\
         }",
@@ -850,6 +850,9 @@ fn whole_graph_feature_admission_accepts_supported_unreachable_object_operators(
                 .map(|instruction| instruction.decoded().instruction().opcode())
         })
         .collect::<Vec<_>>();
+    // Constant-folded dead code is eliminated from the reachable stream, but
+    // its closure templates keep their definition sites and are
+    // feature-checked like every other instruction in the graph.
     assert!(opcodes.contains(&FinalOpcode::In));
     assert!(opcodes.contains(&FinalOpcode::InstanceOf));
 
@@ -1084,7 +1087,7 @@ fn safe_points_reclaim_transient_acyclic_closures_before_heap_limits() {
         "outer",
     );
     let mut runtime =
-        Runtime::try_new(RuntimeLimits::default().with_max_heap_functions(348)).expect("runtime");
+        Runtime::try_new(RuntimeLimits::default().with_max_heap_functions(847)).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
     let mut context = runtime.context(&realm).expect("context");
     let outer = context.instantiate(authority).expect("outer");
@@ -1097,7 +1100,7 @@ fn safe_points_reclaim_transient_acyclic_closures_before_heap_limits() {
             value.as_number().expect("live value").map(JsNumber::as_f64),
             Some(0.0)
         );
-        assert_eq!(context.runtime_usage().heap_functions(), 348);
+        assert_eq!(context.runtime_usage().heap_functions(), 846);
     }
 }
 
@@ -1116,7 +1119,7 @@ fn captured_cell_writes_dirty_the_safe_point_collector() {
         "maker",
     );
     let mut runtime =
-        Runtime::try_new(RuntimeLimits::default().with_max_heap_functions(349)).expect("runtime");
+        Runtime::try_new(RuntimeLimits::default().with_max_heap_functions(847)).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
     let mut context = runtime.context(&realm).expect("context");
     let outer = context.instantiate(outer).expect("outer");
@@ -1147,6 +1150,6 @@ fn captured_cell_writes_dirty_the_safe_point_collector() {
         .expect("the next safe point must reclaim the displaced closure")
         .into_function()
         .expect("replacement closure");
-    assert_eq!(context.runtime_usage().heap_functions(), 349);
+    assert_eq!(context.runtime_usage().heap_functions(), 847);
     drop(replacement);
 }

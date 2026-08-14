@@ -1,19 +1,28 @@
 [package]
 name = "fusor"
 version = "0.0.1"
-description = "Ergonomic host facade for the Experimental JavaScript Engine"
+description = "Ergonomic host facade for the Experimental JavaScript Engine, plus the `fusor` CLI (module runner and ESM REPL)"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish = false
 
+[[bin]]
+name = "fusor"
+path = "src/main.rs"
+
 [dependencies]
+base64 = { workspace = true }
 fusor-bytecode = { path = "../fusor-bytecode" }
 fusor-compiler = { path = "../fusor-compiler" }
 fusor-diagnostics = { path = "../fusor-diagnostics" }
 fusor-frontend = { path = "../fusor-frontend" }
+fusor-host = { path = "../fusor-host" }
 fusor-runtime = { path = "../fusor-runtime" }
+rustyline = { workspace = true }
 serde_json = { workspace = true }
+sha1 = { workspace = true }
+tokio = { workspace = true, features = ["fs", "macros"] }
 
 [lints]
 workspace = true

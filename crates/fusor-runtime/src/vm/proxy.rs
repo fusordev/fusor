@@ -32,7 +32,7 @@ fn namespace_uninitialized_error(
 }
 
 /// Converts an ECMA-262 `EvaluateModuleSync` failure into the abrupt
-/// completion a deferred namespace property access surfaces: a TypeError when
+/// completion a deferred namespace property access surfaces: a `TypeError` when
 /// the module cannot complete synchronously, or the module's original
 /// evaluation rejection value.
 pub(super) fn deferred_namespace_evaluation_abrupt(
@@ -114,7 +114,9 @@ pub(super) fn proxy_aware_is_array(
     Ok(false)
 }
 
-fn proxy_reference_value(reference: HeapReference) -> StoredValue {
+/// Projects a heap reference back into the stored-value receiver form used by
+/// the internal-method entry points.
+pub(super) fn proxy_reference_value(reference: HeapReference) -> StoredValue {
     match reference {
         HeapReference::Function(function) => StoredValue::Function(function),
         HeapReference::Object(object) => StoredValue::Object(object),
@@ -1046,7 +1048,8 @@ pub(super) fn begin_internal_define_own_property(
                 execution_budget,
             );
         }
-        let outcome = define_own_property(runtime, &base, key, &definition, execution_budget)?;
+        let outcome =
+            define_own_property(runtime, &base, key.clone(), &definition, execution_budget)?;
         return match outcome {
             PropertyDefinitionOutcome::Complete => Ok(NativeDispatch::Immediate(match result {
                 DefinePropertyResult::Target => base,
@@ -1057,9 +1060,9 @@ pub(super) fn begin_internal_define_own_property(
             {
                 Ok(NativeDispatch::Immediate(StoredValue::Boolean(false)))
             }
-            PropertyDefinitionOutcome::Failed(_) => {
-                proxy_abrupt(realm, origin, "property definition was rejected")
-            }
+            PropertyDefinitionOutcome::Failed(failure) => Err(NativeFailure::Abrupt(
+                property_exception_at(realm, origin, property_key_name(&key).as_ref(), failure)?,
+            )),
         };
     };
     let (Some(target), Some(handler)) = (proxy_state.target, proxy_state.handler) else {

@@ -439,6 +439,7 @@ impl Runtime {
     pub(crate) fn preview_array_define_data_property_work(
         &self,
         object: ObjectId,
+        key: &PropertyKey,
     ) -> Result<u64, crate::ExecutionError> {
         let object = self
             .objects
@@ -448,11 +449,19 @@ impl Runtime {
                 index: object.index(),
                 generation: object.generation(),
             })?;
-        if object.array_state().is_none() {
-            return Err(crate::EngineFault::RuntimeInvariant {
+        let state = object
+            .array_state()
+            .ok_or(crate::EngineFault::RuntimeInvariant {
                 message: "array definition work preview received a non-array object",
-            }
-            .into());
+            })?;
+        // A dense index definition is the same amortized-constant store the
+        // data-path preview uses; charging the complete structural bound for
+        // it would make every sequential write (fill, push, index loops) pay
+        // for the whole array again.
+        if let Some(index) = key.as_index()
+            && let Some(work) = state.dense_store_work(index)
+        {
+            return Ok(work);
         }
         Ok(usize_to_u64(object.property_count())
             .saturating_mul(4)
@@ -626,21 +635,23 @@ impl Runtime {
         else {
             return Ok(false);
         };
-        if !self
-            .objects
-            .get(object)
-            .and_then(HeapObject::array_state)
-            .is_some_and(|state| state.can_store_dense(index))
-        {
+        let Some(node) = self.objects.get(object) else {
+            return Ok(false);
+        };
+        let Some(state) = node.array_state() else {
+            return Ok(false);
+        };
+        let restorable = !state.can_store_dense(index)
+            && state.is_sparse()
+            && !node.record.has_indexed_property();
+        if !state.can_store_dense(index) && !restorable {
             return Ok(false);
         }
         let created = self
             .objects
             .get_mut(object)
             .expect("live array remains present")
-            .array_state_mut()
-            .expect("array state remains present")
-            .try_store_dense(index, value)
+            .try_restore_dense_and_store(index, value)
             .map_err(|_| crate::ExecutionError::AllocationFailed {
                 resource: RuntimeResource::ObjectProperties,
                 additional: 1,

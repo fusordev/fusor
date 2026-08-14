@@ -7,7 +7,7 @@ runtime, and fixtures run in deterministic path order.
 Build the pinned upstream release outside this repository, then run:
 
 ```console
-cargo build -p fusor-cli
+cargo build -p fusor
 cargo xtask differential \
   --oracle /path/to/quickjs-2026-06-04/qjs \
   --candidate target/debug/fusor
@@ -16,9 +16,9 @@ cargo xtask differential \
 The oracle is optional development input and is never linked or copied
 into the Rust artifacts.
 
-## `fusor` (crates/fusor-cli)
+## `fusor` (crates/fusor, bin target)
 
-`cargo build -p fusor-cli` produces `target/debug/fusor`:
+`cargo build -p fusor` produces `target/debug/fusor`:
 
 ```console
 target/debug/fusor run file.mjs    # evaluate file.mjs as an ES module
@@ -29,10 +29,10 @@ target/debug/fusor repl            # start the ESM REPL
 
 `fusor <file>` exits 0 on success, 1 on a JavaScript or pipeline error
 (message printed to stderr), and 2 on usage or file IO errors. Arguments
-after `<file>` are exposed through `node:process` `argv`. `print` is not
-available yet: the facade exposes no host-function installation point, so
-JavaScript cannot write to stdout (this blocks `xtask differential`
-fixtures until the facade grows that surface).
+after `<file>` are exposed through `node:process` `argv`. `print` writes
+to stdout through the CLI overlay's init shim (`fusor:cli`, delegating to
+`Fusor.ops.op_core_print` — no host-installed global), so `xtask
+differential` fixtures keep their bare `print` spelling.
 
 ### Module resolution (host sugar, non-normative)
 

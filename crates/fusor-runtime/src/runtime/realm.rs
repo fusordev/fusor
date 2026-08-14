@@ -577,10 +577,15 @@ impl Runtime {
     )]
     pub fn create_realm(&mut self) -> Result<Realm, RuntimeError> {
         self.drain_releases();
+        // Capture the arena segment this realm's intrinsic graph will
+        // occupy (snapshot §8.2): snapshotting skips these records and
+        // restore replays `create_realm` to rebuild them deterministically.
+        let objects_start = self.objects.len();
+        let functions_start = self.functions.len();
         let intrinsic_schema = RealmIntrinsicSchema::try_new()?;
-        intrinsic_schema
-            .validate()
-            .expect("the immutable complete Realm schema is valid");
+        intrinsic_schema.validate().map_err(|error| {
+            RuntimeError::SchemaValidation(format!("realm intrinsic schema: {error:?}"))
+        })?;
         let atom_plan = RealmAtomPlan::try_new(&intrinsic_schema)?;
         let reservation = RealmReservationPlan::try_new(&atom_plan, &intrinsic_schema)?;
         reservation.preflight_and_reserve(self)?;
@@ -613,10 +618,19 @@ impl Runtime {
             .expect("committed Realm remains live")
             .math_random_state = math_random_seed;
         transaction.object_properties += reservation.object_properties();
-        Ok(Realm(Arc::new(RealmHandle {
-            owner: Arc::downgrade(&transaction.mailbox),
-            id,
-        })))
+        let mailbox = Arc::downgrade(&transaction.mailbox);
+        drop(transaction);
+        // The realm's arena segment boundaries record what the
+        // deterministic snapshot rebuild must reproduce (§8.2).
+        let state = self
+            .realms
+            .get_mut(id)
+            .expect("committed Realm remains live");
+        state.snapshot_segment = super::RealmSnapshotSegment {
+            objects: (objects_start, self.objects.len()),
+            functions: (functions_start, self.functions.len()),
+        };
+        Ok(Realm(Arc::new(RealmHandle { owner: mailbox, id })))
     }
 
     /// Advances the realm-local xorshift64* stream and maps its high 52 bits

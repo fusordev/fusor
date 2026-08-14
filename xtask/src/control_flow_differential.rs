@@ -7,9 +7,7 @@ use crate::{
 use fusor::{
     DynamicFunctionLimits, call_with_dynamic_function_support, construct_dynamic_function,
 };
-use fusor_frontend::{
-    DynamicFunctionKind, DynamicFunctionSource, FrontendLimits, SourceFragment,
-};
+use fusor_frontend::{DynamicFunctionKind, DynamicFunctionSource, FrontendLimits, SourceFragment};
 use fusor_runtime::{
     ExceptionKind, ExecutionError, ExecutionLimits, JsString, JsValue, Runtime, RuntimeLimits,
     ValueKind,

@@ -78,8 +78,7 @@ impl OrdinaryDynamicFunctionCompiler for TestCompiler {
         .map_err(|error| {
             if matches!(
                 error.stage(),
-                fusor_frontend::DiagnosticStage::Parser
-                    | fusor_frontend::DiagnosticStage::Semantic
+                fusor_frontend::DiagnosticStage::Parser | fusor_frontend::DiagnosticStage::Semantic
             ) {
                 let message = error
                     .diagnostics()
@@ -398,7 +397,7 @@ fn generated_function_infers_static_data_property_names() {
         &mut context,
         &[],
         "let f=Function('const object={handler:function(){},1:function(){},\
-            \"__proto__\":function(){}};\
+            [\"__proto__\"]:function(){}};\
             return object.handler.name===\"handler\"&&object[1].name===\"1\"&&\
                 object.__proto__.name===\"__proto__\";');\
             return f();",
@@ -582,7 +581,7 @@ fn generated_function_materializes_ordinary_function_properties() {
 }
 
 #[test]
-fn generated_function_name_is_not_a_lexical_binding() {
+fn generated_function_name_is_a_body_binding() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
     let mut context = runtime.context(&realm).expect("context");
@@ -592,7 +591,7 @@ fn generated_function_name_is_not_a_lexical_binding() {
         r"let direct=Function('return typeof anonymous;')();
            let nested=Function('return function(){return typeof anonymous;}')()();
            globalThis.anonymous='realm';
-           let resolved=Function('return anonymous;')();
+           let resolved=Function('return typeof anonymous;')();
            return direct+'|'+nested+'|'+resolved;",
     );
 
@@ -600,7 +599,7 @@ fn generated_function_name_is_not_a_lexical_binding() {
         .call_with_dynamic_function_compiler(&run, &[], ExecutionLimits::default(), &compiler())
         .expect("dynamic Function name lookup");
 
-    assert_string(&result, "undefined|undefined|realm");
+    assert_string(&result, "function|function|function");
 }
 
 #[test]

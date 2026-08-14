@@ -11,14 +11,14 @@ use super::super::{
     plan_put_slot, unsupported,
 };
 
+use fusor_bytecode::BranchKind;
+use fusor_frontend::Span;
 use oxc_ast::ast::{
     BlockStatement, Declaration, Directive, ExportDefaultDeclaration, ExportDefaultDeclarationKind,
     ExportNamedDeclaration, Expression, ForStatementLeft, Statement, SwitchStatement,
     VariableDeclaration,
 };
 use oxc_semantic::{NodeId, ScopeId};
-use fusor_bytecode::BranchKind;
-use fusor_frontend::Span;
 
 use crate::lowering::{CompilerLabel, LocalSlot, PlannedInstruction};
 
@@ -812,7 +812,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 }
                 // Anonymous default function: hoisted through the synthetic
                 // `*default*` cell's function-initializer prefix.
-                return Ok(());
+                Ok(())
             }
             ExportDefaultDeclarationKind::ClassDeclaration(class) => {
                 if class.id.is_some() {

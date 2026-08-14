@@ -9645,12 +9645,8 @@ fn final_authority_requires_tree_owned_templates() {
                     UnverifiedCompilerFunction::new(
                         root_flow,
                         Arc::from([
-                            fusor_bytecode::CompilerConstant::Function(FunctionTemplateId::new(
-                                1,
-                            )),
-                            fusor_bytecode::CompilerConstant::Function(FunctionTemplateId::new(
-                                1,
-                            )),
+                            fusor_bytecode::CompilerConstant::Function(FunctionTemplateId::new(1)),
+                            fusor_bytecode::CompilerConstant::Function(FunctionTemplateId::new(1)),
                         ]),
                         Arc::from([]),
                     )

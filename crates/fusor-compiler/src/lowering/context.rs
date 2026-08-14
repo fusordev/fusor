@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
-use oxc_ast::AstKind;
 use fusor_bytecode::{
     BytecodeGraphVerificationLimits, FunctionGraphVerificationLimits, VerificationLimits,
 };
 use fusor_frontend::{ParsedUnit, Span};
+use oxc_ast::AstKind;
 
 use crate::storage::{
     CompilerError, Executable, ExecutableId, PlannedStorage, StoragePlan, build_planned_storage,

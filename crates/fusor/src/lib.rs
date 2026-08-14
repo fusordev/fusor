@@ -421,11 +421,9 @@ fn planning_diagnostic(
             Some(*span),
             Some("the syntax parsed successfully but its runtime semantics are not admitted yet"),
         ),
-        CompilerError::SemanticInvariant { span, .. } => (
-            "fusor::compiler::planning::semantic_invariant",
-            *span,
-            None,
-        ),
+        CompilerError::SemanticInvariant { span, .. } => {
+            ("fusor::compiler::planning::semantic_invariant", *span, None)
+        }
         CompilerError::CapacityExceeded { .. } => {
             ("fusor::compiler::planning::capacity_exceeded", None, None)
         }
@@ -467,12 +465,8 @@ fn lowering_code(error: &LeafCompilationError) -> &'static str {
         LeafCompilationError::CookedStringDecoding { .. } => {
             "fusor::compiler::lowering::cooked_string"
         }
-        LeafCompilationError::CompilerString { .. } => {
-            "fusor::compiler::lowering::compiler_string"
-        }
-        LeafCompilationError::CompilerBigInt { .. } => {
-            "fusor::compiler::lowering::compiler_bigint"
-        }
+        LeafCompilationError::CompilerString { .. } => "fusor::compiler::lowering::compiler_string",
+        LeafCompilationError::CompilerBigInt { .. } => "fusor::compiler::lowering::compiler_bigint",
         LeafCompilationError::CompilerTemplateObject { .. } => {
             "fusor::compiler::lowering::template_object"
         }
@@ -1071,9 +1065,7 @@ fn decode_request_specifier(request: &fusor_frontend::StaticModuleRequest) -> St
 ///
 /// An absent clause or an unrecognized `type` falls back to JavaScript; the
 /// unrecognized case is rejected later by [`compile_module_source`].
-fn request_module_kind(
-    attributes: Option<&fusor_frontend::ImportAttributes>,
-) -> ModuleSourceKind {
+fn request_module_kind(attributes: Option<&fusor_frontend::ImportAttributes>) -> ModuleSourceKind {
     let Some(attributes) = attributes else {
         return ModuleSourceKind::JavaScript;
     };
@@ -1331,18 +1323,19 @@ pub fn evaluate_preloaded_module_graph(
     let root_key = fusor_runtime::ModuleKey::new(Arc::from(root_name));
     let root_compiled = compile_module_source(root_source, root_name, limits, root_key.clone())?;
 
-    // Register root
-    context.register_module(
-        root_compiled.key.clone(),
-        root_compiled.syntax_record.clone(),
-        root_compiled.authority.clone(),
-    )?;
+    // Register root. A module record is evaluated at most once per realm
+    // (ECMA-262 [[Evaluation]]): a pre-registered root reuses its existing
+    // record instead of shadowing it.
+    if !context.has_module(&root_compiled.key) {
+        context.register_module(
+            root_compiled.key.clone(),
+            root_compiled.syntax_record.clone(),
+            root_compiled.authority.clone(),
+        )?;
+    }
 
     // BFS: register every preloaded dependency
-    let mut queue: Vec<(
-        fusor_runtime::ModuleKey,
-        fusor_frontend::ModuleSyntaxRecord,
-    )> = vec![(
+    let mut queue: Vec<(fusor_runtime::ModuleKey, fusor_frontend::ModuleSyntaxRecord)> = vec![(
         root_compiled.key.clone(),
         root_compiled.syntax_record.clone(),
     )];
@@ -1372,11 +1365,13 @@ pub fn evaluate_preloaded_module_graph(
             let compiled =
                 compile_module_source(&source, &loaded.display_name, limits, key.clone())
                     .map_err(resolution_failure)?;
-            context.register_module(
-                compiled.key.clone(),
-                compiled.syntax_record.clone(),
-                compiled.authority.clone(),
-            )?;
+            if !context.has_module(&key) {
+                context.register_module(
+                    compiled.key.clone(),
+                    compiled.syntax_record.clone(),
+                    compiled.authority.clone(),
+                )?;
+            }
             // HostResolveImportedModule: record the (referrer, specifier)
             // edge now that both records are registered.
             context.register_module_dependency(&referrer_key, &specifier, &key)?;
@@ -1401,7 +1396,7 @@ pub fn evaluate_preloaded_module_graph(
     Ok(context.undefined_value())
 }
 
-/// Returns the recorded evaluation error (ECMA-262 [[EvaluationError]]) of
+/// Returns the recorded evaluation error (ECMA-262 [[`EvaluationError`]]) of
 /// the module registered under `root_name` in `context`'s realm, if its
 /// evaluation failed.
 ///
@@ -1463,10 +1458,7 @@ fn gather_dynamic_import_graph(
     }
 
     // BFS: gather all dependencies, as in `evaluate_module`.
-    let mut queue: Vec<(
-        fusor_runtime::ModuleKey,
-        fusor_frontend::ModuleSyntaxRecord,
-    )> = vec![(
+    let mut queue: Vec<(fusor_runtime::ModuleKey, fusor_frontend::ModuleSyntaxRecord)> = vec![(
         root_compiled.key.clone(),
         root_compiled.syntax_record.clone(),
     )];
@@ -1489,11 +1481,13 @@ fn gather_dynamic_import_graph(
             let compiled =
                 compile_module_source(&source, &loaded.display_name, limits, key.clone())
                     .map_err(resolution_failure)?;
-            context.register_module(
-                compiled.key.clone(),
-                compiled.syntax_record.clone(),
-                compiled.authority.clone(),
-            )?;
+            if !context.has_module(&key) {
+                context.register_module(
+                    compiled.key.clone(),
+                    compiled.syntax_record.clone(),
+                    compiled.authority.clone(),
+                )?;
+            }
             // HostResolveImportedModule: record the (referrer, specifier)
             // edge now that both records are registered.
             context.register_module_dependency(&referrer_key, &specifier, &key)?;
@@ -1605,7 +1599,7 @@ pub fn settle_dynamic_import(
         // `SyntaxError` (resolution phase); a host load or resolution miss
         // rejects with a `TypeError` (ECMA-262 FinishDynamicImport onRejected).
         Err(error) if is_syntax_resolution_failure(&error) => {
-            context.reject_dynamic_import_syntax(import, &error.to_string())?
+            context.reject_dynamic_import_syntax(import, &error.to_string())?;
         }
         Err(error) => context.reject_dynamic_import(import, &error.to_string())?,
     }

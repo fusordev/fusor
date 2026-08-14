@@ -91,12 +91,42 @@ impl WeakKey {
             Self::Function(_) | Self::Object(_) => None,
         }
     }
+
+    /// Converts the weak identity back into a stored value when the referent
+    /// is still reachable; dead referents return `None`. Heap referents are
+    /// returned by arena ID without a liveness check — the caller decides
+    /// whether the ID still names a live object.
+    pub(crate) fn stored_value(&self) -> Option<StoredValue> {
+        match self {
+            Self::Symbol(symbol) => symbol.upgrade().map(StoredValue::Symbol),
+            Self::Function(function) => Some(StoredValue::Function(*function)),
+            Self::Object(object) => Some(StoredValue::Object(*object)),
+        }
+    }
 }
 
 #[derive(Clone, Eq, Hash, PartialEq)]
-struct ShapeProperty {
+pub(crate) struct ShapeProperty {
     key: PropertyKey,
     layout: PropertyLayout,
+}
+
+impl ShapeProperty {
+    /// The property key (the snapshot serializer's shape content, §8.2).
+    pub(crate) const fn key(&self) -> &PropertyKey {
+        &self.key
+    }
+
+    /// The property layout (the snapshot serializer's shape content).
+    pub(crate) const fn layout(&self) -> &PropertyLayout {
+        &self.layout
+    }
+
+    /// Rebuilds a shape property from snapshot parts (the restore path,
+    /// §8.3).
+    pub(crate) const fn from_parts(key: PropertyKey, layout: PropertyLayout) -> Self {
+        Self { key, layout }
+    }
 }
 
 #[derive(Clone, Eq, Hash, PartialEq)]
@@ -1052,6 +1082,16 @@ impl MapEntry {
     pub(crate) const fn is_live(&self) -> bool {
         self.live
     }
+
+    /// Snapshot-restore constructor (§8.2): a live entry with its
+    /// recorded key and value.
+    pub(crate) const fn live(key: StoredValue, value: StoredValue) -> Self {
+        Self {
+            key,
+            value,
+            live: true,
+        }
+    }
 }
 
 /// Ordered `[[MapData]]` plus an average-sublinear `SameValueZero` index.
@@ -1078,6 +1118,25 @@ impl MapState {
         }
     }
 
+    /// Rebuilds the ordered entry vector and its lookup index from
+    /// snapshot-restored live entries (§8.2): tombstones never survive a
+    /// snapshot, so every restored entry is live and the index rebuilds
+    /// by position.
+    pub(crate) fn restored(entries: Vec<MapEntry>) -> Self {
+        let live = entries.iter().filter(|entry| entry.is_live()).count();
+        let mut index = HashMap::new();
+        for (position, entry) in entries.iter().enumerate() {
+            if entry.is_live() {
+                index.insert(MapKey::from_value(&entry.key), position);
+            }
+        }
+        Self {
+            entries,
+            index,
+            live,
+        }
+    }
+
     pub(crate) const fn len(&self) -> usize {
         self.live
     }
@@ -1094,6 +1153,15 @@ impl MapState {
         self.entries
             .iter()
             .flat_map(|entry| [&entry.key, &entry.value])
+    }
+
+    /// Iterates the live `(key, value)` pairs in insertion order, skipping
+    /// deleted tombstones.
+    pub(crate) fn live_entries(&self) -> impl Iterator<Item = (&StoredValue, &StoredValue)> {
+        self.entries
+            .iter()
+            .filter(|entry| entry.live)
+            .map(|entry| (entry.key(), entry.value()))
     }
 
     pub(crate) fn get(&self, key: &StoredValue) -> Option<&StoredValue> {
@@ -1180,6 +1248,19 @@ pub(crate) struct SetState {
 }
 
 impl SetState {
+    /// The underlying map state (snapshot access to the ordered
+    /// `[[SetData]]` entries).
+    pub(crate) const fn map_state(&self) -> &MapState {
+        &self.data
+    }
+
+    /// Rebuilds a set from snapshot-restored live entries (§8.2).
+    pub(crate) fn restored(entries: Vec<MapEntry>) -> Self {
+        Self {
+            data: MapState::restored(entries),
+        }
+    }
+
     pub(crate) fn empty() -> Self {
         Self {
             data: MapState::empty(),
@@ -1306,6 +1387,12 @@ impl WeakMapState {
 /// Non-enumerable `[[WeakSetData]]` indexed by non-owning language identities.
 pub(crate) struct WeakSetState {
     entries: HashSet<WeakKey>,
+}
+
+impl WeakSetState {
+    pub(crate) fn entries(&self) -> impl Iterator<Item = &WeakKey> {
+        self.entries.iter()
+    }
 }
 
 /// The non-owning `[[WeakRefTarget]]` slot of one `WeakRef` instance.
@@ -1687,7 +1774,7 @@ impl ForInIterator {
     }
 }
 
-enum PropertySlot {
+pub(crate) enum PropertySlot {
     Data(StoredValue),
     Accessor {
         getter: Option<FunctionId>,
@@ -1756,6 +1843,38 @@ pub(crate) struct ObjectRecord {
     shape: Arc<Vec<ShapeProperty>>,
     shape_interner: Option<Rc<RefCell<ShapeInterner>>>,
     slots: Vec<PropertySlot>,
+}
+
+impl ObjectRecord {
+    /// The canonical property shape (the snapshot serializer's content).
+    pub(crate) fn shape(&self) -> &Arc<Vec<ShapeProperty>> {
+        &self.shape
+    }
+
+    /// The property slots, aligned with the shape (the snapshot
+    /// serializer's content).
+    pub(crate) fn slots(&self) -> &[PropertySlot] {
+        &self.slots
+    }
+
+    /// Rebuilds a record from snapshot parts (the restore path, §8.3).
+    pub(crate) fn from_parts(
+        prototype: Option<HeapReference>,
+        extensible: bool,
+        is_html_dda: bool,
+        shape: Arc<Vec<ShapeProperty>>,
+        shape_interner: Option<Rc<RefCell<ShapeInterner>>>,
+        slots: Vec<PropertySlot>,
+    ) -> Self {
+        Self {
+            prototype,
+            extensible,
+            is_html_dda,
+            shape,
+            shape_interner,
+            slots,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2461,7 +2580,7 @@ impl BoxedPrimitive {
 const MAX_DENSE_ARRAY_GAP: usize = 1_024;
 
 #[derive(Debug)]
-enum ArrayStorage {
+pub(crate) enum ArrayStorage {
     Dense {
         elements: Vec<Option<StoredValue>>,
         present: usize,
@@ -2471,8 +2590,8 @@ enum ArrayStorage {
 
 #[derive(Debug)]
 pub(crate) struct ArrayState {
-    length: u32,
-    storage: ArrayStorage,
+    pub(crate) length: u32,
+    pub(crate) storage: ArrayStorage,
 }
 
 impl ArrayState {
@@ -2515,6 +2634,10 @@ impl ArrayState {
 
     pub(crate) const fn is_dense(&self) -> bool {
         matches!(self.storage, ArrayStorage::Dense { .. })
+    }
+
+    pub(crate) const fn is_sparse(&self) -> bool {
+        matches!(self.storage, ArrayStorage::Sparse)
     }
 
     pub(crate) const fn dense_property_count(&self) -> usize {
@@ -2563,6 +2686,32 @@ impl ArrayState {
             return false;
         };
         (index.get() as usize) <= elements.len().saturating_add(MAX_DENSE_ARRAY_GAP)
+    }
+
+    /// Restores dense storage for a Sparse Array receiving its first early
+    /// default-data write.
+    ///
+    /// The caller must verify that the ordinary property record owns no
+    /// indexed shape slots first, so the two storages can never disagree
+    /// about the same index. A fresh `Array(n)` (sparse by construction)
+    /// writes its early indices densely, which keeps sequential `fill`,
+    /// `push`, and loop writes linear.
+    pub(crate) fn try_restore_dense(&mut self, index: ArrayIndex) -> Result<bool, TryReserveError> {
+        if !matches!(self.storage, ArrayStorage::Sparse) {
+            return Ok(false);
+        }
+        let capacity = index.get() as usize + 1;
+        if capacity > MAX_DENSE_ARRAY_GAP {
+            return Ok(false);
+        }
+        let mut elements = Vec::new();
+        elements.try_reserve_exact(capacity)?;
+        elements.resize_with(capacity, || None);
+        self.storage = ArrayStorage::Dense {
+            elements,
+            present: 0,
+        };
+        Ok(true)
     }
 
     /// Returns a conservative upper bound for one default-data write to this
@@ -2670,6 +2819,12 @@ impl ArgumentsState {
 
     pub(crate) fn cells(&self) -> impl Iterator<Item = BindingCellId> + '_ {
         self.parameter_map.iter().copied().flatten()
+    }
+
+    /// The raw `[[ParameterMap]]` (snapshot access: `None` entries mark
+    /// unmapped parameters).
+    pub(crate) fn parameter_map(&self) -> &[Option<BindingCellId>] {
+        &self.parameter_map
     }
 
     pub(crate) fn detach(&mut self, index: u32) -> Option<BindingCellId> {
@@ -2834,6 +2989,25 @@ impl TypedArrayElementType {
             Self::Int16 | Self::Uint16 | Self::Float16 => 2,
             Self::Int32 | Self::Uint32 | Self::Float32 => 4,
             Self::BigInt64 | Self::BigUint64 | Self::Float64 => 8,
+        }
+    }
+
+    /// The ECMAScript constructor name of the typed-array family.
+    #[must_use]
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Int8 => "Int8Array",
+            Self::Uint8 => "Uint8Array",
+            Self::Uint8Clamped => "Uint8ClampedArray",
+            Self::Int16 => "Int16Array",
+            Self::Uint16 => "Uint16Array",
+            Self::Int32 => "Int32Array",
+            Self::Uint32 => "Uint32Array",
+            Self::BigInt64 => "BigInt64Array",
+            Self::BigUint64 => "BigUint64Array",
+            Self::Float16 => "Float16Array",
+            Self::Float32 => "Float32Array",
+            Self::Float64 => "Float64Array",
         }
     }
 
@@ -3038,6 +3212,18 @@ impl ArrayBufferState {
     #[must_use]
     pub(crate) const fn resizable_max_byte_length(&self) -> Option<usize> {
         self.max_byte_length
+    }
+
+    /// Copies up to `limit` live bytes for host inspection. Detached buffers
+    /// have no data and return an empty copy.
+    pub(crate) fn copy_bytes(&self, limit: usize) -> Vec<u8> {
+        match &self.data {
+            Some(ArrayBufferData::Local(data)) => data.iter().take(limit).copied().collect(),
+            Some(ArrayBufferData::Shared(block)) => {
+                block.with_bytes(|bytes| bytes.iter().take(limit).copied().collect::<Vec<_>>())
+            }
+            None => Vec::new(),
+        }
     }
 
     pub(crate) fn replace_data(&mut self, data: Vec<u8>) -> Option<Vec<u8>> {
@@ -3310,7 +3496,7 @@ pub(crate) enum PromiseReactionTarget {
         module: crate::ids::ModuleRecordId,
     },
     /// One of the async-dependency capability promises of an `import.defer()`
-    /// (SafePerformPromiseAll element reaction).
+    /// (`SafePerformPromiseAll` element reaction).
     ImportDeferDeps {
         promise: ObjectId,
         module: crate::ids::ModuleRecordId,
@@ -3975,6 +4161,17 @@ pub(crate) struct HeapObject {
 }
 
 impl HeapObject {
+    /// Rebuilds one snapshot-restored object from its recorded kind
+    /// state and resolved record (§8.2).
+    #[must_use]
+    pub(crate) const fn restored(record: ObjectRecord, kind: HeapObjectKind) -> Self {
+        Self {
+            kind,
+            record,
+            public_roots: 0,
+        }
+    }
+
     #[must_use]
     pub(crate) const fn ordinary(record: ObjectRecord) -> Self {
         Self {
@@ -4950,6 +5147,35 @@ impl HeapObject {
     #[must_use]
     pub(crate) const fn array_state_mut(&mut self) -> Option<&mut ArrayState> {
         self.kind.array_mut()
+    }
+
+    /// Stores one default data value at a dense index, restoring dense
+    /// storage for a fresh Sparse Array first when the caller verified that
+    /// the ordinary record owns no indexed shape slots.
+    pub(crate) fn try_restore_dense_and_store(
+        &mut self,
+        index: ArrayIndex,
+        value: StoredValue,
+    ) -> Result<bool, TryReserveError> {
+        let needs_restore = self
+            .array_state()
+            .is_some_and(|state| !state.can_store_dense(index));
+        if needs_restore {
+            debug_assert!(
+                !self.record.has_indexed_property(),
+                "dense restoration must not shadow indexed shape slots"
+            );
+            let state = self
+                .array_state_mut()
+                .expect("dense array write received an array state");
+            if !state.try_restore_dense(index)? {
+                return Ok(false);
+            }
+        }
+        let state = self
+            .array_state_mut()
+            .expect("dense array write received an array state");
+        state.try_store_dense(index, value)
     }
 
     pub(crate) fn property_count(&self) -> usize {

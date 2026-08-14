@@ -120,12 +120,15 @@ fn compiles_the_complete_ordinary_dynamic_function_wrapper() {
         .expect("verified wrapper")
         .metadata();
     assert!(wrapper_metadata.function_name().is_some());
-    assert!(
-        wrapper_metadata
-            .variables()
-            .iter()
-            .all(|definition| definition.policy().kind() != CompilerBindingKind::FunctionName)
-    );
+    // ES2018+ `CreateDynamicFunction` (ECMA-262 20.2.1.1.1) always binds the
+    // wrapper's synthetic `anonymous` name as a FunctionName local, whether
+    // or not the body references it.
+    let name_bindings = wrapper_metadata
+        .variables()
+        .iter()
+        .filter(|definition| definition.policy().kind() == CompilerBindingKind::FunctionName)
+        .count();
+    assert_eq!(name_bindings, 1);
 }
 
 #[test]
@@ -191,19 +194,25 @@ fn do_while_resets_script_completion_on_every_iteration() {
     )
     .expect("escaped wrapper with a do-while statement");
     let flow = tree.root().control_flow();
+    // A constant-true `while (true)` condition folds the conditional back
+    // edge into a plain goto; both spellings re-enter the loop at the same
+    // reset boundary. The target must precede the branch itself.
     let back_edge = flow
         .instructions()
         .iter()
-        .find(|instruction| {
-            matches!(
-                instruction.decoded().instruction().opcode(),
-                FinalOpcode::IfTrue | FinalOpcode::IfTrue8
-            )
+        .enumerate()
+        .find_map(|(index, instruction)| {
+            let target = instruction
+                .successors()
+                .branch_target()
+                .or_else(|| instruction.successors().jump_target())?;
+            (target.get() < index as u32).then_some(instruction)
         })
         .expect("do-while back edge");
     let reset_target = back_edge
         .successors()
         .branch_target()
+        .or_else(|| back_edge.successors().jump_target())
         .expect("verified do-while iteration target");
     let reset = flow
         .instruction(reset_target)
@@ -225,24 +234,27 @@ fn do_while_resets_script_completion_on_every_iteration() {
 }
 
 #[test]
-fn dynamic_wrapper_name_reference_uses_the_constructor_realm() {
+fn dynamic_wrapper_name_reference_reads_the_local_name_binding() {
     let tree = compile_dynamic_function(&[], SourceFragment::new("return anonymous;"))
         .expect("dynamic Function wrapper");
     let root = tree.root();
     let wrapper = &tree.functions()[1];
 
-    assert_eq!(root.realm_globals().len(), 1);
-    assert_eq!(root.realm_globals()[0].name(), "anonymous");
-    assert_eq!(
-        root.realm_globals()[0].source(),
-        CompiledRealmGlobalSource::ConstructorRealm
-    );
-    assert_eq!(wrapper.realm_globals().len(), 1);
-    assert_eq!(wrapper.realm_globals()[0].name(), "anonymous");
-    assert_eq!(
-        wrapper.realm_globals()[0].source(),
-        CompiledRealmGlobalSource::ParentClosure(0)
-    );
+    // ES2018+ `CreateDynamicFunction` (ECMA-262 20.2.1.1.1): the body's
+    // `anonymous` reference resolves to the wrapper's own FunctionName local,
+    // never through the constructor realm's global object.
+    assert!(root.realm_globals().is_empty());
+    assert!(wrapper.realm_globals().is_empty());
+    let name_bindings = tree
+        .verified_bytecode()
+        .function(FunctionTemplateId::new(1))
+        .expect("verified wrapper")
+        .metadata()
+        .variables()
+        .iter()
+        .filter(|definition| definition.policy().kind() == CompilerBindingKind::FunctionName)
+        .count();
+    assert_eq!(name_bindings, 1);
     assert_eq!(
         wrapper
             .control_flow()
@@ -250,12 +262,12 @@ fn dynamic_wrapper_name_reference_uses_the_constructor_realm() {
             .iter()
             .map(|instruction| instruction.decoded().instruction().opcode())
             .collect::<Vec<_>>(),
-        [FinalOpcode::GetVar, FinalOpcode::Return]
+        [FinalOpcode::GetLoc0, FinalOpcode::Return]
     );
 }
 
 #[test]
-fn strict_dynamic_wrapper_still_has_no_lexical_self_binding() {
+fn strict_dynamic_wrapper_binds_its_anonymous_name_locally() {
     let tree = compile_dynamic_function(
         &[],
         SourceFragment::new("\"use strict\"; return typeof anonymous;"),
@@ -267,14 +279,18 @@ fn strict_dynamic_wrapper_still_has_no_lexical_self_binding() {
         .expect("verified wrapper");
 
     assert!(wrapper.metadata().function_name().is_some());
-    assert!(
-        wrapper
-            .metadata()
-            .variables()
-            .iter()
-            .all(|definition| definition.policy().kind() != CompilerBindingKind::FunctionName)
-    );
-    assert_eq!(tree.functions()[1].realm_globals()[0].name(), "anonymous");
+    // ES2018+ `CreateDynamicFunction` (ECMA-262 20.2.1.1.1): the strict body
+    // resolves its synthetic `anonymous` name to the wrapper function object
+    // itself through a FunctionName local, never through the constructor
+    // realm's global object.
+    let name_bindings = wrapper
+        .metadata()
+        .variables()
+        .iter()
+        .filter(|definition| definition.policy().kind() == CompilerBindingKind::FunctionName)
+        .count();
+    assert_eq!(name_bindings, 1);
+    assert!(tree.functions()[1].realm_globals().is_empty());
 }
 
 #[test]
@@ -327,10 +343,12 @@ fn unresolved_names_lower_through_constructor_realm_global_slots() {
                 CompilerClosureSource::ConstructorRealmGlobal(_)
             ))
     );
+    // Unresolved global writes lower through the reference-based mutation
+    // pair (make_var_ref_ref / put_ref_value) in the current encoding.
     assert!(
-        wrapper_opcodes
-            .iter()
-            .any(|(opcode, _)| *opcode == FinalOpcode::PutVar)
+        wrapper_opcodes.iter().any(|(opcode, _)| {
+            matches!(*opcode, FinalOpcode::PutVar | FinalOpcode::PutRefValue)
+        })
     );
     assert!(
         wrapper_opcodes
@@ -402,11 +420,9 @@ fn unresolved_global_mutation_forms_remain_whole_function_verified() {
             .expect("verified constructor-realm global mutation");
         let wrapper = &tree.functions()[1];
 
-        assert!(
-            opcodes(wrapper)
-                .iter()
-                .any(|(opcode, _)| *opcode == FinalOpcode::PutVar)
-        );
+        assert!(opcodes(wrapper).iter().any(|(opcode, _)| {
+            matches!(*opcode, FinalOpcode::PutVar | FinalOpcode::PutRefValue)
+        }));
     }
 }
 

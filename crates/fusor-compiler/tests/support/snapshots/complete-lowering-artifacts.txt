@@ -1,7 +1,7 @@
 tree representative
 root: ExecutableId(1)
 source: "function outer({seed = 1}, ...items) {let total = seed;const [head = 0, ...tail] = items;for (const value of tail) {try {if (value) { total += value; } else { continue; }} finally { total += 1; }}function inner(delta = head) { return total + delta; }return inner;}"
-function graph: root=FunctionTemplateId(0) depth=2 usage=FunctionGraphUsage { functions: 2, bytecode_bytes: 188, instructions: 100, constants: 1, atoms: 14, string_payload_bytes: 70, closure_variables: 2, closure_edge_evaluations: 2, transfer_evaluations: 98 }
+function graph: root=FunctionTemplateId(0) depth=2 usage=FunctionGraphUsage { functions: 2, bytecode_bytes: 184, instructions: 98, constants: 1, atoms: 14, string_payload_bytes: 70, closure_variables: 2, closure_edge_evaluations: 2, transfer_evaluations: 98 }
 execution requirements: [
     CoreValues,
     Numbers,
@@ -1093,31 +1093,13 @@ source instructions: [
             158,
         ),
         span: Span {
-            start: 115,
-            end: 196,
-        },
-    },
-    SourceInstruction {
-        pc: BytecodePc(
-            160,
-        ),
-        span: Span {
             start: 89,
             end: 196,
         },
     },
     SourceInstruction {
         pc: BytecodePc(
-            162,
-        ),
-        span: Span {
-            start: 89,
-            end: 196,
-        },
-    },
-    SourceInstruction {
-        pc: BytecodePc(
-            163,
+            159,
         ),
         span: Span {
             start: 257,
@@ -1126,7 +1108,7 @@ source instructions: [
     },
     SourceInstruction {
         pc: BytecodePc(
-            165,
+            161,
         ),
         span: Span {
             start: 250,
@@ -1134,7 +1116,7 @@ source instructions: [
         },
     },
 ]
-bytecode: [94, 0, 0, 94, 1, 0, 207, 111, 62, 0, 0, 0, 0, 17, 6, 169, 232, 3, 14, 180, 199, 14, 13, 1, 0, 200, 94, 4, 0, 94, 3, 0, 94, 2, 0, 94, 6, 0, 190, 0, 193, 6, 95, 0, 0, 201, 95, 1, 0, 123, 126, 0, 14, 17, 6, 169, 232, 3, 14, 179, 202, 38, 0, 0, 179, 126, 2, 232, 3, 234, 5, 78, 141, 234, 247, 14, 14, 193, 4, 130, 94, 5, 0, 95, 4, 0, 123, 94, 5, 0, 126, 0, 232, 4, 14, 234, 66, 193, 5, 107, 42, 0, 0, 0, 95, 5, 0, 232, 14, 95, 2, 0, 95, 5, 0, 155, 97, 2, 0, 14, 234, 11, 14, 6, 108, 23, 0, 0, 0, 14, 234, 212, 14, 6, 108, 13, 0, 0, 0, 14, 234, 202, 108, 5, 0, 0, 0, 48, 95, 2, 0, 180, 155, 97, 2, 0, 14, 109, 234, 184, 234, 182, 130, 192, 6, 40]
+bytecode: [95, 0, 0, 95, 1, 0, 208, 112, 63, 0, 0, 0, 0, 17, 6, 170, 233, 3, 14, 181, 200, 14, 13, 1, 0, 201, 95, 4, 0, 95, 3, 0, 95, 2, 0, 95, 6, 0, 191, 0, 194, 6, 96, 0, 0, 202, 96, 1, 0, 124, 127, 0, 14, 17, 6, 170, 233, 3, 14, 180, 203, 38, 0, 0, 180, 127, 2, 233, 3, 235, 5, 79, 142, 235, 247, 14, 14, 194, 4, 131, 95, 5, 0, 96, 4, 0, 124, 95, 5, 0, 127, 0, 233, 4, 14, 235, 62, 194, 5, 108, 42, 0, 0, 0, 96, 5, 0, 233, 14, 96, 2, 0, 96, 5, 0, 156, 98, 2, 0, 14, 235, 11, 14, 6, 109, 23, 0, 0, 0, 14, 235, 212, 14, 6, 109, 13, 0, 0, 0, 14, 235, 202, 109, 5, 0, 0, 0, 48, 96, 2, 0, 181, 156, 98, 2, 0, 14, 110, 131, 193, 6, 40]
 instructions: [
     VerifiedInstruction {
         decoded: DecodedInstruction {
@@ -2482,7 +2464,7 @@ instructions: [
             instruction: Instruction {
                 opcode: Goto8,
                 operands: Label8(
-                    66,
+                    62,
                 ),
             },
             next_pc: BytecodePc(
@@ -2495,7 +2477,7 @@ instructions: [
         successors: VerifiedSuccessors(
             Jump(
                 InstructionIndex(
-                    84,
+                    82,
                 ),
             ),
         ),
@@ -3215,59 +3197,11 @@ instructions: [
                 158,
             ),
             instruction: Instruction {
-                opcode: Goto8,
-                operands: Label8(
-                    -72,
-                ),
-            },
-            next_pc: BytecodePc(
-                160,
-            ),
-        },
-        entry_stack_depth: None,
-        successors: VerifiedSuccessors(
-            Jump(
-                InstructionIndex(
-                    49,
-                ),
-            ),
-        ),
-    },
-    VerifiedInstruction {
-        decoded: DecodedInstruction {
-            pc: BytecodePc(
-                160,
-            ),
-            instruction: Instruction {
-                opcode: Goto8,
-                operands: Label8(
-                    -74,
-                ),
-            },
-            next_pc: BytecodePc(
-                162,
-            ),
-        },
-        entry_stack_depth: None,
-        successors: VerifiedSuccessors(
-            Jump(
-                InstructionIndex(
-                    49,
-                ),
-            ),
-        ),
-    },
-    VerifiedInstruction {
-        decoded: DecodedInstruction {
-            pc: BytecodePc(
-                162,
-            ),
-            instruction: Instruction {
                 opcode: IteratorClose,
                 operands: None,
             },
             next_pc: BytecodePc(
-                163,
+                159,
             ),
         },
         entry_stack_depth: Some(
@@ -3276,7 +3210,7 @@ instructions: [
         successors: VerifiedSuccessors(
             Fallthrough(
                 InstructionIndex(
-                    85,
+                    83,
                 ),
             ),
         ),
@@ -3284,7 +3218,7 @@ instructions: [
     VerifiedInstruction {
         decoded: DecodedInstruction {
             pc: BytecodePc(
-                163,
+                159,
             ),
             instruction: Instruction {
                 opcode: GetLoc8,
@@ -3293,7 +3227,7 @@ instructions: [
                 ),
             },
             next_pc: BytecodePc(
-                165,
+                161,
             ),
         },
         entry_stack_depth: Some(
@@ -3302,7 +3236,7 @@ instructions: [
         successors: VerifiedSuccessors(
             Fallthrough(
                 InstructionIndex(
-                    86,
+                    84,
                 ),
             ),
         ),
@@ -3310,14 +3244,14 @@ instructions: [
     VerifiedInstruction {
         decoded: DecodedInstruction {
             pc: BytecodePc(
-                165,
+                161,
             ),
             instruction: Instruction {
                 opcode: Return,
                 operands: None,
             },
             next_pc: BytecodePc(
-                166,
+                162,
             ),
         },
         entry_stack_depth: Some(
@@ -4258,31 +4192,13 @@ metadata source: display="characterization.js" function="function outer({seed = 
             158,
         ),
         span: SourceByteSpan {
-            start: 115,
-            end: 196,
-        },
-    },
-    PcSourceSpan {
-        pc: BytecodePc(
-            160,
-        ),
-        span: SourceByteSpan {
             start: 89,
             end: 196,
         },
     },
     PcSourceSpan {
         pc: BytecodePc(
-            162,
-        ),
-        span: SourceByteSpan {
-            start: 89,
-            end: 196,
-        },
-    },
-    PcSourceSpan {
-        pc: BytecodePc(
-            163,
+            159,
         ),
         span: SourceByteSpan {
             start: 257,
@@ -4291,7 +4207,7 @@ metadata source: display="characterization.js" function="function outer({seed = 
     },
     PcSourceSpan {
         pc: BytecodePc(
-            165,
+            161,
         ),
         span: SourceByteSpan {
             start: 250,
@@ -4353,7 +4269,7 @@ pc=0x00000057 opcode=set_loc_uninitialized operands=loc(index=5) stack={pops=0,p
 pc=0x0000005a opcode=for_of_next operands=u8(0) stack={pops=3,pushes=5}
 pc=0x0000005c opcode=if_false8 operands=label8(displacement=+4) stack={pops=1,pushes=0}
 pc=0x0000005e opcode=drop operands=none stack={pops=1,pushes=0}
-pc=0x0000005f opcode=goto8 operands=label8(displacement=+66) stack={pops=0,pushes=0}
+pc=0x0000005f opcode=goto8 operands=label8(displacement=+62) stack={pops=0,pushes=0}
 pc=0x00000061 opcode=put_loc8 operands=loc8(index=5) stack={pops=1,pushes=0}
 pc=0x00000063 opcode=catch operands=label(displacement=+42) stack={pops=0,pushes=1}
 pc=0x00000068 opcode=get_loc_check operands=loc(index=5) stack={pops=0,pushes=1}
@@ -4382,11 +4298,9 @@ pc=0x00000098 opcode=add operands=none stack={pops=2,pushes=1}
 pc=0x00000099 opcode=set_loc_check operands=loc(index=2) stack={pops=1,pushes=1}
 pc=0x0000009c opcode=drop operands=none stack={pops=1,pushes=0}
 pc=0x0000009d opcode=ret operands=none stack={pops=1,pushes=0}
-pc=0x0000009e opcode=goto8 operands=label8(displacement=-72) stack={pops=0,pushes=0}
-pc=0x000000a0 opcode=goto8 operands=label8(displacement=-74) stack={pops=0,pushes=0}
-pc=0x000000a2 opcode=iterator_close operands=none stack={pops=3,pushes=0}
-pc=0x000000a3 opcode=get_loc8 operands=loc8(index=6) stack={pops=0,pushes=1}
-pc=0x000000a5 opcode=return operands=none stack={pops=1,pushes=0}
+pc=0x0000009e opcode=iterator_close operands=none stack={pops=3,pushes=0}
+pc=0x0000009f opcode=get_loc8 operands=loc8(index=6) stack={pops=0,pushes=1}
+pc=0x000000a1 opcode=return operands=none stack={pops=1,pushes=0}
 
 function 1
 executable: ExecutableId(2)
@@ -4713,7 +4627,7 @@ source instructions: [
         },
     },
 ]
-bytecode: [94, 0, 0, 207, 17, 6, 169, 232, 5, 14, 100, 1, 0, 199, 100, 0, 0, 95, 0, 0, 155, 40]
+bytecode: [95, 0, 0, 208, 17, 6, 170, 233, 5, 14, 101, 1, 0, 200, 101, 0, 0, 96, 0, 0, 156, 40]
 instructions: [
     VerifiedInstruction {
         decoded: DecodedInstruction {
@@ -5372,7 +5286,7 @@ source instructions: [
         },
     },
 ]
-bytecode: [190, 0, 199, 195, 40]
+bytecode: [191, 0, 200, 196, 40]
 instructions: [
     VerifiedInstruction {
         decoded: DecodedInstruction {
@@ -5961,7 +5875,7 @@ source instructions: [
         },
     },
 ]
-bytecode: [94, 1, 0, 94, 2, 0, 207, 200, 208, 17, 6, 169, 232, 3, 14, 181, 201, 94, 3, 0, 95, 1, 0, 95, 2, 0, 155, 202, 190, 0, 40]
+bytecode: [95, 1, 0, 95, 2, 0, 208, 201, 209, 17, 6, 170, 233, 3, 14, 182, 202, 95, 3, 0, 96, 1, 0, 96, 2, 0, 156, 203, 191, 0, 40]
 instructions: [
     VerifiedInstruction {
         decoded: DecodedInstruction {
@@ -6880,7 +6794,7 @@ source instructions: [
         },
     },
 ]
-bytecode: [100, 0, 0, 40]
+bytecode: [101, 0, 0, 40]
 instructions: [
     VerifiedInstruction {
         decoded: DecodedInstruction {

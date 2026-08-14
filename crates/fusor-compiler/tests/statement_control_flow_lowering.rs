@@ -1,12 +1,12 @@
 use std::fmt::Write as _;
 
-use oxc_ast::ast::Statement;
-use oxc_semantic::ScopeId;
 use fusor_bytecode::{
     AssemblerError, AssemblerResource, BytecodePc, FinalOpcode, Operands, VerificationLimits,
 };
 use fusor_compiler::{CompilationContext, CompiledLeafFunction, LeafCompilationError};
 use fusor_frontend::{CompilationGoal, FrontendOptions, GlobalScriptGoal, with_parsed_program};
+use oxc_ast::ast::Statement;
+use oxc_semantic::ScopeId;
 
 fn compile(source: &str, name: &str) -> CompiledLeafFunction {
     compile_with_limits(source, name, VerificationLimits::default())

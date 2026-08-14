@@ -33,6 +33,7 @@ mod promise_rejection;
 mod property;
 mod runtime;
 mod shared_array_buffer;
+mod snapshot;
 mod string;
 mod value;
 mod vm;
@@ -70,11 +71,13 @@ pub use property::{
     PropertyDescriptorKind, PropertyLayout, PropertyLayoutKind,
 };
 pub use runtime::{
-    CollectionReport, Context, HostFunctionId, ModuleError, ModuleErrorPhase,
-    ModuleEvaluationError, ModuleKey, ModuleLinkError, ModuleLoader, ModuleResolveError,
-    PendingDynamicImport, Realm, Runtime, RuntimeLimits, RuntimeUsage,
+    ArrayBufferInspection, CollectionInspection, CollectionReport, Context, DataViewInspection,
+    HostFunctionId, ModuleError, ModuleErrorPhase, ModuleEvaluationError, ModuleKey,
+    ModuleLinkError, ModuleLoader, ModuleResolveError, PendingDynamicImport, PromiseInspection,
+    ProxyInspection, Realm, Runtime, RuntimeLimits, RuntimeUsage, TypedArrayInspection,
 };
 pub use shared_array_buffer::SharedArrayBufferHandle;
+pub use snapshot::{SNAPSHOT_FORMAT_STAMP, SNAPSHOT_MAGIC, SnapshotError};
 pub use string::{CodeUnits, JsString, JsStringError, MAX_STRING_CODE_UNITS};
-pub use value::{Function, HostCall, HostCallback, JsValue, Object};
+pub use value::{Function, HostCall, HostCallback, JsValue, Object, Promise, PromiseResolver};
 pub use vm::ExecutionLimits;

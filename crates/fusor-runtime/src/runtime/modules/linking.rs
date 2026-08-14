@@ -1,7 +1,7 @@
-//! Module linking: ResolveExport and InitializeEnvironment.
+//! Module linking: `ResolveExport` and `InitializeEnvironment`.
 //!
-//! Implements the synchronous subset of ECMA-262 16.2.1.6 (InnerModuleLinking)
-//! and 16.2.1.7 (InitializeEnvironment) using an explicit-stack DFS.
+//! Implements the synchronous subset of ECMA-262 16.2.1.6 (`InnerModuleLinking`)
+//! and 16.2.1.7 (`InitializeEnvironment`) using an explicit-stack DFS.
 
 use std::collections::HashSet;
 
@@ -227,7 +227,7 @@ enum ExportResolution {
     Ambiguous,
 }
 
-/// Resolves an export of a module to a binding cell (ResolveExport).
+/// Resolves an export of a module to a binding cell (`ResolveExport`).
 fn resolve_export(
     runtime: &Runtime,
     module: ModuleRecordId,
@@ -286,12 +286,9 @@ fn resolve_export(
                 });
             }
             fusor_frontend::ModuleExportEntryRole::Indirect => {
-                let request_idx = match entry.request() {
-                    Some(idx) => idx.as_usize() as u32,
-                    None => {
-                        resolve_set.pop();
-                        return Ok(ExportResolution::Null);
-                    }
+                let request_idx = if let Some(idx) = entry.request() { idx.as_usize() as u32 } else {
+                    resolve_set.pop();
+                    return Ok(ExportResolution::Null);
                 };
                 let dep = resolve_request(runtime, module, request_idx)?;
                 // `export * as name from "mod"`: the export resolves to the
@@ -414,11 +411,10 @@ fn resolve_local_export(
                 let units: Vec<u16> = name.code_units().collect();
                 name_units_eq_utf8(&units, local_name)
             });
-        if name_match {
-            if let Some(&cell) = record.environment.get(i) {
+        if name_match
+            && let Some(&cell) = record.environment.get(i) {
                 return Ok(Some(ResolvedExport::Binding { module, cell }));
             }
-        }
     }
     Ok(None)
 }
@@ -551,11 +547,10 @@ pub(crate) fn module_dependencies(
     let mut deps = Vec::new();
     let mut seen = HashSet::new();
     for (i, _) in syntax.requests().iter().enumerate() {
-        if let Ok(dep) = resolve_request(runtime, module, i as u32) {
-            if seen.insert(dep) {
+        if let Ok(dep) = resolve_request(runtime, module, i as u32)
+            && seen.insert(dep) {
                 deps.push(dep);
             }
-        }
     }
     deps
 }
@@ -894,8 +889,7 @@ fn module_status(runtime: &Runtime, module: ModuleRecordId) -> ModuleStatus {
     runtime
         .modules
         .get(module)
-        .map(|r| r.status)
-        .unwrap_or(ModuleStatus::New)
+        .map_or(ModuleStatus::New, |r| r.status)
 }
 
 fn set_module_status(runtime: &mut Runtime, module: ModuleRecordId, status: ModuleStatus) {

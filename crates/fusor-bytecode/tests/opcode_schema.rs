@@ -11,28 +11,28 @@ use fusor_bytecode::{
 // `define_private_field` carries one U8 kind tag for data/method/accessor
 // installation. Pin the resulting engine table instead of claiming byte-table
 // identity with upstream.
-const ENGINE_TABLE_FINGERPRINT: u64 = 0xf124_7020_c377_e8bf;
+const ENGINE_TABLE_FINGERPRINT: u64 = 0xa5e7_7661_7fbe_4f27;
 const _: () = assert!(SHORT_OPCODES_ENABLED);
 
 #[test]
 fn compatibility_target_preserves_the_pinned_prefix_before_extensions() {
     assert_eq!(QUICKJS_COMPATIBILITY_RELEASE, "2026-06-04");
-    assert_eq!(FINAL_OPCODE_COUNT, 248);
-    assert_eq!(NON_SHORT_FINAL_OPCODE_COUNT, 178);
+    assert_eq!(FINAL_OPCODE_COUNT, 249);
+    assert_eq!(NON_SHORT_FINAL_OPCODE_COUNT, 179);
     assert_eq!(SHORT_FINAL_OPCODE_COUNT, 70);
     assert_eq!(TEMPORARY_OPCODE_COUNT, 19);
 
     assert_eq!(FinalOpcode::Invalid.encoded_byte(), 0);
-    assert_eq!(FinalOpcode::Nop.encoded_byte(), 177);
-    assert_eq!(FinalOpcode::PushMinus1.encoded_byte(), 178);
-    assert_eq!(FinalOpcode::TypeofIsFunction.encoded_byte(), 243);
-    assert_eq!(FinalOpcode::TailApply.encoded_byte(), 244);
-    assert_eq!(FinalOpcode::TailEval.encoded_byte(), 245);
-    assert_eq!(FinalOpcode::TailApplyEval.encoded_byte(), 246);
-    assert_eq!(FinalOpcode::ImportMeta.encoded_byte(), 247);
+    assert_eq!(FinalOpcode::Nop.encoded_byte(), 178);
+    assert_eq!(FinalOpcode::PushMinus1.encoded_byte(), 179);
+    assert_eq!(FinalOpcode::TypeofIsFunction.encoded_byte(), 244);
+    assert_eq!(FinalOpcode::TailApply.encoded_byte(), 245);
+    assert_eq!(FinalOpcode::TailEval.encoded_byte(), 246);
+    assert_eq!(FinalOpcode::TailApplyEval.encoded_byte(), 247);
+    assert_eq!(FinalOpcode::ImportMeta.encoded_byte(), 248);
 
-    assert_eq!(TEMPORARY_OPCODE_START, 178);
-    assert_eq!(TEMPORARY_OPCODE_END_EXCLUSIVE, 197);
+    assert_eq!(TEMPORARY_OPCODE_START, 179);
+    assert_eq!(TEMPORARY_OPCODE_END_EXCLUSIVE, 198);
     assert_eq!(FIRST_SHORT_OPCODE_BYTE, TEMPORARY_OPCODE_START);
 }
 
@@ -153,7 +153,7 @@ fn checked_final_decoding_rejects_the_sentinel_and_unknown_bytes() {
         assert_eq!(opcode.encoded_byte(), byte);
     }
 
-    for byte in 248..=u8::MAX {
+    for byte in 249..=u8::MAX {
         let error = FinalOpcode::decode(byte).expect_err("unknown opcode");
         assert_eq!(error, FinalOpcodeDecodeError::Unknown { byte });
         assert_eq!(error.byte(), byte);

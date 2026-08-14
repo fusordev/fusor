@@ -43,6 +43,16 @@ impl<K> Id<K> {
         }
     }
 
+    /// The never-allocated zero identity, used by snapshot restoration for
+    /// records whose owning arena does not exist yet (realm-less restore,
+    /// §8.2).
+    pub(crate) const ZERO: Self = Self {
+        runtime: RuntimeIdentity(0),
+        index: 0,
+        generation: 0,
+        marker: PhantomData,
+    };
+
     pub(crate) const fn index(self) -> usize {
         self.index
     }
@@ -131,6 +141,101 @@ pub(crate) struct Arena<K, T> {
 }
 
 impl<K, T> Arena<K, T> {
+    /// Rebuilds a live identity from its arena index (snapshot
+    /// restoration: records insert in encode order, so indices match).
+    pub(crate) const fn id_from_index(&self, index: usize) -> Id<K> {
+        Id {
+            runtime: self.runtime,
+            index,
+            generation: 0,
+            marker: PhantomData,
+        }
+    }
+
+    /// Restores one snapshot record at its recorded arena index (§8.3).
+    ///
+    /// Indices above the tail are padded with reusable vacant slots, so
+    /// restored records keep their encoded identity space stable for
+    /// cross-references; a record at or below the tail must land on a
+    /// vacant slot (a recorded hole). Returns `None` when the index is
+    /// occupied or the padding allocation fails — never panics.
+    pub(crate) fn restore_insert(&mut self, index: usize, value: T) -> Option<Id<K>> {
+        if index >= self.slots.len() {
+            self.slots.try_reserve(index - self.slots.len()).ok()?;
+            while self.slots.len() < index {
+                let hole = self.slots.len();
+                self.slots.push(Slot {
+                    generation: 0,
+                    state: SlotState::Vacant {
+                        next: self.free_head,
+                    },
+                });
+                self.free_head = Some(hole);
+                self.free_len += 1;
+            }
+            self.slots.push(Slot {
+                generation: 0,
+                state: SlotState::Occupied(value),
+            });
+            self.live_len += 1;
+            return Some(Id::new(self.runtime, index, 0));
+        }
+
+        let next = match &self.slots.get(index)?.state {
+            SlotState::Vacant { next } => *next,
+            _ => return None,
+        };
+        // Unlink the slot from the free chain (padded holes only, so the
+        // walk stays short).
+        let mut previous: Option<usize> = None;
+        let mut cursor = self.free_head;
+        while let Some(current) = cursor {
+            if current == index {
+                break;
+            }
+            previous = Some(current);
+            cursor = match &self.slots.get(current)?.state {
+                SlotState::Vacant { next } => *next,
+                _ => return None,
+            };
+        }
+        if cursor != Some(index) {
+            return None;
+        }
+        match previous {
+            None => self.free_head = next,
+            Some(previous) => match &mut self.slots[previous].state {
+                SlotState::Vacant { next: link } => *link = next,
+                _ => return None,
+            },
+        }
+        let slot = &mut self.slots[index];
+        slot.generation = 0;
+        slot.state = SlotState::Occupied(value);
+        self.free_len -= 1;
+        self.live_len += 1;
+        Some(Id::new(self.runtime, index, 0))
+    }
+
+    /// True when slots `0..end` are all occupied first-generation records
+    /// (the snapshot realm-prefix precondition, §8.2): a freed or reused
+    /// realm record would break the deterministic rebuild.
+    pub(crate) fn is_pristine_prefix(&self, end: usize) -> bool {
+        if self.slots.len() < end {
+            return false;
+        }
+        self.slots[..end]
+            .iter()
+            .all(|slot| slot.generation == 0 && matches!(slot.state, SlotState::Occupied(_)))
+    }
+
+    /// True when every slot is occupied first-generation (a churn-free
+    /// arena, required for arenas whose records are rebuilt by replay
+    /// rather than gap-encoded, e.g. the realm table).
+    pub(crate) fn is_dense_pristine(&self) -> bool {
+        self.live_len == self.slots.len() && self.is_pristine_prefix(self.slots.len())
+    }
+
     pub(crate) const fn new(runtime: RuntimeIdentity) -> Self {
         Self {
             runtime,
@@ -423,5 +528,36 @@ mod tests {
         assert_eq!(entries, vec![(first.index(), 11), (third.index(), 4)]);
         assert_eq!(arena.len(), 2);
         assert!(!arena.is_empty());
+    }
+
+    #[test]
+    fn restore_insert_pads_holes_and_keeps_recorded_indices() {
+        let mut arena = Arena::<Realm, _>::new(FIRST_RUNTIME);
+        let first = arena.restore_insert(0, "first").expect("index 0");
+        let fourth = arena.restore_insert(3, "fourth").expect("index 3");
+
+        assert_eq!((first.index(), fourth.index()), (0, 3));
+        assert_eq!(arena.get(first), Some(&"first"));
+        assert_eq!(arena.get(fourth), Some(&"fourth"));
+        assert_eq!(arena.len(), 2);
+
+        let reused = arena.try_insert("hole filler").expect("hole reuse");
+        assert!(
+            reused.index() < 3,
+            "allocation reuses a padded hole, not the tail"
+        );
+        assert_eq!(arena.get(reused), Some(&"hole filler"));
+        assert_eq!(arena.len(), 3);
+
+        assert!(
+            arena.restore_insert(0, "clash").is_none(),
+            "an occupied index rejects a second restore"
+        );
+        let far = arena
+            .restore_insert(10, "far")
+            .expect("pads up to index 10");
+        assert_eq!(far.index(), 10);
+        assert_eq!(arena.get(far), Some(&"far"));
+        assert_eq!(arena.len(), 4);
     }
 }

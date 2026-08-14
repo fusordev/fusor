@@ -645,6 +645,38 @@ pub(super) fn property_definition_from_fields(
         .with_configurable(requested_flag(fields.configurable)))
 }
 
+/// Builds one validated [`PropertyDefinition`] from host-supplied descriptor
+/// fields.
+///
+/// This is the embedding equivalent of the resumable `ToPropertyDescriptor`
+/// read: getter and setter callability is validated exactly like the
+/// JavaScript path (non-callable, non-`undefined` accessors raise a
+/// `TypeError`), and absent fields keep their absence through [`Requested`]
+/// so `ValidateAndApplyPropertyDescriptor` applies its own defaults.
+pub(super) fn host_property_definition(
+    value: Option<StoredValue>,
+    writable: Option<bool>,
+    get: Option<StoredValue>,
+    set: Option<StoredValue>,
+    enumerable: Option<bool>,
+    configurable: Option<bool>,
+    realm: RealmId,
+    origin: &JsStackFrame,
+) -> Result<PropertyDefinition, NativeFailure> {
+    property_definition_from_fields(
+        CollectedFields {
+            value,
+            writable,
+            get,
+            set,
+            enumerable,
+            configurable,
+        },
+        realm,
+        origin,
+    )
+}
+
 /// Applies `CompletePropertyDescriptor` to one converted descriptor and
 /// materializes the runtime's complete own-property representation.
 pub(super) fn complete_own_property_from_fields(
@@ -1157,7 +1189,7 @@ pub(super) fn own_property_descriptor(
                 // ECMA-262 10.4.6.3 [[GetOwnProperty]] step 2: the exports
                 // list triggers deferred evaluation for string keys (except
                 // "then").
-                crate::vm::proxy::ensure_deferred_namespace_access(
+                ensure_deferred_namespace_access(
                     runtime,
                     *object,
                     key,
@@ -1218,7 +1250,7 @@ pub(super) fn resolve_own_property(
                 // ECMA-262 10.4.6.3 [[GetOwnProperty]] step 2: the exports
                 // list triggers deferred evaluation for string keys (except
                 // "then").
-                crate::vm::proxy::ensure_deferred_namespace_access(
+                ensure_deferred_namespace_access(
                     runtime,
                     *object,
                     key,

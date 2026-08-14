@@ -1,7 +1,5 @@
 use std::sync::Arc;
 
-use oxc_ast::ast::{ArrowFunctionExpression, Function, FunctionBody, Program, Statement};
-use oxc_span::GetSpan;
 use fusor_bytecode::{
     AtomPoolIndex, ClosureVariableDefinition as VerifiedClosureVariableDefinition, CompilerAtom,
     CompilerBindingKind as VerifiedBindingKind, CompilerBindingPolicy, CompilerCaptureLayout,
@@ -12,6 +10,8 @@ use fusor_bytecode::{
     UnverifiedFunctionHeader, UnverifiedFunctionMetadata, VariableDefinition, VerificationLimits,
 };
 use fusor_frontend::{CompilationGoal, Span};
+use oxc_ast::ast::{ArrowFunctionExpression, Function, FunctionBody, Program, Statement};
+use oxc_span::GetSpan;
 
 use super::{
     AstKind, ClassElement, CompilationContext, CompiledClosureVariable, CompiledConstant,
@@ -1613,9 +1613,7 @@ impl CompilationContext<'_, '_, '_> {
 
 #[cfg(test)]
 mod tests {
-    use fusor_frontend::{
-        CompilationGoal, FrontendOptions, GlobalScriptGoal, with_parsed_program,
-    };
+    use fusor_frontend::{CompilationGoal, FrontendOptions, GlobalScriptGoal, with_parsed_program};
 
     use crate::lowering::{
         CompilationContext, FrameLayout, FrameLayoutInput, FunctionPlanningContext,

@@ -356,42 +356,22 @@ checksum = "e6d5a32815ae3f33302d95fdcb2ce17862f8c65363dcfd29360480ba1001fc9c"
 name = "fusor"
 version = "0.0.1"
 dependencies = [
+ "base64",
  "fusor-bytecode",
  "fusor-compiler",
  "fusor-diagnostics",
  "fusor-frontend",
+ "fusor-host",
  "fusor-runtime",
- "serde_json",
-]
-
-[[package]]
-name = "fusor-bytecode"
-version = "0.0.1"
-
-[[package]]
-name = "fusor-cdp"
-version = "0.0.1"
-dependencies = [
- "base64",
- "fusor",
- "fusor-runtime",
+ "rustyline",
  "serde_json",
  "sha1",
  "tokio",
 ]
 
 [[package]]
-name = "fusor-cli"
+name = "fusor-bytecode"
 version = "0.0.1"
-dependencies = [
- "fusor",
- "fusor-cdp",
- "fusor-runtime",
- "miette",
- "rustyline",
- "serde_json",
- "tokio",
-]
 
 [[package]]
 name = "fusor-compiler"
@@ -431,12 +411,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "fusor-host"
+version = "0.0.1"
+dependencies = [
+ "fusor-bytecode",
+ "fusor-compiler",
+ "fusor-frontend",
+ "fusor-ops",
+ "fusor-runtime",
+ "miette",
+ "serde",
+ "tokio",
+]
+
+[[package]]
 name = "fusor-intl"
 version = "0.0.1"
 dependencies = [
  "fixed_decimal",
  "icu",
  "writeable",
+]
+
+[[package]]
+name = "fusor-ops"
+version = "0.0.1"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -1620,9 +1623,9 @@ checksum = "1bc711410fbe7399f390ca1c3b60ad0f53f80e95c5eb935e52268a0e2cd49acc"
 
 [[package]]
 name = "serde"
-version = "1.0.229"
+version = "1.0.228"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4148590afebada386688f18773da617792bf2ef03ffc1e4cbd2b1d45b023e0ba"
+checksum = "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e"
 dependencies = [
  "serde_core",
  "serde_derive",
@@ -1630,22 +1633,22 @@ dependencies = [
 
 [[package]]
 name = "serde_core"
-version = "1.0.229"
+version = "1.0.228"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "67dca2c9c51e58a4791a4b1ed58308b39c64224d349a935ab5039aa360942a48"
+checksum = "41d385c7d4ca58e59fc732af25c3983b67ac852c1a25000afe1175de458b67ad"
 dependencies = [
  "serde_derive",
 ]
 
 [[package]]
 name = "serde_derive"
-version = "1.0.229"
+version = "1.0.228"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e7a5d71263a5a7d47b41f6b3f06ba276f10cc18b0931f1799f710578e2309348"
+checksum = "d540f220d3187173da220f885ab66608367b6574e925011a9353e4badda91d79"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.3",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -1690,6 +1693,16 @@ name = "shlex"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
+
+[[package]]
+name = "signal-hook-registry"
+version = "1.4.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c4db69cba1110affc0e9f7bcd48bbf87b3f4fc7c61fc9155afd4c469eb3d6c1b"
+dependencies = [
+ "errno",
+ "libc",
+]
 
 [[package]]
 name = "siphasher"
@@ -1882,6 +1895,7 @@ dependencies = [
  "libc",
  "mio",
  "pin-project-lite",
+ "signal-hook-registry",
  "socket2",
  "tokio-macros",
  "windows-sys 0.61.2",

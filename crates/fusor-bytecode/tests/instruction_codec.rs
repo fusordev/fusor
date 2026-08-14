@@ -255,18 +255,15 @@ fn decoder_rejects_reserved_unknown_and_out_of_bounds_program_counters() {
         })
     );
     assert_eq!(
-        fusor_bytecode::decode_instruction(&[248], BytecodePc::ZERO),
+        fusor_bytecode::decode_instruction(&[255], BytecodePc::ZERO),
         Err(DecodeError::InvalidOpcode {
             pc: BytecodePc::ZERO,
-            opcode_byte: 248,
-            source: FinalOpcodeDecodeError::Unknown { byte: 248 },
+            opcode_byte: 255,
+            source: FinalOpcodeDecodeError::Unknown { byte: 255 },
         })
     );
     assert_eq!(
-        fusor_bytecode::decode_instruction(
-            &[FinalOpcode::Nop.encoded_byte()],
-            BytecodePc::new(1)
-        ),
+        fusor_bytecode::decode_instruction(&[FinalOpcode::Nop.encoded_byte()], BytecodePc::new(1)),
         Err(DecodeError::MissingOpcode {
             pc: BytecodePc::new(1),
             expected_bytes: 1,
@@ -274,10 +271,7 @@ fn decoder_rejects_reserved_unknown_and_out_of_bounds_program_counters() {
         })
     );
     assert_eq!(
-        fusor_bytecode::decode_instruction(
-            &[FinalOpcode::Nop.encoded_byte()],
-            BytecodePc::new(2)
-        ),
+        fusor_bytecode::decode_instruction(&[FinalOpcode::Nop.encoded_byte()], BytecodePc::new(2)),
         Err(DecodeError::PcOutOfBounds {
             pc: BytecodePc::new(2),
             bytecode_len: 1,
@@ -319,7 +313,7 @@ fn decoder_iterator_tracks_typed_pcs_and_stops_after_an_error() {
         Ok(StackEffect::new(3, 1))
     );
 
-    let malformed_bytes = [248, FinalOpcode::Nop.encoded_byte()];
+    let malformed_bytes = [255, FinalOpcode::Nop.encoded_byte()];
     let mut malformed = InstructionDecoder::new(&malformed_bytes);
     assert!(malformed.next().is_some_and(|result| result.is_err()));
     assert!(malformed.next().is_none());

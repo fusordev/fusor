@@ -237,6 +237,9 @@ pub enum RuntimeError {
         /// Additional elements requested.
         additional: usize,
     },
+    /// The pinned realm intrinsic schema failed its own validation. This
+    /// names an engine configuration invariant, never a host error.
+    SchemaValidation(String),
 }
 
 impl fmt::Display for RuntimeError {
@@ -258,6 +261,7 @@ impl fmt::Display for RuntimeError {
                 formatter,
                 "failed to reserve {additional} additional entries for {resource}"
             ),
+            Self::SchemaValidation(message) => formatter.write_str(message),
         }
     }
 }
@@ -266,7 +270,9 @@ impl Error for RuntimeError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Atom(source) => Some(source),
-            Self::LimitExceeded { .. } | Self::AllocationFailed { .. } => None,
+            Self::LimitExceeded { .. }
+            | Self::AllocationFailed { .. }
+            | Self::SchemaValidation(_) => None,
         }
     }
 }
@@ -287,7 +293,7 @@ pub enum GlobalDeclarationRejectionKind {
 }
 
 /// Failure to turn verified bytecode into one runtime-local function.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum InstallError {
     /// An exact opcode is outside this interpreter profile.
     UnsupportedOpcode {
@@ -438,6 +444,23 @@ pub enum ExceptionKind {
     /// A URI codec received an unpaired surrogate or malformed percent-encoded
     /// UTF-8 sequence.
     UriError,
+}
+
+impl ExceptionKind {
+    /// The ECMAScript constructor name of the error family, e.g.
+    /// `"SyntaxError"`, used for the `Name: message` stack header and error
+    /// display.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::InternalError => "InternalError",
+            Self::RangeError => "RangeError",
+            Self::ReferenceError => "ReferenceError",
+            Self::SyntaxError => "SyntaxError",
+            Self::TypeError => "TypeError",
+            Self::UriError => "URIError",
+        }
+    }
 }
 
 /// Intrinsic Error family carried by a JavaScript Error object.
@@ -911,7 +934,7 @@ impl Error for DynamicFunctionCompileFailure {
 }
 
 /// Failure while invoking one runtime function.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum ExecutionError {
     /// A public handle was orphaned, foreign, stale, or had the wrong kind.
     Handle(HandleError),
@@ -1138,7 +1161,7 @@ impl From<ExecutionError> for GlobalScriptError {
 #[derive(Debug)]
 pub enum CallError {
     /// The called function threw; the rooted thrown value is retained.
-    Thrown(crate::JsValue),
+    Thrown(JsValue),
     /// An engine or host failure during the call (limits, allocation, an
     /// engine fault), or a thrown exception that could not be re-rooted.
     Execution(ExecutionError),

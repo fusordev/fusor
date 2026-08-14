@@ -590,14 +590,18 @@ fn object_methods_capture_outer_cells_and_lower_their_frontend_bodies() {
     }));
     assert!(tree_instructions(&children[1]).contains(&(FinalOpcode::PushThis, Operands::None)));
     let setter_instructions = tree_instructions(&children[2]);
+    // The setter writes the captured `value` cell through a var-ref pair
+    // (`MakeVarRefRef` ... `PutRefValue`), not the direct slot family.
     assert!(
-        setter_instructions.iter().any(|instruction| {
-            matches!(
-                instruction,
-                (FinalOpcode::SetVarRef0, Operands::NoneVarRef)
-                    | (FinalOpcode::SetVarRef, Operands::VarRef(0))
-            )
-        }),
+        setter_instructions
+            .iter()
+            .any(|instruction| matches!(instruction, (FinalOpcode::MakeVarRefRef, _))),
+        "{setter_instructions:?}"
+    );
+    assert!(
+        setter_instructions
+            .iter()
+            .any(|instruction| matches!(instruction, (FinalOpcode::PutRefValue, Operands::None))),
         "{setter_instructions:?}"
     );
 }
@@ -826,8 +830,7 @@ fn strict_direct_call_remains_receiverless() {
         instructions(&compiled),
         [
             (FinalOpcode::GetArg0, Operands::NoneArg),
-            (FinalOpcode::Call0, Operands::NPopX),
-            (FinalOpcode::Return, Operands::None),
+            (FinalOpcode::TailCall, Operands::NPop { argument_count: 0 }),
         ],
         "a strict direct call must not synthesize a base-object receiver"
     );

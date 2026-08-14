@@ -26,7 +26,11 @@
 use std::error::Error;
 
 use super::*;
-use crate::{RuntimeLimits, value::StoredValue};
+use crate::{
+    Realm, RuntimeLimits,
+    object::{HeapObject, HeapObjectKind, ObjectRecord, PropertySlot, ShapeProperty},
+    value::StoredValue,
+};
 use fusor_compiler::CompilationContext;
 use fusor_frontend::{
     CompilationGoal, DynamicFunctionKind, DynamicFunctionSource, FrontendLimits, FrontendOptions,
@@ -77,11 +81,9 @@ impl OrdinaryDynamicFunctionCompiler for OxcDynamicCompiler {
                 )
                 .map_err(test_engine_failure)?;
                 context
-                        .compile_dynamic_function_script(
-                            fusor_bytecode::VerificationLimits::default(),
-                        )
-                        .map(|tree| Arc::new(tree.verified_bytecode().clone()))
-                        .map_err(test_engine_failure)
+                    .compile_dynamic_function_script(fusor_bytecode::VerificationLimits::default())
+                    .map(|tree| Arc::new(tree.verified_bytecode().clone()))
+                    .map_err(test_engine_failure)
             },
         )
         .map_err(test_engine_failure)?
@@ -6900,7 +6902,7 @@ fn compile_test_function(source: &str, name: &str) -> Arc<fusor_bytecode::Verifi
 }
 
 #[test]
-fn dynamic_import_returns_a_fresh_rejected_promise_when_loading_is_unavailable() {
+fn dynamic_import_parks_each_load_until_the_host_settles_it() {
     let authority = compile_test_function(
         "function load(specifier){return import(specifier);}",
         "load",
@@ -6939,6 +6941,35 @@ fn dynamic_import_returns_a_fresh_rejected_promise_when_loading_is_unavailable()
         first_id, second_id,
         "every import call creates a new Promise"
     );
+    for promise in [first_id, second_id] {
+        assert!(matches!(
+            runtime
+                .objects
+                .get(promise)
+                .and_then(crate::object::HeapObject::promise_state),
+            Some(crate::object::PromiseState::Pending { .. })
+        ));
+    }
+    assert_eq!(runtime.pending_dynamic_import_count(), 2);
+
+    // The host settles each parked load; the rejection queues as a job.
+    let first_import = runtime
+        .take_pending_dynamic_import()
+        .expect("first parked import");
+    assert_eq!(first_import.specifier(), "./missing.js");
+    reject_dynamic_import_load(&mut runtime, first_import, "host could not load the module")
+        .expect("reject first");
+    let second_import = runtime
+        .take_pending_dynamic_import()
+        .expect("second parked import");
+    reject_dynamic_import_load(
+        &mut runtime,
+        second_import,
+        "host could not load the module",
+    )
+    .expect("reject second");
+    drain_host_jobs_with_limits(&mut runtime, None, ExecutionLimits::default())
+        .expect("drain rejection jobs");
     for promise in [first_id, second_id] {
         assert!(matches!(
             runtime
@@ -7493,4 +7524,1082 @@ fn assert_native_type_error(error: NativeFailure, expected: &str) {
     };
     assert_eq!(kind, ExceptionKind::TypeError);
     assert_eq!(message.to_utf8_lossy().expect("UTF-8"), expected);
+}
+
+#[test]
+fn collected_host_functions_release_their_callback_slots() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    {
+        let mut context = runtime.context(&realm).expect("context");
+        for _ in 0..32 {
+            let function = context
+                .create_host_function("transient", |ctx, _call| {
+                    Ok(ctx.number(JsNumber::from_i32(0)))
+                })
+                .expect("host function");
+            drop(function);
+        }
+        assert_eq!(runtime.host_functions.len(), 32);
+        assert!(
+            runtime.host_functions.iter().all(|slot| slot.is_some()),
+            "live host functions retain their slots"
+        );
+    }
+    runtime.collect_cycles().expect("collect");
+    // Every transient function is unreachable; its callback slot must be
+    // released so the Rust closure does not leak.
+    assert!(
+        runtime.host_functions.iter().all(|slot| slot.is_none()),
+        "collected host functions must release their callback slots"
+    );
+}
+
+#[test]
+fn jsvalue_same_object_compares_heap_identity() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let first = context.new_object().expect("object");
+    let second = first.clone();
+    assert!(
+        first.same_object(&second),
+        "clones root the same heap object"
+    );
+    let other = context.new_object().expect("object");
+    assert!(
+        !first.same_object(&other),
+        "distinct heap objects are distinct identities"
+    );
+    let one = context.number(crate::JsNumber::from_i32(1));
+    let one_again = context.number(crate::JsNumber::from_i32(1));
+    assert!(
+        !one.same_object(&one_again),
+        "primitives never compare equal as heap objects"
+    );
+}
+
+#[test]
+fn js_stack_frames_expose_their_source_spans() {
+    let frame = JsStackFrame::new(
+        FunctionTemplateId::new(0),
+        BytecodePc::new(3),
+        Arc::from("frame.js"),
+        Arc::from("let x = 1;"),
+        SourceByteSpan::new(4, 9),
+    );
+    assert_eq!(frame.source_span().start(), 4);
+    assert_eq!(frame.source_span().end(), 9);
+}
+
+#[test]
+fn js_exceptions_expose_their_origin_span() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let value = context.number(crate::JsNumber::from_i32(1));
+    let exception = JsException::explicit_throw(
+        value,
+        JsStackFrame::new(
+            FunctionTemplateId::new(0),
+            BytecodePc::new(1),
+            Arc::from("throw.js"),
+            Arc::from("throw 1;"),
+            SourceByteSpan::new(0, 7),
+        ),
+        Vec::new(),
+    );
+    assert_eq!(exception.source_span().start(), 0);
+    assert_eq!(exception.source_span().end(), 7);
+}
+
+#[test]
+fn snapshot_round_trips_dynamic_atoms() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    // Intern the dynamic atoms directly (no realm: realm creation builds
+    // exotic objects whose serializer slices land later, §8.2); the keys
+    // keep the atoms alive.
+    let keys = [
+        runtime
+            .atoms
+            .intern_string(&JsString::from_utf8("fusor-dynamic-a").expect("a"))
+            .expect("atom"),
+        runtime
+            .atoms
+            .intern_string(&JsString::from_utf8("fusor-dynamic-b").expect("b"))
+            .expect("atom"),
+    ];
+    let source = runtime.atoms.snapshot_atoms();
+    // The atoms payload encodes and decodes exactly (kind + code units).
+    let encoded = crate::snapshot::encode_atoms(&source);
+    let decoded = crate::snapshot::decode_atoms(&encoded).expect("decode");
+    assert_eq!(decoded.len(), source.len());
+    for ((kind_a, description_a), (kind_b, description_b)) in source.iter().zip(&decoded) {
+        assert_eq!(kind_a, kind_b);
+        assert_eq!(
+            description_a.code_units().collect::<Vec<_>>(),
+            description_b.code_units().collect::<Vec<_>>(),
+            "atom descriptions round-trip exactly"
+        );
+    }
+    // End to end: the blob carries the section through the frame/CRC
+    // machinery and restores into a fresh runtime without leaking
+    // accounting (the interner holds weak slots, §8 snapshot format).
+    let blob = runtime.snapshot().expect("snapshot");
+    assert!(
+        blob.starts_with(&crate::snapshot::SNAPSHOT_MAGIC),
+        "the blob carries the magic"
+    );
+    let mut restored = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    restored.from_snapshot(&blob).expect("restore");
+    assert_eq!(
+        restored.atom_usage().live_atoms,
+        PredefinedAtom::COUNT as u32,
+        "restore leaves the accounting clean (entries stay only while referenced)"
+    );
+    // The restored runtime works: interning the same content succeeds
+    // (the atom must stay alive while the usage is read).
+    let realm_atoms = restored.atom_usage().live_atoms;
+    let again = restored
+        .atoms
+        .intern_string(&JsString::from_utf8("fusor-dynamic-a").expect("a"))
+        .expect("atom");
+    assert_eq!(
+        restored.atom_usage().live_atoms,
+        realm_atoms + 1,
+        "interning works after restore"
+    );
+    drop(again);
+    drop(keys);
+}
+
+#[test]
+fn snapshot_restore_fails_closed_on_damage() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let keys = [runtime
+        .atoms
+        .intern_string(&JsString::from_utf8("fusor-dynamic-a").expect("a"))
+        .expect("atom")];
+    let blob = runtime.snapshot().expect("snapshot");
+    drop(keys);
+    let fresh = || Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+
+    let mut target = fresh();
+    assert!(
+        matches!(
+            target.from_snapshot(&blob[..blob.len() - 3]),
+            Err(crate::snapshot::SnapshotError::Truncated)
+        ),
+        "a truncated blob fails closed"
+    );
+    let mut bad = blob.clone();
+    bad[0] ^= 0xFF;
+    let mut target = fresh();
+    assert!(
+        matches!(
+            target.from_snapshot(&bad),
+            Err(crate::snapshot::SnapshotError::MagicMismatch)
+        ),
+        "a corrupted magic fails closed"
+    );
+    let mut bad = blob.clone();
+    bad[SNAPSHOT_MAGIC_LEN] = 9;
+    let mut target = fresh();
+    assert!(
+        matches!(
+            target.from_snapshot(&bad),
+            Err(crate::snapshot::SnapshotError::FormatMismatch { found: 9 })
+        ),
+        "an unknown format stamp fails closed"
+    );
+    let mut bad = blob.clone();
+    let last = bad.len() - 1;
+    bad[last - 5] ^= 0xFF;
+    let mut target = fresh();
+    assert!(
+        matches!(
+            target.from_snapshot(&bad),
+            Err(crate::snapshot::SnapshotError::IntegrityViolation)
+        ),
+        "a tampered payload fails the checksum"
+    );
+}
+
+const SNAPSHOT_MAGIC_LEN: usize = 8;
+
+#[test]
+fn snapshot_round_trips_ordinary_objects_and_shapes() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    // A synthetic object graph without a realm (the realm's intrinsics
+    // contain exotic kinds whose serializer slices land later, §8.2).
+    let key_alpha = runtime
+        .atoms
+        .intern_string(&JsString::from_utf8("alpha").expect("alpha"))
+        .expect("atom");
+    let key_beta = runtime
+        .atoms
+        .intern_string(&JsString::from_utf8("beta").expect("beta"))
+        .expect("atom");
+    let shape = Arc::new(vec![
+        ShapeProperty::from_parts(
+            PropertyKey::from_validated_atom(key_alpha.clone()),
+            PropertyLayout::data(true, true, false),
+        ),
+        ShapeProperty::from_parts(
+            PropertyKey::from_validated_atom(key_beta),
+            PropertyLayout::data(false, true, true),
+        ),
+    ]);
+    let first = runtime
+        .objects
+        .try_insert(HeapObject::ordinary(ObjectRecord::from_parts(
+            None,
+            true,
+            false,
+            Arc::clone(&shape),
+            None,
+            vec![
+                PropertySlot::Data(StoredValue::Number(JsNumber::from_f64(1.5))),
+                PropertySlot::Data(StoredValue::String(
+                    JsString::from_utf8("value").expect("value"),
+                )),
+            ],
+        )))
+        .expect("object");
+    // The second object references the first: prototype + a slot value.
+    // The shape stays aligned with the slots (engine invariant).
+    let second = runtime
+        .objects
+        .try_insert(HeapObject::ordinary(ObjectRecord::from_parts(
+            Some(HeapReference::Object(first)),
+            false,
+            false,
+            Arc::new(vec![ShapeProperty::from_parts(
+                PropertyKey::from_validated_atom(key_alpha.clone()),
+                PropertyLayout::data(true, false, false),
+            )]),
+            None,
+            vec![PropertySlot::Data(StoredValue::Object(first))],
+        )))
+        .expect("object");
+    // Root both records so the pre-snapshot collection keeps them alive.
+    runtime.kept_alive.push(StoredValue::Object(first));
+    runtime.kept_alive.push(StoredValue::Object(second));
+
+    let blob = runtime.snapshot().expect("snapshot");
+    let mut restored = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    restored.from_snapshot(&blob).expect("restore");
+
+    let restored_objects: Vec<_> = restored.objects.iter().collect();
+    assert_eq!(restored_objects.len(), 2, "both objects restored");
+    let (first_id, first_object) = restored_objects[0];
+    assert!(matches!(first_object.kind(), HeapObjectKind::Ordinary));
+    let record = &first_object.record;
+    assert_eq!(record.shape().len(), 2, "the shape restored");
+    assert_eq!(record.slots().len(), 2, "the slots restored");
+    assert!(record.is_extensible());
+    assert!(matches!(
+        record.slots()[0],
+        PropertySlot::Data(StoredValue::Number(_))
+    ));
+    assert!(matches!(
+        record.slots()[1],
+        PropertySlot::Data(StoredValue::String(_))
+    ));
+    // Shape keys round-trip: the first key re-interns to the same
+    // description.
+    let restored_alpha = restored
+        .atoms
+        .intern_string(&JsString::from_utf8("alpha").expect("alpha"))
+        .expect("atom");
+    assert_eq!(
+        record.shape()[0].key().as_atom().map(|atom| {
+            atom.description()
+                .expect("description")
+                .to_utf8_lossy()
+                .expect("utf8")
+        }),
+        Some("alpha".to_owned()),
+        "the shape key content round-trips"
+    );
+    assert_eq!(
+        record.shape()[0].layout().writable(),
+        Some(true),
+        "the data layout bits round-trip"
+    );
+    let (_, second_object) = restored_objects[1];
+    let second_record = &second_object.record;
+    assert!(
+        matches!(
+            second_record.prototype(),
+            Some(HeapReference::Object(target)) if target.index() == first_id.index()
+        ),
+        "the prototype reference resolves to the restored first object"
+    );
+    assert!(
+        matches!(
+            second_record.slots()[0],
+            PropertySlot::Data(StoredValue::Object(target)) if target.index() == first_id.index()
+        ),
+        "the slot reference resolves to the restored first object"
+    );
+    drop(restored_alpha);
+}
+
+#[test]
+fn snapshot_round_trips_binding_cells() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let object = runtime
+        .objects
+        .try_insert(HeapObject::ordinary(ObjectRecord::from_parts(
+            None,
+            true,
+            false,
+            Arc::new(Vec::new()),
+            None,
+            Vec::new(),
+        )))
+        .expect("object");
+    let first = runtime
+        .cells
+        .try_insert(crate::runtime::BindingCell {
+            value: crate::value::SlotValue::Value(StoredValue::Object(object)),
+            forward: None,
+        })
+        .expect("cell");
+    let cells_second = runtime
+        .cells
+        .try_insert(crate::runtime::BindingCell {
+            value: crate::value::SlotValue::Value(StoredValue::Number(JsNumber::from_f64(2.5))),
+            forward: None,
+        })
+        .expect("cell");
+    let third = runtime
+        .cells
+        .try_insert(crate::runtime::BindingCell {
+            value: crate::value::SlotValue::Uninitialized,
+            forward: None,
+        })
+        .expect("cell");
+    let fourth = runtime
+        .cells
+        .try_insert(crate::runtime::BindingCell {
+            value: crate::value::SlotValue::Uninitialized,
+            forward: Some(first),
+        })
+        .expect("cell");
+    // Root the cells: a kept-alive function captures all four in its
+    // environment, so the pre-snapshot collection keeps them alive.
+    let authority = compile_test_function("function keeper() { return 0; }", "keeper");
+    let templates = runtime.stage_templates(&authority).expect("templates");
+    let code = runtime
+        .code
+        .try_insert(crate::runtime::InstalledCode {
+            authority: Arc::clone(&authority),
+            realm: crate::ids::RealmId::ZERO,
+            templates,
+            live_functions: 1,
+        })
+        .expect("code");
+    let keeper = runtime
+        .insert_heap_function(crate::runtime::HeapFunction {
+            implementation: crate::runtime::FunctionImplementation::Bytecode(
+                crate::runtime::BytecodeFunction {
+                    code,
+                    template: authority.root_id(),
+                    environment: vec![
+                        crate::runtime::EnvironmentBinding::Captured(first),
+                        crate::runtime::EnvironmentBinding::Captured(cells_second),
+                        crate::runtime::EnvironmentBinding::Captured(third),
+                        crate::runtime::EnvironmentBinding::Captured(fourth),
+                    ],
+                    environment_eval_shadows: Vec::new(),
+                    eval_environment: None,
+                    lexical_receiver: None,
+                    lexical_eval_in_function: false,
+                    lexical_eval_in_class_field_initializer: false,
+                    lexical_new_target: None,
+                    lexical_derived_constructor: None,
+                    lexical_derived_this: None,
+                    has_instance_elements: false,
+                    home_object: None,
+                },
+            ),
+            object: ObjectRecord::from_parts(
+                None,
+                true,
+                false,
+                Arc::new(Vec::new()),
+                None,
+                Vec::new(),
+            ),
+            public_roots: 0,
+        })
+        .expect("keeper");
+    runtime.kept_alive.push(StoredValue::Function(keeper));
+
+    let blob = runtime.snapshot().expect("snapshot");
+    let mut restored = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    restored.from_snapshot(&blob).expect("restore");
+
+    let restored_cells: Vec<_> = restored.cells.iter().collect();
+    assert_eq!(restored_cells.len(), 4, "all four cells restored");
+    match &restored_cells[0].1.value {
+        crate::value::SlotValue::Value(StoredValue::Object(target)) => {
+            assert_eq!(target.index(), 0, "the cell's object reference resolved");
+        }
+        other => panic!("unexpected first cell value"),
+    }
+    match &restored_cells[1].1.value {
+        crate::value::SlotValue::Value(StoredValue::Number(number)) => {
+            assert_eq!(number.as_f64(), 2.5);
+        }
+        other => panic!("unexpected second cell value"),
+    }
+    assert!(
+        matches!(
+            &restored_cells[2].1.value,
+            crate::value::SlotValue::Uninitialized
+        ),
+        "the uninitialized cell restored"
+    );
+    assert_eq!(
+        restored_cells[3].1.forward.map(|cell| cell.index()),
+        Some(0),
+        "the forwarding chain preserved"
+    );
+}
+
+#[test]
+fn snapshot_round_trips_bytecode_functions() {
+    let authority = compile_test_function(
+        "function outer(x) { return function inner(y) { return x + y; }; }",
+        "outer",
+    );
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let templates = runtime.stage_templates(&authority).expect("templates");
+    let code = runtime
+        .code
+        .try_insert(crate::runtime::InstalledCode {
+            authority: Arc::clone(&authority),
+            realm: crate::ids::RealmId::ZERO,
+            templates,
+            live_functions: 1,
+        })
+        .expect("code");
+    let cell = runtime
+        .cells
+        .try_insert(crate::runtime::BindingCell {
+            value: crate::value::SlotValue::Value(StoredValue::Number(JsNumber::from_f64(1.0))),
+            forward: None,
+        })
+        .expect("cell");
+    let function = runtime
+        .insert_heap_function(crate::runtime::HeapFunction {
+            implementation: crate::runtime::FunctionImplementation::Bytecode(
+                crate::runtime::BytecodeFunction {
+                    code,
+                    template: authority.root_id(),
+                    environment: vec![crate::runtime::EnvironmentBinding::Captured(cell)],
+                    environment_eval_shadows: Vec::new(),
+                    eval_environment: None,
+                    lexical_receiver: None,
+                    lexical_eval_in_function: false,
+                    lexical_eval_in_class_field_initializer: false,
+                    lexical_new_target: None,
+                    lexical_derived_constructor: None,
+                    lexical_derived_this: None,
+                    has_instance_elements: false,
+                    home_object: None,
+                },
+            ),
+            object: ObjectRecord::from_parts(
+                None,
+                true,
+                false,
+                Arc::new(Vec::new()),
+                None,
+                Vec::new(),
+            ),
+            public_roots: 0,
+        })
+        .expect("function");
+    runtime.kept_alive.push(StoredValue::Function(function));
+
+    let blob = runtime.snapshot().expect("snapshot");
+    let mut restored = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    restored.from_snapshot(&blob).expect("restore");
+
+    let restored_functions: Vec<_> = restored.functions.iter().collect();
+    assert_eq!(restored_functions.len(), 1, "the function restored");
+    let function = restored_functions[0]
+        .1
+        .bytecode()
+        .expect("bytecode implementation");
+    assert_eq!(
+        function.template,
+        authority.root_id(),
+        "template identity preserved"
+    );
+    match function.environment.as_slice() {
+        [crate::runtime::EnvironmentBinding::Captured(restored_cell)] => {
+            let cell = restored.cells.get(*restored_cell).expect("cell");
+            match &cell.value {
+                crate::value::SlotValue::Value(StoredValue::Number(number)) => {
+                    assert_eq!(number.as_f64(), 1.0);
+                }
+                other => panic!("unexpected cell value"),
+            }
+        }
+        other => panic!("unexpected environment"),
+    }
+    let restored_code = restored.code.get(function.code).expect("code");
+    assert_eq!(
+        restored_code.authority, authority,
+        "the authority round-tripped"
+    );
+}
+
+#[test]
+fn snapshot_restore_rebinds_host_functions_by_name() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let name_key = runtime.predefined_property_key(crate::PredefinedAtom::Name);
+    let shape = Arc::new(vec![ShapeProperty::from_parts(
+        name_key,
+        PropertyLayout::data(false, true, false),
+    )]);
+    let function = runtime
+        .insert_heap_function(crate::runtime::HeapFunction {
+            implementation: crate::runtime::FunctionImplementation::Native(
+                crate::runtime::NativeFunction {
+                    realm: crate::ids::RealmId::ZERO,
+                    kind: crate::runtime::NativeFunctionKind::Host(crate::HostFunctionId::new(0)),
+                },
+            ),
+            object: ObjectRecord::from_parts(
+                None,
+                true,
+                false,
+                shape,
+                None,
+                vec![PropertySlot::Data(StoredValue::String(
+                    JsString::from_utf8("op_probe").expect("name"),
+                ))],
+            ),
+            public_roots: 0,
+        })
+        .expect("function");
+    runtime.kept_alive.push(StoredValue::Function(function));
+
+    let blob = runtime.snapshot().expect("snapshot");
+    let mut restored = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    restored.from_snapshot(&blob).expect("restore");
+
+    // The closure table starts empty after restore; the host re-binds
+    // each assembled op by name (§8.2, §8.5).
+    restored
+        .rebind_host_function("op_probe", |_context, _call| {
+            unreachable!("the callback is not invoked in this test")
+        })
+        .expect("rebind");
+
+    // An op-set mismatch fails closed.
+    let error = restored
+        .rebind_host_function("op_ghost", |_context, _call| {
+            unreachable!("the callback is not invoked in this test")
+        })
+        .expect_err("unknown names must fail closed");
+    assert!(!error.to_string().is_empty());
+}
+
+#[test]
+fn snapshot_restore_fails_closed_on_corrupted_function_bytecode() {
+    let authority = compile_test_function("function probe() { return 1; }", "probe");
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let templates = runtime.stage_templates(&authority).expect("templates");
+    let code = runtime
+        .code
+        .try_insert(crate::runtime::InstalledCode {
+            authority: Arc::clone(&authority),
+            realm: crate::ids::RealmId::ZERO,
+            templates,
+            live_functions: 1,
+        })
+        .expect("code");
+    let function = runtime
+        .insert_heap_function(crate::runtime::HeapFunction {
+            implementation: crate::runtime::FunctionImplementation::Bytecode(
+                crate::runtime::BytecodeFunction {
+                    code,
+                    template: authority.root_id(),
+                    environment: Vec::new(),
+                    environment_eval_shadows: Vec::new(),
+                    eval_environment: None,
+                    lexical_receiver: None,
+                    lexical_eval_in_function: false,
+                    lexical_eval_in_class_field_initializer: false,
+                    lexical_new_target: None,
+                    lexical_derived_constructor: None,
+                    lexical_derived_this: None,
+                    has_instance_elements: false,
+                    home_object: None,
+                },
+            ),
+            object: ObjectRecord::from_parts(
+                None,
+                true,
+                false,
+                Arc::new(Vec::new()),
+                None,
+                Vec::new(),
+            ),
+            public_roots: 0,
+        })
+        .expect("function");
+    runtime.kept_alive.push(StoredValue::Function(function));
+    let blob = runtime.snapshot().expect("snapshot");
+
+    // Corrupt one byte inside the embedded verified-bytecode payload:
+    // the load-time re-verification must reject it, never panic.
+    let mut damaged = blob.clone();
+    // Locate the functions section payload: walk the section frames.
+    let mut position = 8 + 4 + 4; // magic + stamp + section count
+    let mut sections = u32::from_le_bytes([damaged[12], damaged[13], damaged[14], damaged[15]]);
+    while sections > 0 {
+        let tag = damaged[position];
+        position += 1;
+        let length = u64::from_le_bytes([
+            damaged[position],
+            damaged[position + 1],
+            damaged[position + 2],
+            damaged[position + 3],
+            damaged[position + 4],
+            damaged[position + 5],
+            damaged[position + 6],
+            damaged[position + 7],
+        ]) as usize;
+        position += 8;
+        if tag == 4 {
+            // code count (4) + byte length (4) + FUSRBYTE magic: corrupt
+            // one byte of the magic.
+            damaged[position + 4 + 4] ^= 0xFF;
+            break;
+        }
+        position += length + 4; // payload + CRC-32
+        sections -= 1;
+    }
+    let mut restored = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let error = restored
+        .from_snapshot(&damaged)
+        .expect_err("corrupted bytecode must be rejected");
+    // The per-section CRC-32 catches the damage before the payload is
+    // even decoded; the load-time re-verification is the second layer
+    // for structurally intact but invalid payloads.
+    assert!(
+        matches!(error, crate::SnapshotError::IntegrityViolation),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn snapshot_fails_closed_on_unsupported_heap_content() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    // An accessor slot is not serializable yet (§8.2 intermediate). The
+    // record is rooted so the pre-snapshot collection keeps it alive.
+    let object = runtime
+        .objects
+        .try_insert(HeapObject::ordinary(ObjectRecord::from_parts(
+            None,
+            true,
+            false,
+            Arc::new(Vec::new()),
+            None,
+            vec![PropertySlot::Accessor {
+                getter: None,
+                setter: None,
+            }],
+        )))
+        .expect("object");
+    runtime.kept_alive.push(StoredValue::Object(object));
+    assert!(
+        matches!(
+            runtime.snapshot(),
+            Err(crate::snapshot::SnapshotError::Unsupported {
+                what: "an accessor property slot",
+                ..
+            })
+        ),
+        "unsupported content fails closed"
+    );
+}
+
+/// Compiles and executes one Global Script on the realm, rendering the
+/// completion value with `String()` (scripts end in an expression).
+fn run_snapshot_script(runtime: &mut Runtime, realm: &Realm, source: &str) -> String {
+    let authority = with_parsed_program(
+        source,
+        FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
+        |unit| {
+            let context =
+                CompilationContext::new_with_source_name(unit, Arc::from("<snapshot realm test>"))
+                    .expect("storage plan");
+            let tree = context
+                .compile_global_script(fusor_bytecode::VerificationLimits::default())
+                .expect("verified Global Script");
+            Arc::new(tree.verified_bytecode().clone())
+        },
+    )
+    .expect("frontend");
+    let value = runtime
+        .context(realm)
+        .expect("context")
+        .execute_global_script(authority, crate::ExecutionLimits::default())
+        .unwrap_or_else(|error| {
+            let message = match &error {
+                crate::GlobalScriptError::Execution(crate::ExecutionError::Exception(
+                    exception,
+                )) => {
+                    let message = exception
+                        .message()
+                        .map(|message| message.to_utf8_lossy().unwrap_or_default())
+                        .unwrap_or_default();
+                    format!("{:?} {message}", exception.kind())
+                }
+                other => format!("{other}"),
+            };
+            panic!("script {source}: {message}")
+        });
+    value
+        .as_string()
+        .expect("live value")
+        .expect("String completion value")
+        .to_utf8_lossy()
+        .expect("UTF-8")
+}
+
+#[test]
+fn snapshot_round_trips_exotic_object_instances() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let built = run_snapshot_script(
+        &mut runtime,
+        &realm,
+        "globalThis.collection = new Map([['k', 41], [0, 'zero']]);\
+         globalThis.items = new Set([1, 'two', {}]);\
+         globalThis.day = new Date(1234567890123);\
+         globalThis.arr = [1, , 3];\
+         globalThis.re = /ab+c/gi;\
+         globalThis.err = new TypeError('boom');\
+         globalThis.boxed = new Number(1.5);\
+         globalThis.raw = JSON.rawJSON('1e2');\
+         globalThis.argz = (function (a, b) { arguments[0] = 99; return arguments; })(1, 2);\
+         'built';",
+    );
+    assert_eq!(built, "built");
+
+    let blob = runtime.snapshot().expect("snapshot");
+    // The iterable constructors leave exhausted iterator records behind;
+    // the pre-snapshot collection removes them, so the blob only carries
+    // live heap content (§8.2).
+    assert!(
+        !runtime
+            .objects
+            .iter()
+            .any(|(_, object)| matches!(object.kind(), HeapObjectKind::ArrayIterator(_))),
+        "the pre-snapshot collection reclaimed the exhausted iterators"
+    );
+    let mut restored = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realms = restored.from_snapshot(&blob).expect("restore");
+    let probe = run_snapshot_script(
+        &mut restored,
+        &realms[0],
+        "String(\
+             !(globalThis.collection.get('k') === 41) ? 'map-key' :\
+             !(globalThis.collection.get(0) === 'zero') ? 'map-index' :\
+             !(globalThis.collection.size === 2) ? 'map-size' :\
+             !(globalThis.items.has('two')) ? 'set-has' :\
+             !(globalThis.items.size === 3) ? 'set-size' :\
+             !(globalThis.day.getTime() === 1234567890123) ? 'date' :\
+             !(globalThis.arr.length === 3) ? 'arr-length' :\
+             (1 in globalThis.arr) ? 'arr-hole' :\
+             !(globalThis.arr[2] === 3) ? 'arr-elem' :\
+             !(globalThis.re.test('abc')) ? 'regexp-test' :\
+             !(globalThis.re.lastIndex === 3) ? 'regexp-lastindex' :\
+             !(globalThis.err instanceof TypeError) ? 'error-kind' :\
+             !(globalThis.err.message === 'boom') ? 'error-msg' :\
+             !(globalThis.boxed.valueOf() === 1.5) ? 'boxed' :\
+             !(JSON.isRawJSON(globalThis.raw)) ? 'rawjson' :\
+             !(globalThis.argz[0] === 99) ? 'arguments-mapped' :\
+             !(globalThis.argz[1] === 2) ? 'arguments-elem' :\
+             'ok'\
+         );",
+    );
+    assert_eq!(probe, "ok", "exotic instances round-trip");
+}
+
+#[test]
+fn snapshot_fails_closed_on_uncovered_exotic_and_async_state() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    // Weak collections hold identity-only references (§8.2).
+    run_snapshot_script(&mut runtime, &realm, "globalThis.wm = new WeakMap(); 'x';");
+    assert!(
+        matches!(
+            runtime.snapshot(),
+            Err(crate::snapshot::SnapshotError::Unsupported {
+                what: "a weak collection",
+                ..
+            })
+        ),
+        "weak collections fail closed"
+    );
+    // Promises and proxies are excluded by design (§8.2).
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    run_snapshot_script(
+        &mut runtime,
+        &realm,
+        "globalThis.p = Promise.resolve('x'); 'x';",
+    );
+    assert!(
+        matches!(
+            runtime.snapshot(),
+            Err(crate::snapshot::SnapshotError::Unsupported {
+                what: "a promise",
+                ..
+            })
+        ),
+        "promises fail closed"
+    );
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    run_snapshot_script(
+        &mut runtime,
+        &realm,
+        "globalThis.px = new Proxy({}, {}); 'x';",
+    );
+    assert!(
+        matches!(
+            runtime.snapshot(),
+            Err(crate::snapshot::SnapshotError::Unsupported {
+                what: "a proxy",
+                ..
+            })
+        ),
+        "proxies fail closed"
+    );
+    // Suspended generator state lives outside the arenas.
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    run_snapshot_script(
+        &mut runtime,
+        &realm,
+        "globalThis.gen = (function* () { yield 1; })(); globalThis.gen.next(); 'x';",
+    );
+    assert!(
+        matches!(
+            runtime.snapshot(),
+            Err(crate::snapshot::SnapshotError::Unsupported {
+                what: "a suspended generator",
+                ..
+            })
+        ),
+        "suspended generators fail closed"
+    );
+}
+
+#[test]
+fn snapshot_fails_closed_on_a_module_registry() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let (syntax, authority) = with_parsed_program(
+        "export const answer = 42;",
+        FrontendOptions::for_goal(CompilationGoal::Module),
+        |unit| {
+            let syntax = unit.module_syntax().clone();
+            let compiler =
+                CompilationContext::new_with_source_name(unit, Arc::from("<snapshot module>"))
+                    .expect("storage plan");
+            let tree = compiler
+                .compile_module_with_all_limits(
+                    fusor_bytecode::VerificationLimits::default(),
+                    fusor_bytecode::FunctionGraphVerificationLimits::default(),
+                    fusor_bytecode::BytecodeGraphVerificationLimits::default(),
+                )
+                .expect("verified Module");
+            (syntax, Arc::new(tree.verified_bytecode().clone()))
+        },
+    )
+    .expect("frontend");
+    let mut context = runtime.context(&realm).expect("context");
+    context
+        .register_module(crate::ModuleKey::new(Arc::from("pkg")), syntax, authority)
+        .expect("registered module");
+    drop(context);
+    // Snapshots carry no ESM support (2026-08-14: init scripts are
+    // plain Global Scripts, §8.4), so any module registry fails closed.
+    assert!(
+        matches!(
+            runtime.snapshot(),
+            Err(crate::snapshot::SnapshotError::Unsupported {
+                what: "a module registry",
+                ..
+            })
+        ),
+        "module registries fail closed"
+    );
+}
+
+#[test]
+fn snapshot_round_trips_a_realm_with_user_heap_content() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let built = run_snapshot_script(
+        &mut runtime,
+        &realm,
+        "let secret = 21;\
+         globalThis.holder = {\
+             builtin: Object.prototype,\
+             add: function (x) { return secret + x; },\
+             firstRandom: Math.random(),\
+             secondRandom: Math.random(),\
+         };\
+         'built';",
+    );
+    assert_eq!(built, "built");
+
+    let blob = runtime.snapshot().expect("snapshot");
+    // The blob freezes the math-random state after two calls; the next
+    // call on the encode side continues the sequence, and the restored
+    // realm must produce exactly that value on its first call.
+    let recorded_state = runtime
+        .realms
+        .get(realm.id())
+        .expect("realm state")
+        .math_random_state;
+    let third_random = run_snapshot_script(&mut runtime, &realm, "String(Math.random());");
+    let mut restored = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let restored_realms = restored.from_snapshot(&blob).expect("restore");
+    assert_eq!(restored_realms.len(), 1, "one realm restored");
+    let restored_realm = restored_realms[0].clone();
+    assert_eq!(
+        restored
+            .realms
+            .get(restored_realm.id())
+            .expect("restored realm state")
+            .math_random_state,
+        recorded_state,
+        "the math-random sequence continues exactly where it froze"
+    );
+    assert_eq!(
+        run_snapshot_script(&mut restored, &restored_realm, "String(Math.random());"),
+        third_random,
+        "the restored sequence produces the frozen continuation"
+    );
+
+    // The intrinsic graph was rebuilt deterministically (§8.2), so builtin
+    // identities hold; the user heap (closure over the global lexical
+    // binding, the builtin reference) round-tripped.
+    let probe = run_snapshot_script(
+        &mut restored,
+        &restored_realm,
+        "String(\
+             !(holder.add(1) === 22) ? 'add' :\
+             !(holder.builtin === Object.prototype) ? 'builtin' :\
+             !Array.isArray([]) ? 'isArray' :\
+             !(JSON.stringify({ a: [1] }) === '{\"a\":[1]}') ? 'json' :\
+             'ok'\
+         );",
+    );
+    assert_eq!(probe, "ok", "the restored heap behaves identically");
+}
+
+#[test]
+fn snapshot_round_trips_multiple_realms_created_up_front() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let first = runtime.create_realm().expect("first realm");
+    let second = runtime.create_realm().expect("second realm");
+    run_snapshot_script(&mut runtime, &first, "globalThis.firstTag = 'alpha'; 'a';");
+    run_snapshot_script(&mut runtime, &second, "globalThis.secondTag = 42; 'b';");
+
+    let blob = runtime.snapshot().expect("snapshot");
+    let mut restored = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realms = restored.from_snapshot(&blob).expect("restore");
+    assert_eq!(realms.len(), 2, "both realms restored");
+
+    assert_eq!(
+        run_snapshot_script(&mut restored, &realms[0], "String(globalThis.firstTag);"),
+        "alpha",
+        "first realm keeps its globals"
+    );
+    assert_eq!(
+        run_snapshot_script(&mut restored, &realms[1], "String(globalThis.secondTag);"),
+        "42",
+        "second realm keeps its globals"
+    );
+    assert_eq!(
+        run_snapshot_script(
+            &mut restored,
+            &realms[0],
+            "String(globalThis.secondTag === undefined);",
+        ),
+        "true",
+        "realm globals stay independent"
+    );
+}
+
+#[test]
+fn snapshot_fails_closed_when_a_realm_is_created_after_user_content() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let first = runtime.create_realm().expect("first realm");
+    // A live user record (an object) breaks the realm prefix: realm 2's
+    // segment no longer tiles with realm 1's, so the deterministic replay
+    // cannot reproduce the heap layout.
+    run_snapshot_script(&mut runtime, &first, "globalThis.early = {}; 'ok';");
+    let _second = runtime.create_realm().expect("second realm");
+    assert!(
+        matches!(
+            runtime.snapshot(),
+            Err(crate::snapshot::SnapshotError::Unsupported {
+                what: "user heap content between realm creations",
+                ..
+            })
+        ),
+        "interleaved realm creation fails closed"
+    );
+}
+
+#[test]
+#[test]
+fn snapshot_restores_reclaimed_heap_slots_with_stable_identities() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    run_snapshot_script(
+        &mut runtime,
+        &realm,
+        "(function () {\
+             let a = {}; let b = {}; a.peer = b; b.peer = a;\
+         })();\
+         globalThis.live = { tag: 'keep' };\
+         'ok';",
+    );
+    runtime.collect_cycles().expect("collect");
+    // The collected cycle left holes in the heap arenas; the gap encoding
+    // must keep every surviving record's identity stable across restore.
+    let blob = runtime.snapshot().expect("snapshot");
+    let mut restored = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realms = restored.from_snapshot(&blob).expect("restore");
+    let probe = run_snapshot_script(
+        &mut restored,
+        &realms[0],
+        "globalThis.live.tag === 'keep' ? 'kept' : 'lost';",
+    );
+    assert_eq!(probe, "kept", "surviving records keep their identities");
+    // The restored arena accepts further collection and allocation.
+    run_snapshot_script(
+        &mut restored,
+        &realms[0],
+        "(function () { let c = {}; c.self = c; })(); globalThis.extra = [1, 2]; 'again';",
+    );
+    restored.collect_cycles().expect("collect after restore");
 }

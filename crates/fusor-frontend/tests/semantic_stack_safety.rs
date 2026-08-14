@@ -1,5 +1,5 @@
-use oxc_ast::AstKind;
 use fusor_frontend::{FrontendOptions, ParseMode, with_parsed_program};
+use oxc_ast::AstKind;
 
 const OPERATOR_COUNT: usize = 20_000;
 

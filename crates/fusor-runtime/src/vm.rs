@@ -138,6 +138,7 @@ mod for_in;
 mod from_entries;
 mod generator;
 mod group_by;
+mod host_properties;
 mod import_meta;
 mod instanceof;
 mod intl;
@@ -150,7 +151,7 @@ mod math;
 mod math_sum_precise;
 mod native;
 mod object_intrinsics;
-mod promise;
+pub(crate) mod promise;
 mod promise_combinators;
 mod properties;
 mod proxy;
@@ -177,8 +178,8 @@ pub(crate) use dynamic_import::{
     reject_dynamic_import_load_kind,
 };
 pub(crate) use promise::{
-    drain_host_jobs_with_limits, fulfill_promise_host, perform_targeted_promise_reactions_host,
-    reject_promise_host,
+    drain_host_jobs_with_limits, enqueue_host_job, fulfill_promise_host,
+    perform_targeted_promise_reactions_host, reject_promise_host,
 };
 
 #[allow(
@@ -197,6 +198,11 @@ use {
     reflect::*, regexp::*, set::*, stack::*, string_methods::*, string_raw::*, string_replace::*,
     string_split::*, temporal::*, typed_array::*, uint8_array::*, uri::*, weak_collections::*,
     weak_references::*, with_environment::*,
+};
+
+pub(crate) use host_properties::{
+    host_define_own_property, host_delete_property, host_get_property, host_has_property,
+    host_own_property_keys, host_set_global, host_set_property, host_to_number, host_to_string,
 };
 
 /// Inclusive per-call interpreter limits.
@@ -964,6 +970,7 @@ impl ProxyOwnKeysContinuation {
 
 enum NativeContinuation {
     FunctionSource(FunctionSourceContinuation),
+    HostConstruct(Box<HostConstructContinuation>),
     FunctionApply(FunctionApplyContinuation),
     FunctionBind(FunctionBindContinuation),
     PropertyKey(PropertyKeyContinuation),
@@ -1159,6 +1166,7 @@ impl NativeContinuation {
         match self {
             Self::FunctionSource(state) => usize_to_u64(state.arguments.len())
                 .saturating_add(u64::from(state.construction.is_some())),
+            Self::HostConstruct(state) => state.retained_values(),
             Self::FunctionApply(state) => state.retained_values(),
             Self::FunctionBind(state) => state.retained_values(),
             Self::PropertyKey(state) => state.retained_values(),
@@ -3818,6 +3826,7 @@ fn trace_native_continuation_roots(
                 mark(CollectionRoot::Heap(HeapReference::Function(construction)));
             }
         }
+        NativeContinuation::HostConstruct(state) => state.trace_roots(mark),
         NativeContinuation::FunctionApply(state) => {
             trace_function_apply_roots(state, mark);
         }
@@ -4475,6 +4484,10 @@ fn runtime_collection_execution_error(error: RuntimeError) -> ExecutionError {
             additional,
         },
         RuntimeError::Atom(source) => ExecutionError::Atom(source),
+        RuntimeError::SchemaValidation(_) => EngineFault::RuntimeInvariant {
+            message: "cycle collection returned a realm-schema construction error",
+        }
+        .into(),
     }
 }
 
@@ -5470,6 +5483,39 @@ pub(crate) fn call_function_internal(
     compiler: Option<&Arc<dyn OrdinaryDynamicFunctionCompiler>>,
 ) -> Result<StoredValue, ExecutionError> {
     let mut execution_budget = ExecutionBudget::new(limits);
+    if let Some(resolving) = runtime
+        .functions
+        .get(function)
+        .and_then(|node| node.promise_resolving().cloned())
+    {
+        // Promise resolving functions settle their promise through the
+        // resumable resolution machinery (which may call user code for a
+        // thenable), never through a bytecode frame.
+        let dispatch = dispatch_promise_resolving(
+            runtime,
+            &resolving,
+            CallArguments::from_values(arguments),
+            None,
+            native_function_host_origin(),
+            &mut execution_budget,
+        )
+        .map_err(|failure| match failure {
+            NativeFailure::Execution(error) => error,
+            NativeFailure::Abrupt(pending) | NativeFailure::AbruptAfterTransient(pending) => {
+                match finish_exception(runtime, pending, Vec::new()) {
+                    Ok(exception) => ExecutionError::Exception(exception),
+                    Err(error) => error,
+                }
+            }
+        })?;
+        return execute_root_dispatch_with_budget(
+            runtime,
+            Ok(dispatch),
+            Vec::new(),
+            compiler,
+            &mut execution_budget,
+        );
+    }
     if let Some(native) = runtime
         .functions
         .get(function)

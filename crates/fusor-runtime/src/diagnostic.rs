@@ -199,6 +199,7 @@ impl RuntimeError {
             Self::Atom(_) => "fusor::runtime::atom",
             Self::LimitExceeded { .. } => "fusor::runtime::limit_exceeded",
             Self::AllocationFailed { .. } => "fusor::runtime::allocation_failed",
+            Self::SchemaValidation(_) => "fusor::runtime::schema",
         };
         diagnostic(code, DiagnosticSeverity::Error, self.to_string())
     }
