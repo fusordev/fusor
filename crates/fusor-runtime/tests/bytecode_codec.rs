@@ -6,9 +6,7 @@
 
 use std::sync::Arc;
 
-use fusor_bytecode::{
-    BytecodeCodecError, decode_verified_bytecode, encode_verified_bytecode,
-};
+use fusor_bytecode::{BytecodeCodecError, decode_verified_bytecode, encode_verified_bytecode};
 use fusor_compiler::CompilationContext;
 use fusor_frontend::{CompilationGoal, FrontendOptions, GlobalScriptGoal, with_parsed_program};
 
@@ -75,7 +73,11 @@ fn a_verified_graph_round_trips_through_the_codec() {
         let original_function = original_function.function();
         let decoded_flow = decoded_function.control_flow();
         let original_flow = original_function.control_flow();
-        assert_eq!(decoded_flow.bytecode(), original_flow.bytecode(), "bytecode");
+        assert_eq!(
+            decoded_flow.bytecode(),
+            original_flow.bytecode(),
+            "bytecode"
+        );
         assert_eq!(
             decoded_flow.computed_stack_size(),
             original_flow.computed_stack_size(),
@@ -126,8 +128,16 @@ fn a_verified_graph_round_trips_through_the_codec() {
     }
     assert_eq!(decoded.metadata(), authority.metadata(), "metadata");
     assert_eq!(decoded.usage(), authority.usage(), "usage");
-    assert_eq!(decoded.requirements(), authority.requirements(), "requirements");
-    assert_eq!(&decoded, authority.as_ref(), "the re-verified authority is identical");
+    assert_eq!(
+        decoded.requirements(),
+        authority.requirements(),
+        "requirements"
+    );
+    assert_eq!(
+        &decoded,
+        authority.as_ref(),
+        "the re-verified authority is identical"
+    );
     // The decoded graph still authorizes the original behavior.
     assert_eq!(
         decoded.root().function().control_flow().bytecode(),
@@ -144,7 +154,11 @@ fn a_module_authority_round_trips_with_its_declaration_record() {
     assert!(authority.module().is_some(), "the module record exists");
     let payload = encode_verified_bytecode(&authority).expect("encode");
     let decoded = decode_verified_bytecode(&payload).expect("decode");
-    assert_eq!(&decoded, authority.as_ref(), "the module authority is identical");
+    assert_eq!(
+        &decoded,
+        authority.as_ref(),
+        "the module authority is identical"
+    );
 }
 
 #[test]

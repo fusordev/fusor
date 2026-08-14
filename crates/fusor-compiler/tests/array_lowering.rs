@@ -1,6 +1,4 @@
-use fusor_bytecode::{
-    BytecodePc, ExecutionRequirement, FinalOpcode, Operands, VerificationLimits,
-};
+use fusor_bytecode::{BytecodePc, ExecutionRequirement, FinalOpcode, Operands, VerificationLimits};
 use fusor_compiler::{CompilationContext, CompiledFunctionTree, LeafCompilationError};
 use fusor_frontend::{CompilationGoal, FrontendOptions, GlobalScriptGoal, with_parsed_program};
 
@@ -236,9 +234,9 @@ fn sparse_array_property_sites_share_content_interned_atoms_without_sharing_look
 
     assert_eq!(definitions.len(), 3);
     assert!(
-        definitions.iter().all(|operands| {
-            *operands == Operands::Atom(fusor_bytecode::AtomPoolIndex::new(0))
-        })
+        definitions
+            .iter()
+            .all(|operands| { *operands == Operands::Atom(fusor_bytecode::AtomPoolIndex::new(0)) })
     );
     assert_eq!(atom_text(&tree, 0), "1");
     assert_eq!(atom_text(&tree, 1), "length");

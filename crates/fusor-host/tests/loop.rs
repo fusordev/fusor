@@ -17,9 +17,8 @@ fn script(context: &mut Context<'_>, source: &str) -> String {
             source,
             FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
             |unit| {
-                let context =
-                    CompilationContext::new_with_source_name(unit, Arc::from("loop.js"))
-                        .expect("storage plan");
+                let context = CompilationContext::new_with_source_name(unit, Arc::from("loop.js"))
+                    .expect("storage plan");
                 let tree = context
                     .compile_global_script(fusor_bytecode::VerificationLimits::default())
                     .expect("verified Global Script");
@@ -46,7 +45,10 @@ fn an_empty_loop_exits_immediately() {
     let op_runtime = OpRuntime::new().expect("op runtime");
     fusor_host::ops::install_op_runtime(op_runtime).expect("installed");
     let mut host_loop = HostLoop::new(runtime, realm).expect("host loop");
-    assert!(!host_loop.alive(), "no events and no pending ops: not alive");
+    assert!(
+        !host_loop.alive(),
+        "no events and no pending ops: not alive"
+    );
     host_loop.run_until_idle().expect("idle run");
 }
 
@@ -63,7 +65,10 @@ fn custom_events_run_in_order_with_a_drain_after_each() {
     let order_b = Rc::clone(&order);
     host_loop.post_event(Box::new(move |context| {
         order_a.borrow_mut().push("a");
-        script(context, "Promise.resolve().then(function () { globalThis.afterA = true; }); 'ok';");
+        script(
+            context,
+            "Promise.resolve().then(function () { globalThis.afterA = true; }); 'ok';",
+        );
         Ok(())
     }));
     host_loop.post_event(Box::new(move |context| {

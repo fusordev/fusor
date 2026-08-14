@@ -3527,9 +3527,7 @@ pub(super) fn execute_one(
                 .authority
                 .function(frame.template)
                 .and_then(|function| function.metadata().closures().get(index as usize))
-                .is_some_and(
-                    fusor_bytecode::ClosureVariableDefinition::is_deletable_eval_variable,
-                );
+                .is_some_and(fusor_bytecode::ClosureVariableDefinition::is_deletable_eval_variable);
             if deletable_eval_variable {
                 let value = match duplicate_environment(runtime, frame, index, false) {
                     Ok(value) => value,

@@ -1370,16 +1370,12 @@ fn live_property_slots(runtime: &Runtime) -> u64 {
 
 #[test]
 fn array_from_is_admitted_by_whole_graph_runtime_preflight() {
-    assert!(is_supported_opcode(
-        fusor_bytecode::FinalOpcode::ArrayFrom
-    ));
+    assert!(is_supported_opcode(fusor_bytecode::FinalOpcode::ArrayFrom));
 }
 
 #[test]
 fn spread_eval_is_admitted_by_whole_graph_runtime_preflight() {
-    assert!(is_supported_opcode(
-        fusor_bytecode::FinalOpcode::ApplyEval
-    ));
+    assert!(is_supported_opcode(fusor_bytecode::FinalOpcode::ApplyEval));
 }
 
 #[test]
@@ -1392,9 +1388,7 @@ fn inferred_function_name_opcode_is_admitted_by_whole_graph_runtime_preflight() 
 
 #[test]
 fn realm_global_delete_opcode_is_admitted_by_whole_graph_runtime_preflight() {
-    assert!(is_supported_opcode(
-        fusor_bytecode::FinalOpcode::DeleteVar
-    ));
+    assert!(is_supported_opcode(fusor_bytecode::FinalOpcode::DeleteVar));
 }
 
 #[test]

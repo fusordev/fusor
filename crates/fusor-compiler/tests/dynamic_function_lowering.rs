@@ -346,14 +346,9 @@ fn unresolved_names_lower_through_constructor_realm_global_slots() {
     // Unresolved global writes lower through the reference-based mutation
     // pair (make_var_ref_ref / put_ref_value) in the current encoding.
     assert!(
-        wrapper_opcodes
-            .iter()
-            .any(|(opcode, _)| {
-                matches!(
-                    *opcode,
-                    FinalOpcode::PutVar | FinalOpcode::PutRefValue
-                )
-            })
+        wrapper_opcodes.iter().any(|(opcode, _)| {
+            matches!(*opcode, FinalOpcode::PutVar | FinalOpcode::PutRefValue)
+        })
     );
     assert!(
         wrapper_opcodes
@@ -425,16 +420,9 @@ fn unresolved_global_mutation_forms_remain_whole_function_verified() {
             .expect("verified constructor-realm global mutation");
         let wrapper = &tree.functions()[1];
 
-        assert!(
-            opcodes(wrapper)
-                .iter()
-                .any(|(opcode, _)| {
-                    matches!(
-                        *opcode,
-                        FinalOpcode::PutVar | FinalOpcode::PutRefValue
-                    )
-                })
-        );
+        assert!(opcodes(wrapper).iter().any(|(opcode, _)| {
+            matches!(*opcode, FinalOpcode::PutVar | FinalOpcode::PutRefValue)
+        }));
     }
 }
 
@@ -955,5 +943,3 @@ fn var_initializer_runs_after_merged_function_instantiation() {
         "the source-order var initializer overwrites the hoisted function later"
     );
 }
-
-

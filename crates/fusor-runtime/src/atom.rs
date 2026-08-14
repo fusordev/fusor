@@ -1024,7 +1024,8 @@ fn compare_code_units(left: &JsString, right: &JsString) -> std::cmp::Ordering {
     }
 }
 
-fn dead_slots(bucket: &[Weak<AtomEntry>]) -> u32 {    bucket.iter().fold(0_u32, |count, entry| {
+fn dead_slots(bucket: &[Weak<AtomEntry>]) -> u32 {
+    bucket.iter().fold(0_u32, |count, entry| {
         count.saturating_add(u32::from(entry.strong_count() == 0))
     })
 }

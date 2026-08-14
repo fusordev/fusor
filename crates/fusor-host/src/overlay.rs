@@ -21,21 +21,25 @@ mod core;
 
 pub use core::CoreOverlay;
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::error::Error;
 use std::fmt;
 use std::sync::Arc;
 
 use fusor_bytecode::{VerificationLimits, VerifiedBytecode};
 use fusor_compiler::{CompilationContext, CompilerError, LeafCompilationError};
-use fusor_frontend::{CompilationGoal, FrontendError, FrontendOptions, GlobalScriptGoal, with_parsed_program};
+use fusor_frontend::{
+    CompilationGoal, FrontendError, FrontendOptions, GlobalScriptGoal, with_parsed_program,
+};
 use fusor_runtime::{
     Context, ExecutionError, ExecutionLimits, GlobalScriptError, Realm, Runtime, RuntimeError,
     RuntimeLimits,
 };
 
-use crate::ops::{OpDeclarationConflict, OpRegistry, install_namespace, install_op, install_process};
 use crate::r#loop::{HostLoop, HostLoopError};
+use crate::ops::{
+    OpDeclarationConflict, OpRegistry, install_namespace, install_op, install_process,
+};
 
 /// One embedded init script contributed by an overlay's init phase (§9,
 /// §8.4): a Global Script — no ESM. The specifier names the source
@@ -206,12 +210,12 @@ impl HostRuntimeBuilder {
             collect_init_sources(&order, &self.overlays)?;
             for &index in &order {
                 let overlay = &self.overlays[index];
-                evaluate_init_scripts(&mut context, &overlay.init_sources()).map_err(
-                    |error| HostBuildError::InitScript {
+                evaluate_init_scripts(&mut context, &overlay.init_sources()).map_err(|error| {
+                    HostBuildError::InitScript {
                         overlay: overlay.name(),
                         error,
-                    },
-                )?;
+                    }
+                })?;
             }
         }
         Ok(HostRuntime { runtime, realm })
@@ -276,7 +280,11 @@ impl fmt::Display for HostBuildError {
                 "overlay '{overlay}' depends on unknown overlay '{dependency}'"
             ),
             Self::DependencyCycle { cycle } => {
-                write!(formatter, "overlay dependency cycle: {}", cycle.join(" -> "))
+                write!(
+                    formatter,
+                    "overlay dependency cycle: {}",
+                    cycle.join(" -> ")
+                )
             }
             Self::OpConflict(conflict) => conflict.fmt(formatter),
             Self::DuplicateInitSource { specifier } => write!(
@@ -394,7 +402,10 @@ fn collect_init_sources(
     let mut sources = HashMap::new();
     for &index in order {
         for source in overlays[index].init_sources() {
-            if sources.insert(source.specifier.clone(), source.text).is_some() {
+            if sources
+                .insert(source.specifier.clone(), source.text)
+                .is_some()
+            {
                 return Err(HostBuildError::DuplicateInitSource {
                     specifier: source.specifier,
                 });
@@ -415,7 +426,10 @@ enum CompileFailure {
 /// Compiles one init source (Global Script goal, §8.4) against the
 /// default verification limits, with the specifier as the source name so
 /// diagnostics and stack frames report the virtual location.
-fn compile_init_script(text: &str, specifier: &str) -> Result<Arc<VerifiedBytecode>, InitScriptError> {
+fn compile_init_script(
+    text: &str,
+    specifier: &str,
+) -> Result<Arc<VerifiedBytecode>, InitScriptError> {
     let source_name: Arc<str> = Arc::from(specifier);
     with_parsed_program(
         text,

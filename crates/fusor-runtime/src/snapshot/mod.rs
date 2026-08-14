@@ -149,14 +149,13 @@ use crate::{
     ids::{FunctionId, ObjectId, RealmId},
     object::{
         ArgumentsState, ArrayState, ArrayStorage, BoxedPrimitive, DateState, ErrorState,
-        HeapObject, HeapObjectKind, MapEntry, MapState, ObjectRecord, PropertySlot,
-        RegExpState, SetState, ShapeProperty,
+        HeapObject, HeapObjectKind, MapEntry, MapState, ObjectRecord, PropertySlot, RegExpState,
+        SetState, ShapeProperty,
     },
     runtime::{
         BindingCell, BytecodeFunction, EnvironmentBinding, EvalBindingShadow,
-        EvalVariableEnvironment, EvalVariableEnvironmentKind, FunctionImplementation,
-        HeapFunction, InstalledCode, RealmGlobalBinding, RealmGlobalBindingState,
-        SharedEvalVariableEnvironment,
+        EvalVariableEnvironment, EvalVariableEnvironmentKind, FunctionImplementation, HeapFunction,
+        InstalledCode, RealmGlobalBinding, RealmGlobalBindingState, SharedEvalVariableEnvironment,
     },
     value::{HeapReference, SlotValue, StoredValue},
 };
@@ -517,7 +516,11 @@ impl Runtime {
                 SECTION_FUNCTIONS => staged_functions = Some(decode_functions(payload)?),
                 SECTION_REALMS => staged_realms = Some(decode_realms(payload)?),
                 SECTION_BINDINGS => staged_bindings = Some(decode_bindings(payload)?),
-                other => return Err(SnapshotError::FormatMismatch { found: u32::from(other) }),
+                other => {
+                    return Err(SnapshotError::FormatMismatch {
+                        found: u32::from(other),
+                    });
+                }
             }
         }
         if reader.remaining() != 0 {
@@ -571,7 +574,9 @@ impl Runtime {
         // (objects and functions first so cross-references can resolve),
         // then patch the record contents in dependency order.
         if let Some(atoms) = atoms {
-            self.atoms.restore_atoms(&atoms).map_err(SnapshotError::Atom)?;
+            self.atoms
+                .restore_atoms(&atoms)
+                .map_err(SnapshotError::Atom)?;
         }
         let (object_ids, pending_objects) = match staged_objects {
             Some(staged) => restore_objects(self, staged, objects_watermark)?,
@@ -622,8 +627,7 @@ impl Runtime {
                 state.math_random_state = record.math_random_state;
                 state.global_bindings.clear();
             }
-            let resolved =
-                resolve_object_record(self, staged_global, &object_ids, &function_ids)?;
+            let resolved = resolve_object_record(self, staged_global, &object_ids, &function_ids)?;
             let state = self
                 .realms
                 .get(realm_id)
@@ -643,9 +647,7 @@ impl Runtime {
                 .realms
                 .get_mut(realm_id)
                 .ok_or(SnapshotError::IntegrityViolation)?;
-            state
-                .global_bindings
-                .insert(binding.name.clone(), id);
+            state.global_bindings.insert(binding.name.clone(), id);
         }
         Ok(realms)
     }
@@ -689,7 +691,11 @@ pub(crate) fn decode_atoms(payload: &[u8]) -> Result<Vec<(AtomKind, JsString)>, 
         let kind = match reader.read_u8()? {
             0 => AtomKind::String,
             1 => AtomKind::GlobalSymbol,
-            other => return Err(SnapshotError::FormatMismatch { found: u32::from(other) }),
+            other => {
+                return Err(SnapshotError::FormatMismatch {
+                    found: u32::from(other),
+                });
+            }
         };
         let unit_count = reader.read_u32()?;
         let mut units = Vec::new();
@@ -814,10 +820,7 @@ fn encode_objects(runtime: &Runtime, watermark: usize) -> Result<Vec<u8>, Snapsh
 
 /// Encodes one exotic-kind tag and payload (format above); returns the
 /// unsupported content name on failure.
-fn encode_object_kind(
-    payload: &mut Vec<u8>,
-    kind: &HeapObjectKind,
-) -> Result<(), &'static str> {
+fn encode_object_kind(payload: &mut Vec<u8>, kind: &HeapObjectKind) -> Result<(), &'static str> {
     match kind {
         HeapObjectKind::Ordinary => payload.push(0),
         HeapObjectKind::Array(state) => {
@@ -890,9 +893,7 @@ fn encode_object_kind(
             let live = state.len();
             payload.extend_from_slice(&(live as u32).to_le_bytes());
             for position in 0..state.retained_len() {
-                let entry = state
-                    .entry(position)
-                    .ok_or("a map entry index")?;
+                let entry = state.entry(position).ok_or("a map entry index")?;
                 if !entry.is_live() {
                     continue;
                 }
@@ -1285,7 +1286,11 @@ fn decode_staged_value(reader: &mut codec::Reader<'_>) -> Result<StagedValue, Sn
         }
         7 => StagedValue::Object(reader.read_u32()? as usize),
         8 => StagedValue::Function(reader.read_u32()? as usize),
-        other => return Err(SnapshotError::FormatMismatch { found: u32::from(other) }),
+        other => {
+            return Err(SnapshotError::FormatMismatch {
+                found: u32::from(other),
+            });
+        }
     })
 }
 
@@ -1333,7 +1338,11 @@ fn decode_bindings(payload: &[u8]) -> Result<Vec<StagedBinding>, SnapshotError> 
         let kind = match reader.read_u8()? {
             0 => AtomKind::String,
             1 => AtomKind::GlobalSymbol,
-            other => return Err(SnapshotError::FormatMismatch { found: u32::from(other) }),
+            other => {
+                return Err(SnapshotError::FormatMismatch {
+                    found: u32::from(other),
+                });
+            }
         };
         let unit_count = reader.read_u32()?;
         let mut units = Vec::new();
@@ -1344,7 +1353,11 @@ fn decode_bindings(payload: &[u8]) -> Result<Vec<StagedBinding>, SnapshotError> 
             0 => (0, None, false),
             1 => (1, None, false),
             2 => (2, Some(reader.read_u32()?), reader.read_u8()? != 0),
-            other => return Err(SnapshotError::FormatMismatch { found: u32::from(other) }),
+            other => {
+                return Err(SnapshotError::FormatMismatch {
+                    found: u32::from(other),
+                });
+            }
         };
         staged.push(StagedBinding {
             index,
@@ -1470,9 +1483,12 @@ fn resolve_object_kind(
                     for element in elements {
                         resolved.push(match element {
                             None => None,
-                            Some(value) => {
-                                Some(resolve_staged_value(runtime, value, object_ids, function_ids)?)
-                            }
+                            Some(value) => Some(resolve_staged_value(
+                                runtime,
+                                value,
+                                object_ids,
+                                function_ids,
+                            )?),
                         });
                     }
                     let present = resolved.iter().filter(|element| element.is_some()).count();
@@ -1493,9 +1509,9 @@ fn resolve_object_kind(
         StagedObjectKind::Boxed(boxed) => HeapObjectKind::BoxedPrimitive(match boxed {
             StagedBoxed::Boolean(value) => BoxedPrimitive::Boolean(value),
             StagedBoxed::Number(value) => BoxedPrimitive::Number(JsNumber::from_f64(value)),
-            StagedBoxed::BigInt(limbs) => BoxedPrimitive::BigInt(std::sync::Arc::new(
-                JsBigInt::from_normalized_limbs(limbs),
-            )),
+            StagedBoxed::BigInt(limbs) => {
+                BoxedPrimitive::BigInt(std::sync::Arc::new(JsBigInt::from_normalized_limbs(limbs)))
+            }
             StagedBoxed::String(units) => BoxedPrimitive::String(
                 JsString::from_code_units(units).map_err(SnapshotError::String)?,
             ),
@@ -1603,12 +1619,20 @@ fn decode_cells(payload: &[u8]) -> Result<Vec<StagedCell>, SnapshotError> {
         let value = match reader.read_u8()? {
             0 => None,
             1 => Some(decode_staged_value(&mut reader)?),
-            other => return Err(SnapshotError::FormatMismatch { found: u32::from(other) }),
+            other => {
+                return Err(SnapshotError::FormatMismatch {
+                    found: u32::from(other),
+                });
+            }
         };
         let forward = match reader.read_u8()? {
             0 => None,
             1 => Some(reader.read_u32()? as usize),
-            other => return Err(SnapshotError::FormatMismatch { found: u32::from(other) }),
+            other => {
+                return Err(SnapshotError::FormatMismatch {
+                    found: u32::from(other),
+                });
+            }
         };
         staged.push(StagedCell {
             index,
@@ -1647,13 +1671,22 @@ fn restore_cells(
         }
         let value = match cell.value {
             None => SlotValue::Uninitialized,
-            Some(value) => {
-                SlotValue::Value(resolve_staged_value(runtime, value, object_ids, function_ids)?)
-            }
+            Some(value) => SlotValue::Value(resolve_staged_value(
+                runtime,
+                value,
+                object_ids,
+                function_ids,
+            )?),
         };
         let id = runtime
             .cells
-            .restore_insert(index, BindingCell { value, forward: None })
+            .restore_insert(
+                index,
+                BindingCell {
+                    value,
+                    forward: None,
+                },
+            )
             .ok_or(SnapshotError::IntegrityViolation)?;
         ids.push(id);
     }
@@ -1720,14 +1753,15 @@ fn restore_bindings(
                     mutable: binding.mutable,
                 }
             }
-            other => return Err(SnapshotError::FormatMismatch { found: u32::from(other) }),
+            other => {
+                return Err(SnapshotError::FormatMismatch {
+                    found: u32::from(other),
+                });
+            }
         };
         let id = runtime
             .global_bindings
-            .restore_insert(
-                index,
-                RealmGlobalBinding { realm, name, state },
-            )
+            .restore_insert(index, RealmGlobalBinding { realm, name, state })
             .ok_or(SnapshotError::IntegrityViolation)?;
         ids.push(id);
     }
@@ -1748,9 +1782,9 @@ fn resolve_staged_value(
         StagedValue::Null => StoredValue::Null,
         StagedValue::Boolean(value) => StoredValue::Boolean(value),
         StagedValue::Number(value) => StoredValue::Number(JsNumber::from_f64(value)),
-        StagedValue::BigInt(limbs) => StoredValue::BigInt(std::sync::Arc::new(
-            JsBigInt::from_normalized_limbs(limbs),
-        )),
+        StagedValue::BigInt(limbs) => {
+            StoredValue::BigInt(std::sync::Arc::new(JsBigInt::from_normalized_limbs(limbs)))
+        }
         StagedValue::String(units) => {
             let string = JsString::from_code_units(units).map_err(SnapshotError::String)?;
             StoredValue::String(string)
@@ -1764,14 +1798,18 @@ fn resolve_staged_value(
             StoredValue::Symbol(atom)
         }
         StagedValue::Object(index) => {
-            let target = *object_ids.get(index).ok_or(SnapshotError::IntegrityViolation)?;
+            let target = *object_ids
+                .get(index)
+                .ok_or(SnapshotError::IntegrityViolation)?;
             if target == ObjectId::ZERO {
                 return Err(SnapshotError::IntegrityViolation);
             }
             StoredValue::Object(target)
         }
         StagedValue::Function(index) => {
-            let target = *function_ids.get(index).ok_or(SnapshotError::IntegrityViolation)?;
+            let target = *function_ids
+                .get(index)
+                .ok_or(SnapshotError::IntegrityViolation)?;
             if target == FunctionId::ZERO {
                 return Err(SnapshotError::IntegrityViolation);
             }
@@ -1779,7 +1817,6 @@ fn resolve_staged_value(
         }
     })
 }
-
 
 /// One staged (not yet resolved) function from the functions section.
 struct StagedFunction {
@@ -1841,20 +1878,18 @@ fn intern_environment(
 /// host functions carry their realm explicitly. The shared eval-variable
 /// environment DAG rides along as a node list. Engine intrinsics and
 /// non-bytecode implementation kinds fail closed (§8.2).
-fn encode_functions(
-    runtime: &Runtime,
-    watermark: usize,
-) -> Result<Vec<u8>, SnapshotError> {
+fn encode_functions(runtime: &Runtime, watermark: usize) -> Result<Vec<u8>, SnapshotError> {
     let mut code_payloads: Vec<(usize, RealmId, Vec<u8>)> = Vec::new();
     for (code_id, code) in runtime.code.iter() {
-        let encoded = fusor_bytecode::encode_verified_bytecode(&code.authority).map_err(|error| {
-            SnapshotError::Unsupported {
-                index: code_id.index(),
-                what: match error {
-                    _ => "a verified bytecode authority",
-                },
-            }
-        })?;
+        let encoded =
+            fusor_bytecode::encode_verified_bytecode(&code.authority).map_err(|error| {
+                SnapshotError::Unsupported {
+                    index: code_id.index(),
+                    what: match error {
+                        _ => "a verified bytecode authority",
+                    },
+                }
+            })?;
         code_payloads.push((code_id.index(), code.realm, encoded));
     }
     let code_ordinals: std::collections::HashMap<usize, u32> = code_payloads
@@ -1957,11 +1992,8 @@ fn encode_functions(
                     None => payload.push(0),
                     Some(environment) => {
                         payload.push(1);
-                        let ordinal = intern_environment(
-                            environment,
-                            &mut env_ordinals,
-                            &mut env_nodes,
-                        )?;
+                        let ordinal =
+                            intern_environment(environment, &mut env_ordinals, &mut env_nodes)?;
                         payload.extend_from_slice(&ordinal.to_le_bytes());
                     }
                 }
@@ -2029,11 +2061,12 @@ fn encode_functions(
                         payload.extend_from_slice(&(function.index() as u32).to_le_bytes());
                     }
                 }
-                encode_object_record_payload(&mut payload, &function.object)
-                    .map_err(|what| SnapshotError::Unsupported {
+                encode_object_record_payload(&mut payload, &function.object).map_err(|what| {
+                    SnapshotError::Unsupported {
                         index: function_id.index(),
                         what,
-                    })?;
+                    }
+                })?;
             }
             FunctionImplementation::Native(native) => match native.kind {
                 crate::runtime::NativeFunctionKind::Host(slot) => {
@@ -2045,12 +2078,12 @@ fn encode_functions(
                         payload.extend_from_slice(&(native.realm.index() as u32).to_le_bytes());
                     }
                     payload.extend_from_slice(&(slot.index() as u32).to_le_bytes());
-                    encode_object_record_payload(&mut payload, &function.object).map_err(|what| {
-                        SnapshotError::Unsupported {
+                    encode_object_record_payload(&mut payload, &function.object).map_err(
+                        |what| SnapshotError::Unsupported {
                             index: function_id.index(),
                             what,
-                        }
-                    })?;
+                        },
+                    )?;
                 }
                 _ => {
                     return Err(SnapshotError::Unsupported {
@@ -2121,7 +2154,6 @@ fn encode_bindings(runtime: &Runtime) -> Result<Vec<u8>, SnapshotError> {
     Ok(payload)
 }
 
-
 fn write_function_ref(buffer: &mut Vec<u8>, target: Option<FunctionId>) {
     match target {
         Some(function) => {
@@ -2180,7 +2212,11 @@ fn decode_object_record_content(
         0 => None,
         1 => Some((1, reader.read_u32()? as usize)),
         2 => Some((2, reader.read_u32()? as usize)),
-        other => return Err(SnapshotError::FormatMismatch { found: u32::from(other) }),
+        other => {
+            return Err(SnapshotError::FormatMismatch {
+                found: u32::from(other),
+            });
+        }
     };
     let extensible = reader.read_u8()? != 0;
     let is_html_dda = reader.read_u8()? != 0;
@@ -2195,7 +2231,7 @@ fn decode_object_record_content(
                     1 => AtomKind::GlobalSymbol,
                     other => {
                         return Err(SnapshotError::FormatMismatch {
-                            found: u32::from(other)
+                            found: u32::from(other),
                         });
                     }
                 };
@@ -2208,7 +2244,9 @@ fn decode_object_record_content(
             }
             2 => StagedKey::Predefined(reader.read_u32()?),
             other => {
-                return Err(SnapshotError::FormatMismatch { found: u32::from(other) });
+                return Err(SnapshotError::FormatMismatch {
+                    found: u32::from(other),
+                });
             }
         };
         let layout = match reader.read_u8()? {
@@ -2220,7 +2258,11 @@ fn decode_object_record_content(
                 let bits = reader.read_u8()?;
                 PropertyLayout::accessor(bits & 2 != 0, bits & 4 != 0)
             }
-            other => return Err(SnapshotError::FormatMismatch { found: u32::from(other) }),
+            other => {
+                return Err(SnapshotError::FormatMismatch {
+                    found: u32::from(other),
+                });
+            }
         };
         shape.push((key, layout));
     }
@@ -2274,7 +2316,11 @@ fn decode_functions(
         let realm = match reader.read_u8()? {
             0 => None,
             1 => Some(reader.read_u32()? as usize),
-            other => return Err(SnapshotError::FormatMismatch { found: u32::from(other) }),
+            other => {
+                return Err(SnapshotError::FormatMismatch {
+                    found: u32::from(other),
+                });
+            }
         };
         let length = reader.read_u32()? as usize;
         let encoded = reader.read_bytes(length)?;
@@ -2287,7 +2333,11 @@ fn decode_functions(
     for _ in 0..env_count {
         let kind = match reader.read_u8()? {
             kind @ 0..=3 => kind,
-            other => return Err(SnapshotError::FormatMismatch { found: u32::from(other) }),
+            other => {
+                return Err(SnapshotError::FormatMismatch {
+                    found: u32::from(other),
+                });
+            }
         };
         let parent = match reader.read_u8()? {
             0 => None,
@@ -2298,7 +2348,11 @@ fn decode_functions(
                 }
                 Some(parent)
             }
-            other => return Err(SnapshotError::FormatMismatch { found: u32::from(other) }),
+            other => {
+                return Err(SnapshotError::FormatMismatch {
+                    found: u32::from(other),
+                });
+            }
         };
         let binding_count = reader.read_u32()?;
         let mut bindings = Vec::new();
@@ -2312,7 +2366,11 @@ fn decode_functions(
             let deleted = reader.read_u8()? != 0;
             bindings.push((units, cell, deleted));
         }
-        environments.push(StagedEnvironment { kind, parent, bindings });
+        environments.push(StagedEnvironment {
+            kind,
+            parent,
+            bindings,
+        });
     }
     let function_count = reader.read_u32()?;
     let mut functions = Vec::new();
@@ -2331,7 +2389,9 @@ fn decode_functions(
                     match tag {
                         0 | 1 => environment.push((tag, index)),
                         other => {
-                            return Err(SnapshotError::FormatMismatch { found: u32::from(other) });
+                            return Err(SnapshotError::FormatMismatch {
+                                found: u32::from(other),
+                            });
                         }
                     }
                 }
@@ -2345,7 +2405,9 @@ fn decode_functions(
                         Some(ordinal)
                     }
                     other => {
-                        return Err(SnapshotError::FormatMismatch { found: u32::from(other) });
+                        return Err(SnapshotError::FormatMismatch {
+                            found: u32::from(other),
+                        });
                     }
                 };
                 let shadow_count = reader.read_u32()?;
@@ -2376,7 +2438,9 @@ fn decode_functions(
                             Some((head, boundary))
                         }
                         other => {
-                            return Err(SnapshotError::FormatMismatch { found: u32::from(other) });
+                            return Err(SnapshotError::FormatMismatch {
+                                found: u32::from(other),
+                            });
                         }
                     });
                 }
@@ -2384,7 +2448,9 @@ fn decode_functions(
                     0 => None,
                     1 => Some(decode_staged_value(&mut reader)?),
                     other => {
-                        return Err(SnapshotError::FormatMismatch { found: u32::from(other) });
+                        return Err(SnapshotError::FormatMismatch {
+                            found: u32::from(other),
+                        });
                     }
                 };
                 let lexical_eval_in_function = reader.read_u8()? != 0;
@@ -2395,7 +2461,9 @@ fn decode_functions(
                     0 => None,
                     1 => Some(reader.read_u32()?),
                     other => {
-                        return Err(SnapshotError::FormatMismatch { found: u32::from(other) });
+                        return Err(SnapshotError::FormatMismatch {
+                            found: u32::from(other),
+                        });
                     }
                 };
                 let has_instance_elements = reader.read_u8()? != 0;
@@ -2404,7 +2472,9 @@ fn decode_functions(
                     1 => Some((1, reader.read_u32()?)),
                     2 => Some((2, reader.read_u32()?)),
                     other => {
-                        return Err(SnapshotError::FormatMismatch { found: u32::from(other) });
+                        return Err(SnapshotError::FormatMismatch {
+                            found: u32::from(other),
+                        });
                     }
                 };
                 let record = decode_object_record_content(&mut reader)?;
@@ -2433,7 +2503,9 @@ fn decode_functions(
                     0 => None,
                     1 => Some(reader.read_u32()? as usize),
                     other => {
-                        return Err(SnapshotError::FormatMismatch { found: u32::from(other) });
+                        return Err(SnapshotError::FormatMismatch {
+                            found: u32::from(other),
+                        });
                     }
                 };
                 let slot = reader.read_u32()?;
@@ -2444,7 +2516,11 @@ fn decode_functions(
                     record,
                 });
             }
-            other => return Err(SnapshotError::FormatMismatch { found: u32::from(other) }),
+            other => {
+                return Err(SnapshotError::FormatMismatch {
+                    found: u32::from(other),
+                });
+            }
         }
     }
     if reader.remaining() != 0 {
@@ -2457,7 +2533,9 @@ fn read_function_ref(reader: &mut codec::Reader<'_>) -> Result<Option<usize>, Sn
     match reader.read_u8()? {
         0 => Ok(None),
         1 => Ok(Some(reader.read_u32()? as usize)),
-        other => Err(SnapshotError::FormatMismatch { found: u32::from(other) }),
+        other => Err(SnapshotError::FormatMismatch {
+            found: u32::from(other),
+        }),
     }
 }
 
@@ -2526,7 +2604,8 @@ fn resolve_object_record_content(
                 }
             }
             StagedKey::Atom(kind, units) => {
-                let description = JsString::from_code_units(units).map_err(SnapshotError::String)?;
+                let description =
+                    JsString::from_code_units(units).map_err(SnapshotError::String)?;
                 let atom = match kind {
                     AtomKind::String => runtime
                         .atoms
@@ -2564,7 +2643,9 @@ fn resolve_object_record_content(
     let prototype = match prototype {
         None => None,
         Some((1, index)) => {
-            let target = *object_ids.get(index).ok_or(SnapshotError::IntegrityViolation)?;
+            let target = *object_ids
+                .get(index)
+                .ok_or(SnapshotError::IntegrityViolation)?;
             if target == ObjectId::ZERO {
                 return Err(SnapshotError::IntegrityViolation);
             }
@@ -2643,7 +2724,9 @@ fn restore_functions(
                 2 => EvalVariableEnvironmentKind::ParameterBoundary,
                 3 => EvalVariableEnvironmentKind::FunctionBody,
                 other => {
-                    return Err(SnapshotError::FormatMismatch { found: u32::from(other) });
+                    return Err(SnapshotError::FormatMismatch {
+                        found: u32::from(other),
+                    });
                 }
             },
             parent,
@@ -2804,9 +2887,9 @@ fn restore_functions(
                 });
                 FunctionImplementation::Native(crate::runtime::NativeFunction {
                     realm,
-                    kind: crate::runtime::NativeFunctionKind::Host(
-                        crate::HostFunctionId::new(slot as usize),
-                    ),
+                    kind: crate::runtime::NativeFunctionKind::Host(crate::HostFunctionId::new(
+                        slot as usize,
+                    )),
                 })
             }
         };
@@ -2903,7 +2986,12 @@ fn resolve_function_records(
             None => None,
         };
         let lexical_receiver = match pending.lexical_receiver {
-            Some(value) => Some(resolve_staged_value(runtime, value, object_ids, function_ids)?),
+            Some(value) => Some(resolve_staged_value(
+                runtime,
+                value,
+                object_ids,
+                function_ids,
+            )?),
             None => None,
         };
         let home_object = match pending.home_object {

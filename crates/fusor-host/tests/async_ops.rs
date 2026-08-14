@@ -125,19 +125,17 @@ fn async_ops_return_promises_that_settle_after_polling() {
         context
             .drain_host_jobs(ExecutionLimits::default(), None)
             .expect("drain");
-        assert_eq!(script_text(context, "String(settled + '|' + result);"), "true|42");
+        assert_eq!(
+            script_text(context, "String(settled + '|' + result);"),
+            "true|42"
+        );
     });
 }
 
 #[test]
 fn async_op_errors_reject_the_promise_with_the_op_class() {
     with_host(|context| {
-        install_op(
-            context,
-            op_async_fail::declaration(),
-            op_async_fail::call,
-        )
-        .expect("async fail");
+        install_op(context, op_async_fail::declaration(), op_async_fail::call).expect("async fail");
 
         script(
             context,
@@ -171,5 +169,3 @@ fn the_spawned_future_is_send_static_and_owns_its_values() {
     let future = async { op_async_double(3).await };
     assert_send_static(future);
 }
-
-

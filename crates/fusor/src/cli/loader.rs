@@ -220,8 +220,8 @@ mod tests {
             Rc::new(RefCell::new(None));
         let outcome = Rc::clone(&evaluate_outcome);
         host_loop.post_event(Box::new(move |context| {
-            let result = evaluate_preloaded_module_graph(context, &source, &name, edges, limits)
-                .map(|_| ());
+            let result =
+                evaluate_preloaded_module_graph(context, &source, &name, edges, limits).map(|_| ());
             *outcome.borrow_mut() = Some(result);
             Ok(())
         }));

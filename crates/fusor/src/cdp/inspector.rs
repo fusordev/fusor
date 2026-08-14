@@ -205,9 +205,7 @@ impl ObjectRegistry {
         self.entries
             .iter()
             .find(|(_, entry)| match &entry.value {
-                RegistryEntryValue::Live(candidate) => {
-                    same_identity(value, candidate)
-                }
+                RegistryEntryValue::Live(candidate) => same_identity(value, candidate),
                 RegistryEntryValue::CollectionEntries(_) => false,
             })
             .map(|(id, _)| *id)
@@ -846,7 +844,9 @@ pub fn exception_thrown_event(
             // real SyntaxError object as the exception.
             let uncaught = format!("Uncaught SyntaxError: {text}");
             let exception_remote = match intrinsics {
-                Some(intrinsics) => syntax_error_remote(context, state, intrinsics, text, url, *line, *column),
+                Some(intrinsics) => {
+                    syntax_error_remote(context, state, intrinsics, text, url, *line, *column)
+                }
                 None => json!({
                     "type": "object",
                     "subtype": "error",
@@ -854,7 +854,13 @@ pub fn exception_thrown_event(
                     "description": format!("SyntaxError: {text}"),
                 }),
             };
-            (uncaught, *line, *column, single_frame_stack_trace(url, *line, *column), exception_remote)
+            (
+                uncaught,
+                *line,
+                *column,
+                single_frame_stack_trace(url, *line, *column),
+                exception_remote,
+            )
         }
         CliException::Execution(error) => {
             let (text, line, column, stack_trace) =
@@ -870,7 +876,15 @@ pub fn exception_thrown_event(
             json!({"type": "object", "subtype": "error", "description": message}),
         ),
     };
-    let details = exception_details(state, &text, line, column, url, stack_trace, exception_remote);
+    let details = exception_details(
+        state,
+        &text,
+        line,
+        column,
+        url,
+        stack_trace,
+        exception_remote,
+    );
     json!({
         "method": "Runtime.exceptionThrown",
         "params": {"timestamp": event_timestamp_ms(), "exceptionDetails": details},
@@ -895,17 +909,19 @@ fn syntax_error_remote(
         line + 1,
         column + 1
     );
-    match context.error_with_stack(
-        fusor_runtime::ErrorObjectKind::SyntaxError,
-        message,
-        &stack,
-    ) {
+    match context.error_with_stack(fusor_runtime::ErrorObjectKind::SyntaxError, message, &stack) {
         Ok(object) => {
             // The frontend concatenates exceptionDetails.text with the
             // exception description into the title line; an empty
             // description keeps the line single (V8 behavior).
-            let mut remote =
-                remote_object(context, &mut state.objects, intrinsics, &object, None, false);
+            let mut remote = remote_object(
+                context,
+                &mut state.objects,
+                intrinsics,
+                &object,
+                None,
+                false,
+            );
             remote["description"] = Value::String(String::new());
             remote
         }
@@ -984,10 +1000,7 @@ fn engine_error_remote_object(
     exception: &fusor_runtime::JsException,
 ) -> Option<Value> {
     let kind = exception.kind()?;
-    let message = exception
-        .message()?
-        .to_utf8_lossy()
-        .ok()?;
+    let message = exception.message()?.to_utf8_lossy().ok()?;
     let family = match kind {
         fusor_runtime::ExceptionKind::RangeError => fusor_runtime::ErrorObjectKind::RangeError,
         fusor_runtime::ExceptionKind::ReferenceError => {
@@ -1207,13 +1220,7 @@ fn call_function_on_request(
                         script_compile_error_position(&error, &function_source);
                     let uncaught = format!("Uncaught SyntaxError: {text}");
                     let exception_remote = syntax_error_remote(
-                        context,
-                        state,
-                        intrinsics,
-                        &text,
-                        "console",
-                        line,
-                        column,
+                        context, state, intrinsics, &text, "console", line, column,
                     );
                     return protocol_result(
                         id,
@@ -1497,7 +1504,11 @@ fn get_properties_request(
             }));
         }
         internal.extend(internal_slot_entries(
-            context, state, intrinsics, &object, generate_preview,
+            context,
+            state,
+            intrinsics,
+            &object,
+            generate_preview,
         ));
     }
     if accessors_only {
@@ -1696,7 +1707,15 @@ fn internal_slot_entries(
                 json!({"name": index.to_string(), "type": "number", "value": byte.to_string()})
             })
             .collect::<Vec<_>>();
-        let data_description = format!("{}({})", if inspection.shared { "SharedArrayBuffer" } else { "ArrayBuffer" }, inspection.byte_length);
+        let data_description = format!(
+            "{}({})",
+            if inspection.shared {
+                "SharedArrayBuffer"
+            } else {
+                "ArrayBuffer"
+            },
+            inspection.byte_length
+        );
         entries.push(json!({
             "name": "[[ArrayBufferData]]",
             "value": {
@@ -1929,7 +1948,15 @@ fn evaluate_request(
             Err(error) => {
                 let (text, line, column) = script_compile_error_position(&error, expression);
                 let uncaught = format!("Uncaught SyntaxError: {text}");
-                let exception_remote = syntax_error_remote(context, state, intrinsics, &text, &source_name, line, column);
+                let exception_remote = syntax_error_remote(
+                    context,
+                    state,
+                    intrinsics,
+                    &text,
+                    &source_name,
+                    line,
+                    column,
+                );
                 return protocol_result(
                     id,
                     json!({
@@ -2082,7 +2109,8 @@ fn object_preview(
         // The frontend renders collection previews from the dedicated
         // `entries` field (`Map(2) {1 => 2, 3 => 4}`); the key/value rows
         // above stay for the [[Entries]] internal-property preview.
-        preview["entries"] = Value::Array(collection_entry_previews(context, intrinsics, value, cap));
+        preview["entries"] =
+            Value::Array(collection_entry_previews(context, intrinsics, value, cap));
     }
     if let Some(subtype) = class.subtype {
         preview["subtype"] = Value::String(subtype.to_owned());
@@ -2119,8 +2147,7 @@ fn collection_entry_previews(
                 let Some(key_entry) = preview_entry(context, intrinsics, "key", key, 0) else {
                     continue;
                 };
-                let Some(value_entry) =
-                    preview_entry(context, intrinsics, "value", entry_value, 0)
+                let Some(value_entry) = preview_entry(context, intrinsics, "value", entry_value, 0)
                 else {
                     continue;
                 };
@@ -2180,9 +2207,7 @@ fn promise_preview_rows(
     })];
     match result {
         Some(value) => {
-            if let Some(entry) =
-                preview_entry(context, intrinsics, "[[PromiseResult]]", value, 0)
-            {
+            if let Some(entry) = preview_entry(context, intrinsics, "[[PromiseResult]]", value, 0) {
                 rows.push(entry);
             }
         }
@@ -3623,8 +3648,7 @@ mod tests {
     #[test]
     fn promise_internal_properties_report_state_and_result() {
         with_engine(|context, state, intrinsics| {
-            let internal =
-                internal_properties(context, state, intrinsics, "Promise.resolve(41)");
+            let internal = internal_properties(context, state, intrinsics, "Promise.resolve(41)");
             assert_eq!(
                 internal_by_name(&internal, "[[PromiseState]]")["value"]["value"],
                 "fulfilled"
@@ -3660,7 +3684,9 @@ mod tests {
                 "the target carries a registered objectId"
             );
             assert!(
-                internal.iter().all(|entry| entry["name"] != "[[IsRevoked]]"),
+                internal
+                    .iter()
+                    .all(|entry| entry["name"] != "[[IsRevoked]]"),
                 "live proxies omit the revocation flag"
             );
 
@@ -3703,7 +3729,9 @@ mod tests {
             let set_internal = internal_properties(context, state, intrinsics, "new Set([7])");
             let set_entries = &internal_by_name(&set_internal, "[[Entries]]")["value"];
             assert_eq!(set_entries["description"], "Set(1)");
-            let set_rows = set_entries["preview"]["properties"].as_array().expect("rows");
+            let set_rows = set_entries["preview"]["properties"]
+                .as_array()
+                .expect("rows");
             assert_eq!(set_rows.len(), 1, "one value row");
             assert_eq!(set_rows[0]["name"], "value");
             assert_eq!(set_rows[0]["value"], "7");
@@ -3713,8 +3741,7 @@ mod tests {
     #[test]
     fn collection_entries_expand_through_the_registered_view() {
         with_engine(|context, state, intrinsics| {
-            let internal =
-                internal_properties(context, state, intrinsics, "new Map([['a', 1]])");
+            let internal = internal_properties(context, state, intrinsics, "new Map([['a', 1]])");
             let entries = &internal_by_name(&internal, "[[Entries]]")["value"];
             let entries_id = entries["objectId"]
                 .as_str()
@@ -3732,7 +3759,9 @@ mod tests {
             assert_eq!(rows[0]["name"], "0");
             let entry = &rows[0]["value"];
             assert_eq!(entry["subtype"], "internal#entry");
-            let row_properties = entry["preview"]["properties"].as_array().expect("row preview");
+            let row_properties = entry["preview"]["properties"]
+                .as_array()
+                .expect("row preview");
             assert_eq!(row_properties.len(), 2, "key and value previews");
             assert_eq!(row_properties[0]["name"], "key");
             assert_eq!(row_properties[0]["value"], "a");
@@ -3744,10 +3773,11 @@ mod tests {
             );
 
             let set_internal = internal_properties(context, state, intrinsics, "new Set([7])");
-            let set_entries_id = internal_by_name(&set_internal, "[[Entries]]")["value"]["objectId"]
-                .as_str()
-                .expect("entries objectId")
-                .to_owned();
+            let set_entries_id =
+                internal_by_name(&set_internal, "[[Entries]]")["value"]["objectId"]
+                    .as_str()
+                    .expect("entries objectId")
+                    .to_owned();
             let set_response = protocol(
                 context,
                 state,
@@ -3755,11 +3785,17 @@ mod tests {
                 "Runtime.getProperties",
                 serde_json::json!({"objectId": set_entries_id}),
             );
-            let set_rows = set_response["result"]["result"].as_array().expect("set rows");
+            let set_rows = set_response["result"]["result"]
+                .as_array()
+                .expect("set rows");
             let set_row_properties = set_rows[0]["value"]["preview"]["properties"]
                 .as_array()
                 .expect("set row preview");
-            assert_eq!(set_row_properties.len(), 1, "set rows preview the value only");
+            assert_eq!(
+                set_row_properties.len(),
+                1,
+                "set rows preview the value only"
+            );
             assert_eq!(set_row_properties[0]["name"], "value");
             assert_eq!(set_row_properties[0]["value"], "7");
         });
@@ -3896,8 +3932,9 @@ mod tests {
             );
 
             let syntax_source = "function (";
-            let syntax_error = evaluate_script(context, syntax_source, "<repl>:8", ScriptLimits::default())
-                .expect_err("syntax");
+            let syntax_error =
+                evaluate_script(context, syntax_source, "<repl>:8", ScriptLimits::default())
+                    .expect_err("syntax");
             let classified = CliException::from_script_error(&syntax_error, syntax_source);
             let event = exception_thrown_event(
                 context,
@@ -3910,7 +3947,9 @@ mod tests {
             assert_eq!(event["method"], "Runtime.exceptionThrown");
             let details = &event["params"]["exceptionDetails"];
             assert!(
-                details["text"].as_str().is_some_and(|text| !text.is_empty()),
+                details["text"]
+                    .as_str()
+                    .is_some_and(|text| !text.is_empty()),
                 "SyntaxError entries render the diagnostic text"
             );
             assert_eq!(
@@ -3919,14 +3958,7 @@ mod tests {
             );
 
             let message = CliException::Message("module link failed".to_owned());
-            let event = exception_thrown_event(
-                context,
-                state,
-                None,
-                &message,
-                "",
-                "<repl>:9",
-            );
+            let event = exception_thrown_event(context, state, None, &message, "", "<repl>:9");
             let details = &event["params"]["exceptionDetails"];
             assert_eq!(details["text"], "Uncaught module link failed");
             assert_eq!(details["url"], "<repl>:9");

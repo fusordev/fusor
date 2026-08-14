@@ -830,12 +830,7 @@ fn strict_direct_call_remains_receiverless() {
         instructions(&compiled),
         [
             (FinalOpcode::GetArg0, Operands::NoneArg),
-            (
-                FinalOpcode::TailCall,
-                Operands::NPop {
-                    argument_count: 0
-                }
-            ),
+            (FinalOpcode::TailCall, Operands::NPop { argument_count: 0 }),
         ],
         "a strict direct call must not synthesize a base-object receiver"
     );

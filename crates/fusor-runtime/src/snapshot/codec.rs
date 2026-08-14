@@ -22,7 +22,10 @@ impl<'a> Reader<'a> {
 
     /// Reads one byte.
     pub(crate) fn read_u8(&mut self) -> Result<u8, SnapshotError> {
-        let byte = *self.read_bytes(1)?.first().ok_or(SnapshotError::Truncated)?;
+        let byte = *self
+            .read_bytes(1)?
+            .first()
+            .ok_or(SnapshotError::Truncated)?;
         Ok(byte)
     }
 
@@ -52,7 +55,10 @@ impl<'a> Reader<'a> {
             .position
             .checked_add(length)
             .ok_or(SnapshotError::Truncated)?;
-        let slice = self.bytes.get(self.position..end).ok_or(SnapshotError::Truncated)?;
+        let slice = self
+            .bytes
+            .get(self.position..end)
+            .ok_or(SnapshotError::Truncated)?;
         self.position = end;
         Ok(slice)
     }
@@ -74,9 +80,7 @@ pub(crate) fn write_section(buffer: &mut Vec<u8>, tag: u8, payload: &[u8]) {
 
 /// Reads one section payload (length + bytes + checksum), verifying the
 /// CRC-32 before returning it (§8.3: validate on load).
-pub(crate) fn read_section_payload<'a>(
-    reader: &mut Reader<'a>,
-) -> Result<&'a [u8], SnapshotError> {
+pub(crate) fn read_section_payload<'a>(reader: &mut Reader<'a>) -> Result<&'a [u8], SnapshotError> {
     let length = reader.read_u64()?;
     let length = usize::try_from(length).map_err(|_| SnapshotError::IntegrityViolation)?;
     let payload = reader.read_bytes(length)?;

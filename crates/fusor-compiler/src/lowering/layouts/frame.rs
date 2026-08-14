@@ -201,9 +201,7 @@ fn build_internal_locals(
 
 #[cfg(test)]
 mod tests {
-    use fusor_frontend::{
-        CompilationGoal, FrontendOptions, GlobalScriptGoal, with_parsed_program,
-    };
+    use fusor_frontend::{CompilationGoal, FrontendOptions, GlobalScriptGoal, with_parsed_program};
 
     use crate::lowering::CompilationContext;
 

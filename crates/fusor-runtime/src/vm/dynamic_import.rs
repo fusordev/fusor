@@ -551,7 +551,8 @@ pub(crate) fn module_error_rejection_value(
         if let (Some(kind), Some(message)) = (exception.kind(), exception.message()) {
             let stack =
                 JsString::from_utf8(&format!("{}: ", kind.name()))?.concat(&message.clone())?;
-            let object = runtime.materialize_error_object(realm, kind, message.clone(), Some(stack))?;
+            let object =
+                runtime.materialize_error_object(realm, kind, message.clone(), Some(stack))?;
             return Ok(StoredValue::Object(object));
         }
     }

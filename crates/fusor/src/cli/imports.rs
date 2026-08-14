@@ -45,8 +45,7 @@ pub(crate) async fn drain_pending_imports(
         // Phase 1 (turn): drain reaction jobs, then take every parked load.
         let taken: Rc<RefCell<Vec<PendingDynamicImport>>> = Rc::new(RefCell::new(Vec::new()));
         let target = Rc::clone(&taken);
-        let drain_failure: Rc<RefCell<Option<ModuleEvaluationError>>> =
-            Rc::new(RefCell::new(None));
+        let drain_failure: Rc<RefCell<Option<ModuleEvaluationError>>> = Rc::new(RefCell::new(None));
         let failure = Rc::clone(&drain_failure);
         host_loop.post_event(Box::new(move |context| {
             if let Err(error) = drain_dynamic_import_jobs(context, limits) {
@@ -182,8 +181,8 @@ mod tests {
             Rc::new(RefCell::new(None));
         let outcome = Rc::clone(&evaluate_outcome);
         host_loop.post_event(Box::new(move |context| {
-            let result = evaluate_preloaded_module_graph(context, &source, &name, edges, limits)
-                .map(|_| ());
+            let result =
+                evaluate_preloaded_module_graph(context, &source, &name, edges, limits).map(|_| ());
             *outcome.borrow_mut() = Some(result);
             Ok(())
         }));

@@ -55,9 +55,9 @@ use crate::{
         ArrayBufferState, ArrayIterator, ArrayIteratorKind, ArrayState, BoxedPrimitive,
         DataViewByteLength, DataViewState, DateState, ForInIterator, ForInSnapshot, HeapObject,
         IntlSegmentIteratorObjectState, IntlSegmentsObjectState, KeyPhases, ObjectRecord,
-        OwnProperty, PromiseCapability, PromiseReaction, PromiseState, PropertyDeletion, ProxyState,
-        RegExpState, RegExpStringIterator, ShapeInterner, StringIterator, TypedArrayElementType,
-        TypedArrayLength, TypedArrayState, WeakKey,
+        OwnProperty, PromiseCapability, PromiseReaction, PromiseState, PropertyDeletion,
+        ProxyState, RegExpState, RegExpStringIterator, ShapeInterner, StringIterator,
+        TypedArrayElementType, TypedArrayLength, TypedArrayState, WeakKey,
     },
     value::{HeapReference, PrimitiveValue, ReleaseMailbox, RootTarget, SlotValue, StoredValue},
 };

@@ -2258,19 +2258,17 @@ pub(super) fn begin_promise_job(
                 Ok(NativeDispatch::Immediate(StoredValue::Undefined))
             }
         },
-        PromiseJob::HostCallback { function } => {
-            Ok(NativeDispatch::Call(NativeCall {
-                function,
-                receiver: StoredValue::Undefined,
-                arguments: promise_call_arguments([])?,
-                return_to: None,
-                origin: native_function_host_origin(),
-                continuations: Vec::new(),
-                pre_call: None,
-                new_target: None,
-                native_caller: None,
-            }))
-        }
+        PromiseJob::HostCallback { function } => Ok(NativeDispatch::Call(NativeCall {
+            function,
+            receiver: StoredValue::Undefined,
+            arguments: promise_call_arguments([])?,
+            return_to: None,
+            origin: native_function_host_origin(),
+            continuations: Vec::new(),
+            pre_call: None,
+            new_target: None,
+            native_caller: None,
+        })),
         PromiseJob::Thenable {
             promise,
             realm,

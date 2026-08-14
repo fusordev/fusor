@@ -81,7 +81,12 @@ fn registered_semantic_rejections_have_stable_codes_and_mapped_labels() {
         report.primary().code().as_str(),
         "fusor::frontend::oxc::semantic"
     );
-    assert!(report.primary().message().contains("Invalid function declaration"));
+    assert!(
+        report
+            .primary()
+            .message()
+            .contains("Invalid function declaration")
+    );
     assert_eq!(
         report.primary().labels()[0].span().source_id(),
         &sources

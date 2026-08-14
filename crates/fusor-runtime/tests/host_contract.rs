@@ -4,9 +4,7 @@ use std::sync::Arc;
 
 use fusor_compiler::CompilationContext;
 use fusor_frontend::{CompilationGoal, FrontendOptions, GlobalScriptGoal, with_parsed_program};
-use fusor_runtime::{
-    Context, ExecutionLimits, JsNumber, Runtime, RuntimeLimits,
-};
+use fusor_runtime::{Context, ExecutionLimits, JsNumber, Runtime, RuntimeLimits};
 
 fn compile_global_script(source: &str) -> Arc<fusor_bytecode::VerifiedBytecode> {
     with_parsed_program(
@@ -51,11 +49,9 @@ fn call_function_rejects_foreign_arguments_and_receivers() {
                 ExecutionLimits::default(),
             ),
             Err(fusor_runtime::CallError::Execution(
-                fusor_runtime::ExecutionError::Handle(
-                    fusor_runtime::HandleError::ForeignRuntime {
-                        kind: fusor_runtime::HandleKind::Value
-                    }
-                )
+                fusor_runtime::ExecutionError::Handle(fusor_runtime::HandleError::ForeignRuntime {
+                    kind: fusor_runtime::HandleKind::Value
+                })
             ))
         ));
         assert!(matches!(
@@ -66,11 +62,9 @@ fn call_function_rejects_foreign_arguments_and_receivers() {
                 ExecutionLimits::default(),
             ),
             Err(fusor_runtime::CallError::Execution(
-                fusor_runtime::ExecutionError::Handle(
-                    fusor_runtime::HandleError::ForeignRuntime {
-                        kind: fusor_runtime::HandleKind::Value
-                    }
-                )
+                fusor_runtime::ExecutionError::Handle(fusor_runtime::HandleError::ForeignRuntime {
+                    kind: fusor_runtime::HandleKind::Value
+                })
             ))
         ));
     });
@@ -106,11 +100,9 @@ fn host_function_return_values_from_other_runtimes_are_rejected() {
                 ExecutionLimits::default(),
             ),
             Err(fusor_runtime::CallError::Execution(
-                fusor_runtime::ExecutionError::Handle(
-                    fusor_runtime::HandleError::ForeignRuntime {
-                        kind: fusor_runtime::HandleKind::Value
-                    }
-                )
+                fusor_runtime::ExecutionError::Handle(fusor_runtime::HandleError::ForeignRuntime {
+                    kind: fusor_runtime::HandleKind::Value
+                })
             ))
         ));
     });
@@ -163,17 +155,15 @@ fn re_entering_a_host_callback_fails_closed_with_a_type_error() {
     });
 }
 
-
 #[test]
 fn host_installation_charges_the_object_property_limit() {
     // A realm-sized property limit must reject host installations exactly
     // like any other property definition.
     with_context(|context| {
         let usage = context.runtime_usage().object_properties();
-        let mut runtime = Runtime::try_new(
-            RuntimeLimits::default().with_max_object_properties(usage),
-        )
-        .expect("runtime");
+        let mut runtime =
+            Runtime::try_new(RuntimeLimits::default().with_max_object_properties(usage))
+                .expect("runtime");
         let realm = runtime.create_realm().expect("realm");
         let mut context = runtime.context(&realm).expect("context");
         let result = context.create_host_function("overLimit", |ctx, _call| {

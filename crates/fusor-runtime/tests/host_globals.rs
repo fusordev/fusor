@@ -115,7 +115,11 @@ fn set_global_overwrites_an_existing_key_without_a_shadow_slot() {
         // No shadow slot may survive deletion of the one logical property.
         assert!(global.delete(context, dup.clone()).expect("deletable"));
         assert_eq!(
-            global.get(context, dup).expect("after delete").kind().expect("live kind"),
+            global
+                .get(context, dup)
+                .expect("after delete")
+                .kind()
+                .expect("live kind"),
             ValueKind::Undefined
         );
     });
@@ -131,21 +135,26 @@ fn set_global_rejects_a_foreign_value() {
     with_global(None, |context, _global| {
         assert!(matches!(
             context.set_global("hostForeign", foreign),
-            Err(ExecutionError::Handle(fusor_runtime::HandleError::ForeignRuntime {
-                kind: fusor_runtime::HandleKind::Value
-            }))
+            Err(ExecutionError::Handle(
+                fusor_runtime::HandleError::ForeignRuntime {
+                    kind: fusor_runtime::HandleKind::Value
+                }
+            ))
         ));
     });
 }
 
 #[test]
 fn set_global_on_a_frozen_global_throws_a_type_error() {
-    with_global(Some("Object.freeze(globalThis);"), |context, _global| {
-        match context.set_global("hostFrozen", context.number(JsNumber::from_i32(1))) {
+    with_global(
+        Some("Object.freeze(globalThis);"),
+        |context, _global| match context
+            .set_global("hostFrozen", context.number(JsNumber::from_i32(1)))
+        {
             Err(ExecutionError::Exception(exception)) => {
                 assert_eq!(exception.kind(), Some(ExceptionKind::TypeError));
             }
             other => panic!("expected a TypeError, got {other:?}"),
-        }
-    });
+        },
+    );
 }

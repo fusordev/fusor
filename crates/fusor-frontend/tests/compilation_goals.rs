@@ -1,13 +1,10 @@
-use oxc_span::GetSpan;
 use fusor_frontend::{
     Allocator, CompilationGoal, DiagnosticStage, FrontendDiagnosticCode, FrontendOptions,
     GlobalScriptGoal, ParseMode, parse,
 };
+use oxc_span::GetSpan;
 
-fn parse_global(
-    source: &str,
-    goal: GlobalScriptGoal,
-) -> Result<(), fusor_frontend::FrontendError> {
+fn parse_global(source: &str, goal: GlobalScriptGoal) -> Result<(), fusor_frontend::FrontendError> {
     let allocator = Allocator::new();
     parse(
         &allocator,

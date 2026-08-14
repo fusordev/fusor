@@ -421,11 +421,9 @@ fn planning_diagnostic(
             Some(*span),
             Some("the syntax parsed successfully but its runtime semantics are not admitted yet"),
         ),
-        CompilerError::SemanticInvariant { span, .. } => (
-            "fusor::compiler::planning::semantic_invariant",
-            *span,
-            None,
-        ),
+        CompilerError::SemanticInvariant { span, .. } => {
+            ("fusor::compiler::planning::semantic_invariant", *span, None)
+        }
         CompilerError::CapacityExceeded { .. } => {
             ("fusor::compiler::planning::capacity_exceeded", None, None)
         }
@@ -467,12 +465,8 @@ fn lowering_code(error: &LeafCompilationError) -> &'static str {
         LeafCompilationError::CookedStringDecoding { .. } => {
             "fusor::compiler::lowering::cooked_string"
         }
-        LeafCompilationError::CompilerString { .. } => {
-            "fusor::compiler::lowering::compiler_string"
-        }
-        LeafCompilationError::CompilerBigInt { .. } => {
-            "fusor::compiler::lowering::compiler_bigint"
-        }
+        LeafCompilationError::CompilerString { .. } => "fusor::compiler::lowering::compiler_string",
+        LeafCompilationError::CompilerBigInt { .. } => "fusor::compiler::lowering::compiler_bigint",
         LeafCompilationError::CompilerTemplateObject { .. } => {
             "fusor::compiler::lowering::template_object"
         }
@@ -1071,9 +1065,7 @@ fn decode_request_specifier(request: &fusor_frontend::StaticModuleRequest) -> St
 ///
 /// An absent clause or an unrecognized `type` falls back to JavaScript; the
 /// unrecognized case is rejected later by [`compile_module_source`].
-fn request_module_kind(
-    attributes: Option<&fusor_frontend::ImportAttributes>,
-) -> ModuleSourceKind {
+fn request_module_kind(attributes: Option<&fusor_frontend::ImportAttributes>) -> ModuleSourceKind {
     let Some(attributes) = attributes else {
         return ModuleSourceKind::JavaScript;
     };
@@ -1343,10 +1335,7 @@ pub fn evaluate_preloaded_module_graph(
     }
 
     // BFS: register every preloaded dependency
-    let mut queue: Vec<(
-        fusor_runtime::ModuleKey,
-        fusor_frontend::ModuleSyntaxRecord,
-    )> = vec![(
+    let mut queue: Vec<(fusor_runtime::ModuleKey, fusor_frontend::ModuleSyntaxRecord)> = vec![(
         root_compiled.key.clone(),
         root_compiled.syntax_record.clone(),
     )];
@@ -1469,10 +1458,7 @@ fn gather_dynamic_import_graph(
     }
 
     // BFS: gather all dependencies, as in `evaluate_module`.
-    let mut queue: Vec<(
-        fusor_runtime::ModuleKey,
-        fusor_frontend::ModuleSyntaxRecord,
-    )> = vec![(
+    let mut queue: Vec<(fusor_runtime::ModuleKey, fusor_frontend::ModuleSyntaxRecord)> = vec![(
         root_compiled.key.clone(),
         root_compiled.syntax_record.clone(),
     )];

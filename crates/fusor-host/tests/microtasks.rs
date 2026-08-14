@@ -10,8 +10,8 @@ use std::sync::Arc;
 use fusor_bytecode::VerifiedBytecode;
 use fusor_compiler::CompilationContext;
 use fusor_frontend::{CompilationGoal, FrontendOptions, GlobalScriptGoal, with_parsed_program};
-use fusor_host::overlay::{CoreOverlay, HostRuntime};
 use fusor_host::r#loop::HostLoop;
+use fusor_host::overlay::{CoreOverlay, HostRuntime};
 use fusor_runtime::{Context, ExecutionError, ExecutionLimits, GlobalScriptError};
 
 /// Compiles one Global Script into the authority
@@ -158,9 +158,8 @@ fn a_microtask_queueing_another_microtask_drains_to_quiescence() {
 #[test]
 fn a_throwing_microtask_requests_exit_1() {
     let mut fixture = Fixture::new();
-    fixture.eval(
-        "Fusor.ops.op_queue_microtask(function () { throw new Error('microtask boom'); });",
-    );
+    fixture
+        .eval("Fusor.ops.op_queue_microtask(function () { throw new Error('microtask boom'); });");
     assert_eq!(
         fixture.host.pending_exit_code(),
         Some(1),

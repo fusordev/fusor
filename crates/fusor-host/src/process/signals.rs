@@ -190,8 +190,12 @@ pub enum SignalForwardError {
 impl std::fmt::Display for SignalForwardError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Executor(message) => write!(formatter, "signal forwarder executor failed: {message}"),
-            Self::Stream(message) => write!(formatter, "signal stream registration failed: {message}"),
+            Self::Executor(message) => {
+                write!(formatter, "signal forwarder executor failed: {message}")
+            }
+            Self::Stream(message) => {
+                write!(formatter, "signal stream registration failed: {message}")
+            }
             Self::Spawn(message) => write!(formatter, "signal forwarder thread failed: {message}"),
         }
     }
@@ -229,6 +233,7 @@ impl SignalForwarder {
 ///
 /// Returns a [`SignalForwardError`] when the executor, the streams, or
 /// the thread cannot be created.
+#[cfg(unix)]
 pub fn spawn_signal_forwarder(state: SignalState) -> Result<SignalForwarder, SignalForwardError> {
     use tokio::signal::unix::{SignalKind, signal};
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -269,6 +274,27 @@ pub fn spawn_signal_forwarder(state: SignalState) -> Result<SignalForwarder, Sig
                     }
                 }
             });
+        })
+        .map_err(|error| SignalForwardError::Spawn(error.to_string()))?;
+    Ok(SignalForwarder { handle, stop })
+}
+
+/// Windows has no POSIX signal streams (`tokio::signal::unix` is
+/// cfg-gated); SIGINT arrives as a console control event, so the
+/// injectable delivery path (§7.6 synthetic signals) is the supported
+/// mechanism there. The forwarder parks an inert thread so
+/// [`SignalForwarder::shutdown`] still joins deterministically.
+///
+/// # Errors
+///
+/// Returns a [`SignalForwardError`] when the thread cannot be created.
+#[cfg(not(unix))]
+pub fn spawn_signal_forwarder(_state: SignalState) -> Result<SignalForwarder, SignalForwardError> {
+    let (stop, stop_rx) = tokio::sync::oneshot::channel();
+    let handle = std::thread::Builder::new()
+        .name("fusor-signals".to_owned())
+        .spawn(move || {
+            let _ = stop_rx.blocking_recv();
         })
         .map_err(|error| SignalForwardError::Spawn(error.to_string()))?;
     Ok(SignalForwarder { handle, stop })

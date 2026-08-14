@@ -169,10 +169,7 @@ fn the_builder_installs_the_host_core_without_any_overlay() {
 fn init_scripts_evaluate_in_topological_order() {
     // `b` is registered first but depends on `a`: the build must evaluate
     // `a`'s init script first regardless of registration order.
-    let a = TestOverlay::new("a").with_init(
-        "fusor:a/init.js",
-        "globalThis.order = ['a'];",
-    );
+    let a = TestOverlay::new("a").with_init("fusor:a/init.js", "globalThis.order = ['a'];");
     let b = TestOverlay::new("b")
         .with_init(
             "fusor:b/init.js",
@@ -209,7 +206,9 @@ fn unknown_dependencies_are_rejected_at_build_time() {
     let orphan = TestOverlay::new("orphan").depending_on(&["ghost"]);
     let mut builder = HostRuntime::builder();
     builder.with_overlay(orphan);
-    let error = builder.build().expect_err("unknown dependency must fail the build");
+    let error = builder
+        .build()
+        .expect_err("unknown dependency must fail the build");
     match error {
         HostBuildError::UnknownDependency {
             overlay: "orphan",
@@ -225,7 +224,9 @@ fn duplicate_overlay_names_are_rejected_at_build_time() {
     builder
         .with_overlay(TestOverlay::new("dup"))
         .with_overlay(TestOverlay::new("dup"));
-    let error = builder.build().expect_err("duplicate names must fail the build");
+    let error = builder
+        .build()
+        .expect_err("duplicate names must fail the build");
     match error {
         HostBuildError::DuplicateOverlay { name: "dup" } => {}
         other => panic!("expected a duplicate overlay name, got: {other}"),
@@ -238,7 +239,9 @@ fn op_name_conflicts_between_overlays_are_rejected_at_build_time() {
     builder
         .with_overlay(TestOverlay::new("first").with_ops(register_clash))
         .with_overlay(TestOverlay::new("second").with_ops(register_clash));
-    let error = builder.build().expect_err("op conflicts must fail the build");
+    let error = builder
+        .build()
+        .expect_err("op conflicts must fail the build");
     match error {
         HostBuildError::OpConflict(conflict) => assert_eq!(conflict.name, "clash"),
         other => panic!("expected an op conflict, got: {other}"),
@@ -279,7 +282,10 @@ fn init_scripts_share_the_global_across_overlays() {
         .build()
         .expect("built");
     assert_eq!(
-        eval_string(&mut host, "String(globalThis.order_string + '|' + globalThis.derived);"),
+        eval_string(
+            &mut host,
+            "String(globalThis.order_string + '|' + globalThis.derived);"
+        ),
         "base,user|42"
     );
 }
@@ -305,17 +311,14 @@ fn init_script_sources_evaluate_in_declaration_order() {
 
 #[test]
 fn duplicate_init_sources_are_rejected_at_build_time() {
-    let first = TestOverlay::new("first").with_init(
-        "fusor:shared.js",
-        "globalThis.first = true;",
-    );
-    let second = TestOverlay::new("second").with_init(
-        "fusor:shared.js",
-        "globalThis.second = true;",
-    );
+    let first = TestOverlay::new("first").with_init("fusor:shared.js", "globalThis.first = true;");
+    let second =
+        TestOverlay::new("second").with_init("fusor:shared.js", "globalThis.second = true;");
     let mut builder = HostRuntime::builder();
     builder.with_overlay(first).with_overlay(second);
-    let error = builder.build().expect_err("duplicate init sources must fail the build");
+    let error = builder
+        .build()
+        .expect_err("duplicate init sources must fail the build");
     match error {
         HostBuildError::DuplicateInitSource { specifier } => {
             assert_eq!(specifier, "fusor:shared.js");
@@ -328,13 +331,12 @@ fn duplicate_init_sources_are_rejected_at_build_time() {
 fn init_script_locations_use_the_specifier() {
     // A throwing init script reports its specifier as the source name
     // (§8.4: location only, no debugger hook).
-    let boom = TestOverlay::new("boom").with_init(
-        "fusor:boom/init.js",
-        "throw new Error('boom');",
-    );
+    let boom = TestOverlay::new("boom").with_init("fusor:boom/init.js", "throw new Error('boom');");
     let mut builder = HostRuntime::builder();
     builder.with_overlay(boom);
-    let error = builder.build().expect_err("a throwing init script must fail the build");
+    let error = builder
+        .build()
+        .expect_err("a throwing init script must fail the build");
     match error {
         HostBuildError::InitScript {
             overlay: "boom",
@@ -364,7 +366,10 @@ fn the_core_overlay_provides_the_core_ops() {
     let sink = Rc::clone(&captured);
     set_print_sink(Box::new(move |line: &str| sink.borrow_mut().push_str(line)));
     assert_eq!(
-        eval_string(&mut host, "Fusor.ops.op_core_print('hello', 42); String('done');"),
+        eval_string(
+            &mut host,
+            "Fusor.ops.op_core_print('hello', 42); String('done');"
+        ),
         "done"
     );
     assert_eq!(*captured.borrow(), "hello 42");
@@ -401,9 +406,8 @@ fn a_built_host_runtime_drives_the_event_loop() {
         .into_loop()
         .expect("loop");
     {
-        let authority = compile(
-            "Fusor.ops.op_set_immediate(function () { globalThis.bumped = 7; });",
-        );
+        let authority =
+            compile("Fusor.ops.op_set_immediate(function () { globalThis.bumped = 7; });");
         host.post_event(Box::new(move |context| eval_script(context, authority)));
     }
     host.run_one_turn().expect("turn");
@@ -415,6 +419,10 @@ fn a_built_host_runtime_drives_the_event_loop() {
         Ok(())
     }));
     host.run_one_turn().expect("turn");
-    assert_eq!(read.get(), 7, "the setImmediate callback ran during the turn");
+    assert_eq!(
+        read.get(),
+        7,
+        "the setImmediate callback ran during the turn"
+    );
     assert_eq!(host.shutdown(), ExitCode::Clean);
 }

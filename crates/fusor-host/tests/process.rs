@@ -9,9 +9,9 @@ use std::sync::Arc;
 use fusor_bytecode::VerifiedBytecode;
 use fusor_compiler::CompilationContext;
 use fusor_frontend::{CompilationGoal, FrontendOptions, GlobalScriptGoal, with_parsed_program};
-use fusor_host::process::Signal;
-use fusor_host::overlay::{CoreOverlay, HostRuntime};
 use fusor_host::r#loop::HostLoop;
+use fusor_host::overlay::{CoreOverlay, HostRuntime};
+use fusor_host::process::Signal;
 use fusor_runtime::{
     Context, ExecutionError, ExecutionLimits, GlobalScriptError, Runtime, RuntimeLimits,
 };
@@ -131,7 +131,8 @@ fn a_registered_sigint_handler_receives_deliveries_and_disables_the_default_exit
 #[test]
 fn a_registered_handler_prevents_script_interruption() {
     let mut fixture = Fixture::new();
-    fixture.eval("Fusor.ops.op_process_on('SIGINT', function () { globalThis.handler_ran = true; });");
+    fixture
+        .eval("Fusor.ops.op_process_on('SIGINT', function () { globalThis.handler_ran = true; });");
     fixture.host.post_signal(Signal::Interrupt);
     // The delivery must not arm the interrupt request: the long script
     // completes instead of aborting at the poll.
@@ -158,7 +159,10 @@ fn pending_deliveries_keep_the_loop_alive_until_the_handler_runs() {
     assert!(fixture.host.alive(), "a pending delivery is alive work");
     fixture.host.run_until_idle().expect("idle");
     assert_eq!(fixture.observe("String(globalThis.count);"), "1");
-    assert!(!fixture.host.alive(), "nothing pending after the handler ran");
+    assert!(
+        !fixture.host.alive(),
+        "nothing pending after the handler ran"
+    );
 }
 
 #[test]
@@ -170,7 +174,10 @@ fn the_handler_receiver_is_undefined() {
     );
     fixture.host.post_signal(Signal::Interrupt);
     fixture.host.run_one_turn().expect("turn");
-    assert_eq!(fixture.observe("String(globalThis.self_is_process);"), "true");
+    assert_eq!(
+        fixture.observe("String(globalThis.self_is_process);"),
+        "true"
+    );
 }
 
 #[test]
@@ -200,7 +207,9 @@ fn process_on_rejects_a_non_function_handler() {
 #[test]
 fn a_throwing_sigint_handler_goes_to_the_uncaught_path() {
     let mut fixture = Fixture::new();
-    fixture.eval("Fusor.ops.op_process_on('SIGINT', function () { throw new Error('handler boom'); });");
+    fixture.eval(
+        "Fusor.ops.op_process_on('SIGINT', function () { throw new Error('handler boom'); });",
+    );
     fixture.host.post_signal(Signal::Interrupt);
     fixture.host.run_one_turn().expect("turn");
     assert_eq!(
@@ -281,7 +290,11 @@ fn exit_codes_map_engine_errors_and_interrupts() {
         ExitCode::from_execution_error(&abort),
         Some(ExitCode::EngineAbort)
     );
-    assert_eq!(ExitCode::EngineAbort.as_i32(), 2, "documented engine-abort code");
+    assert_eq!(
+        ExitCode::EngineAbort.as_i32(),
+        2,
+        "documented engine-abort code"
+    );
     let interrupt = ExecutionError::Interrupted { executed: 42 };
     assert_eq!(
         ExitCode::from_execution_error(&interrupt),
@@ -297,12 +310,13 @@ fn exit_codes_map_engine_errors_and_interrupts() {
 #[test]
 fn an_uncaught_exception_requests_exit_1_by_default() {
     let mut fixture = Fixture::new();
-    fixture.eval(
-        "Fusor.ops.op_set_timeout(function () { throw new Error('boom'); }, 0);",
-    );
+    fixture.eval("Fusor.ops.op_set_timeout(function () { throw new Error('boom'); }, 0);");
     fixture.host.run_one_turn().expect("turn");
     assert_eq!(fixture.host.pending_exit_code(), Some(1));
-    assert!(!fixture.host.alive(), "the default path terminates the process");
+    assert!(
+        !fixture.host.alive(),
+        "the default path terminates the process"
+    );
 }
 
 #[test]
@@ -320,7 +334,10 @@ fn an_uncaught_exception_handler_receives_the_error_and_the_loop_continues() {
         "Error: boom/true",
         "the handler receives the original error; the turn continues"
     );
-    assert!(fixture.host.pending_exit_code().is_none(), "handled: no exit");
+    assert!(
+        fixture.host.pending_exit_code().is_none(),
+        "handled: no exit"
+    );
 }
 
 #[test]
@@ -351,7 +368,10 @@ fn run_main_routes_uncaught_exceptions_through_the_handler() {
         .host
         .run_main(authority, ExecutionLimits::default())
         .expect("handled");
-    assert_eq!(fixture.observe("String(globalThis.caught);"), "Error: main boom");
+    assert_eq!(
+        fixture.observe("String(globalThis.caught);"),
+        "Error: main boom"
+    );
     assert!(fixture.host.pending_exit_code().is_none());
 }
 

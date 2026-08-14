@@ -1,5 +1,5 @@
-use oxc_syntax::{identifier::is_white_space, line_terminator::is_line_terminator};
 use fusor_frontend::Span;
+use oxc_syntax::{identifier::is_white_space, line_terminator::is_line_terminator};
 
 use super::super::{
     ArrowFunctionExpression, AstKind, Class, CompilationContext, CompilationUnitKind, Executable,

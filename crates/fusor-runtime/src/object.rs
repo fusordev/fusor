@@ -3219,9 +3219,9 @@ impl ArrayBufferState {
     pub(crate) fn copy_bytes(&self, limit: usize) -> Vec<u8> {
         match &self.data {
             Some(ArrayBufferData::Local(data)) => data.iter().take(limit).copied().collect(),
-            Some(ArrayBufferData::Shared(block)) => block.with_bytes(|bytes| {
-                bytes.iter().take(limit).copied().collect::<Vec<_>>()
-            }),
+            Some(ArrayBufferData::Shared(block)) => {
+                block.with_bytes(|bytes| bytes.iter().take(limit).copied().collect::<Vec<_>>())
+            }
             None => Vec::new(),
         }
     }

@@ -64,10 +64,8 @@ pub(crate) fn push_rejection_event(event: OwnedPromiseRejectionEvent) {
 /// Takes every queued rejection notification for end-of-turn
 /// reconciliation (§7.3).
 pub(crate) fn take_rejection_events() -> Vec<OwnedPromiseRejectionEvent> {
-    crate::ops::OpStateRegistry::with_mut::<RejectionQueue, _>(|queue| {
-        std::mem::take(&mut queue.0)
-    })
-    .unwrap_or_default()
+    crate::ops::OpStateRegistry::with_mut::<RejectionQueue, _>(|queue| std::mem::take(&mut queue.0))
+        .unwrap_or_default()
 }
 
 /// Returns whether rejection notifications are waiting for the

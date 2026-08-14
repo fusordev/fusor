@@ -74,10 +74,7 @@ fn bigint_extraction_returns_the_shared_payload() {
             .execute_global_script(script, ExecutionLimits::default())
             .expect("bigint script");
         let bigint = value.as_bigint().expect("live").expect("BigInt");
-        assert_eq!(
-            bigint.to_i128(),
-            Some(123456789012345678901234567890_i128)
-        );
+        assert_eq!(bigint.to_i128(), Some(123456789012345678901234567890_i128));
     });
 }
 
@@ -92,13 +89,25 @@ fn to_boolean_applies_the_spec_truthiness_table() {
             (context.number(JsNumber::from_i32(0)), false),
             (context.number(JsNumber::from_f64(f64::NAN)), false),
             (context.number(JsNumber::from_i32(1)), true),
-            (context.string(fusor_runtime::JsString::from_utf8("").expect("empty")), false),
-            (context.string(fusor_runtime::JsString::from_utf8("0").expect("zero")), true),
+            (
+                context.string(fusor_runtime::JsString::from_utf8("").expect("empty")),
+                false,
+            ),
+            (
+                context.string(fusor_runtime::JsString::from_utf8("0").expect("zero")),
+                true,
+            ),
         ] {
             assert_eq!(value.to_boolean().expect("live"), expected);
         }
         // Every object (here the global) is truthy.
-        assert!(context.global_object().expect("global").to_boolean().expect("live"));
+        assert!(
+            context
+                .global_object()
+                .expect("global")
+                .to_boolean()
+                .expect("live")
+        );
     });
 }
 
@@ -122,12 +131,14 @@ fn to_string_and_to_number_apply_the_spec_primitive_conversions() {
                 .as_f64(),
             42.0
         );
-        assert!(context
-            .string(fusor_runtime::JsString::from_utf8("not a number").expect("invalid"))
-            .to_number(context)
-            .expect("string number")
-            .as_f64()
-            .is_nan());
+        assert!(
+            context
+                .string(fusor_runtime::JsString::from_utf8("not a number").expect("invalid"))
+                .to_number(context)
+                .expect("string number")
+                .as_f64()
+                .is_nan()
+        );
         assert_eq!(
             context
                 .boolean(true)

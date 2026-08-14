@@ -77,11 +77,7 @@ pub struct JsValueDeserializer<'a, 'c, 'ctx> {
 impl<'a, 'c, 'ctx> JsValueDeserializer<'a, 'c, 'ctx> {
     /// Wraps one value for typed deserialization.
     #[must_use]
-    pub const fn new(
-        context: &'c mut Context<'ctx>,
-        value: &'a JsValue,
-        parameter: usize,
-    ) -> Self {
+    pub const fn new(context: &'c mut Context<'ctx>, value: &'a JsValue, parameter: usize) -> Self {
         Self {
             context,
             value,
@@ -124,9 +120,7 @@ macro_rules! deserialize_integer {
             };
             let value = number.as_f64();
             // Safe-integer whole values only (§5.2): no silent truncation.
-            if value.fract() != 0.0
-                || !(value >= -(2_f64.powi(53)) && value < 2_f64.powi(53))
-            {
+            if value.fract() != 0.0 || !(value >= -(2_f64.powi(53)) && value < 2_f64.powi(53)) {
                 return Err(self.invalid_number("Number is not a safe integer"));
             }
             let converted = value as $type;
@@ -543,11 +537,9 @@ impl<'de, 'c, 'ctx> MapAccess<'de> for ObjectAccess<'c, 'ctx> {
     where
         V: DeserializeSeed<'de>,
     {
-        let value = self.pending.take().ok_or_else(|| {
-            DeserializationError {
-                parameter: self.parameter,
-                message: "map value requested without a key".to_owned(),
-            }
+        let value = self.pending.take().ok_or_else(|| DeserializationError {
+            parameter: self.parameter,
+            message: "map value requested without a key".to_owned(),
         })?;
         seed.deserialize(JsValueDeserializer::new(
             self.context,
@@ -604,9 +596,7 @@ impl<'a, 'ctx> ser::Serializer for JsValueSerializer<'a, 'ctx> {
 
     fn serialize_u64(self, value: u64) -> Result<Self::Ok, Self::Error> {
         if value > 9_007_199_254_740_991 {
-            return Err(ser::Error::custom(
-                "u64 outside the safe-integer domain",
-            ));
+            return Err(ser::Error::custom("u64 outside the safe-integer domain"));
         }
         Ok(self.context.number(JsNumber::from_f64(value as f64)))
     }
@@ -624,15 +614,12 @@ impl<'a, 'ctx> ser::Serializer for JsValueSerializer<'a, 'ctx> {
     }
 
     fn serialize_str(self, value: &str) -> Result<Self::Ok, Self::Error> {
-        let string =
-            JsString::from_utf8(value).map_err(|error| ser::Error::custom(error))?;
+        let string = JsString::from_utf8(value).map_err(|error| ser::Error::custom(error))?;
         Ok(self.context.string(string))
     }
 
     fn serialize_bytes(self, _value: &[u8]) -> Result<Self::Ok, Self::Error> {
-        Err(ser::Error::custom(
-            "bytes are not supported in v1",
-        ))
+        Err(ser::Error::custom("bytes are not supported in v1"))
     }
 
     fn serialize_none(self) -> Result<Self::Ok, Self::Error> {
@@ -715,9 +702,7 @@ impl<'a, 'ctx> ser::Serializer for JsValueSerializer<'a, 'ctx> {
         _variant: &'static str,
         _length: usize,
     ) -> Result<Self::SerializeTupleVariant, Self::Error> {
-        Err(ser::Error::custom(
-            "tuple enum variants are not supported",
-        ))
+        Err(ser::Error::custom("tuple enum variants are not supported"))
     }
 
     fn serialize_map(self, _length: Option<usize>) -> Result<Self::SerializeMap, Self::Error> {
@@ -742,9 +727,7 @@ impl<'a, 'ctx> ser::Serializer for JsValueSerializer<'a, 'ctx> {
         _variant: &'static str,
         _length: usize,
     ) -> Result<Self::SerializeStructVariant, Self::Error> {
-        Err(ser::Error::custom(
-            "struct enum variants are not supported",
-        ))
+        Err(ser::Error::custom("struct enum variants are not supported"))
     }
 }
 
@@ -878,11 +861,7 @@ impl<'a, 'ctx> ser::SerializeStructVariant for ValueMap<'a, 'ctx> {
     type Ok = JsValue;
     type Error = SerializationError;
 
-    fn serialize_field<T>(
-        &mut self,
-        key: &'static str,
-        value: &T,
-    ) -> Result<(), Self::Error>
+    fn serialize_field<T>(&mut self, key: &'static str, value: &T) -> Result<(), Self::Error>
     where
         T: serde::Serialize + ?Sized,
     {
@@ -899,11 +878,7 @@ impl<'a, 'ctx> SerializeStruct for ValueMap<'a, 'ctx> {
     type Ok = JsValue;
     type Error = SerializationError;
 
-    fn serialize_field<T>(
-        &mut self,
-        key: &'static str,
-        value: &T,
-    ) -> Result<(), Self::Error>
+    fn serialize_field<T>(&mut self, key: &'static str, value: &T) -> Result<(), Self::Error>
     where
         T: serde::Serialize + ?Sized,
     {
@@ -984,9 +959,7 @@ impl ser::Serializer for KeySerializer {
     }
 
     fn serialize_unit(self) -> Result<Self::Ok, Self::Error> {
-        Err(ser::Error::custom(
-            "map keys must be strings in v1",
-        ))
+        Err(ser::Error::custom("map keys must be strings in v1"))
     }
 
     fn serialize_unit_struct(self, name: &'static str) -> Result<Self::Ok, Self::Error> {
@@ -1014,9 +987,7 @@ impl ser::Serializer for KeySerializer {
     }
 
     fn serialize_none(self) -> Result<Self::Ok, Self::Error> {
-        Err(ser::Error::custom(
-            "map keys must be strings in v1",
-        ))
+        Err(ser::Error::custom("map keys must be strings in v1"))
     }
 
     fn serialize_some<T>(self, value: &T) -> Result<Self::Ok, Self::Error>
@@ -1036,21 +1007,15 @@ impl ser::Serializer for KeySerializer {
     where
         T: serde::Serialize + ?Sized,
     {
-        Err(ser::Error::custom(
-            "enum keys are not supported",
-        ))
+        Err(ser::Error::custom("enum keys are not supported"))
     }
 
     fn serialize_seq(self, _length: Option<usize>) -> Result<Self::SerializeSeq, Self::Error> {
-        Err(ser::Error::custom(
-            "map keys must be strings in v1",
-        ))
+        Err(ser::Error::custom("map keys must be strings in v1"))
     }
 
     fn serialize_tuple(self, _length: usize) -> Result<Self::SerializeTuple, Self::Error> {
-        Err(ser::Error::custom(
-            "map keys must be strings in v1",
-        ))
+        Err(ser::Error::custom("map keys must be strings in v1"))
     }
 
     fn serialize_tuple_struct(
@@ -1068,15 +1033,11 @@ impl ser::Serializer for KeySerializer {
         _variant: &'static str,
         _length: usize,
     ) -> Result<Self::SerializeTupleVariant, Self::Error> {
-        Err(ser::Error::custom(
-            "enum keys are not supported",
-        ))
+        Err(ser::Error::custom("enum keys are not supported"))
     }
 
     fn serialize_map(self, _length: Option<usize>) -> Result<Self::SerializeMap, Self::Error> {
-        Err(ser::Error::custom(
-            "map keys must be strings in v1",
-        ))
+        Err(ser::Error::custom("map keys must be strings in v1"))
     }
 
     fn serialize_struct(
@@ -1094,15 +1055,11 @@ impl ser::Serializer for KeySerializer {
         _variant: &'static str,
         _length: usize,
     ) -> Result<Self::SerializeStructVariant, Self::Error> {
-        Err(ser::Error::custom(
-            "enum keys are not supported",
-        ))
+        Err(ser::Error::custom("enum keys are not supported"))
     }
 
     fn serialize_bytes(self, _value: &[u8]) -> Result<Self::Ok, Self::Error> {
-        Err(ser::Error::custom(
-            "bytes are not supported in v1",
-        ))
+        Err(ser::Error::custom("bytes are not supported in v1"))
     }
 }
 
@@ -1117,9 +1074,7 @@ impl SerializeSeq for KeySequence {
     where
         T: serde::Serialize + ?Sized,
     {
-        Err(ser::Error::custom(
-            "map keys must be strings in v1",
-        ))
+        Err(ser::Error::custom("map keys must be strings in v1"))
     }
 
     fn end(self) -> Result<Self::Ok, Self::Error> {
@@ -1135,9 +1090,7 @@ impl SerializeTuple for KeySequence {
     where
         T: serde::Serialize + ?Sized,
     {
-        Err(ser::Error::custom(
-            "map keys must be strings in v1",
-        ))
+        Err(ser::Error::custom("map keys must be strings in v1"))
     }
 
     fn end(self) -> Result<Self::Ok, Self::Error> {
@@ -1153,18 +1106,14 @@ impl SerializeMap for KeySequence {
     where
         T: serde::Serialize + ?Sized,
     {
-        Err(ser::Error::custom(
-            "map keys must be strings in v1",
-        ))
+        Err(ser::Error::custom("map keys must be strings in v1"))
     }
 
     fn serialize_value<T>(&mut self, _value: &T) -> Result<(), Self::Error>
     where
         T: serde::Serialize + ?Sized,
     {
-        Err(ser::Error::custom(
-            "map keys must be strings in v1",
-        ))
+        Err(ser::Error::custom("map keys must be strings in v1"))
     }
 
     fn end(self) -> Result<Self::Ok, Self::Error> {
@@ -1176,17 +1125,11 @@ impl SerializeStruct for KeySequence {
     type Ok = JsString;
     type Error = SerializationError;
 
-    fn serialize_field<T>(
-        &mut self,
-        _key: &'static str,
-        _value: &T,
-    ) -> Result<(), Self::Error>
+    fn serialize_field<T>(&mut self, _key: &'static str, _value: &T) -> Result<(), Self::Error>
     where
         T: serde::Serialize + ?Sized,
     {
-        Err(ser::Error::custom(
-            "map keys must be strings in v1",
-        ))
+        Err(ser::Error::custom("map keys must be strings in v1"))
     }
 
     fn end(self) -> Result<Self::Ok, Self::Error> {
@@ -1202,9 +1145,7 @@ impl ser::SerializeTupleVariant for KeySequence {
     where
         T: serde::Serialize + ?Sized,
     {
-        Err(ser::Error::custom(
-            "map keys must be strings in v1",
-        ))
+        Err(ser::Error::custom("map keys must be strings in v1"))
     }
 
     fn end(self) -> Result<Self::Ok, Self::Error> {
@@ -1216,17 +1157,11 @@ impl ser::SerializeStructVariant for KeySequence {
     type Ok = JsString;
     type Error = SerializationError;
 
-    fn serialize_field<T>(
-        &mut self,
-        _key: &'static str,
-        _value: &T,
-    ) -> Result<(), Self::Error>
+    fn serialize_field<T>(&mut self, _key: &'static str, _value: &T) -> Result<(), Self::Error>
     where
         T: serde::Serialize + ?Sized,
     {
-        Err(ser::Error::custom(
-            "map keys must be strings in v1",
-        ))
+        Err(ser::Error::custom("map keys must be strings in v1"))
     }
 
     fn end(self) -> Result<Self::Ok, Self::Error> {
@@ -1242,9 +1177,7 @@ impl SerializeTupleStruct for KeySequence {
     where
         T: serde::Serialize + ?Sized,
     {
-        Err(ser::Error::custom(
-            "map keys must be strings in v1",
-        ))
+        Err(ser::Error::custom("map keys must be strings in v1"))
     }
 
     fn end(self) -> Result<Self::Ok, Self::Error> {

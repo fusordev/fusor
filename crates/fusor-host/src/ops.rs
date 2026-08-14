@@ -12,19 +12,17 @@ mod timers;
 pub use core::set_print_sink;
 pub(crate) use core::{install_clock_state, op_core_gc, op_core_now, op_core_print};
 pub(crate) use process::install_process;
+pub use state::{OpStateError, OpStateRegistry};
 pub(crate) use timers::{
     op_clear_interval, op_clear_timeout, op_queue_microtask, op_set_immediate, op_set_interval,
     op_set_timeout,
 };
-pub use state::{OpStateError, OpStateRegistry};
 
 pub use op_runtime::{
-    OpRuntime, OpRuntimeError, install_op_runtime, pending_op_count, poll_op_completions,
-    spawn_op, take_op_runtime,
+    OpRuntime, OpRuntimeError, install_op_runtime, pending_op_count, poll_op_completions, spawn_op,
+    take_op_runtime,
 };
-pub use resources::{
-    Resource, ResourceId, ResourceTable, ResourceTableError,
-};
+pub use resources::{Resource, ResourceId, ResourceTable, ResourceTableError};
 pub use serde::{DeserializationError, JsValueDeserializer, JsValueSerializer, SerializationError};
 
 use fusor_runtime::{Context, HostCall, JsValue};
@@ -45,11 +43,9 @@ pub fn install_resource_table(table: ResourceTable) -> Result<(), ResourceTable>
 /// `ResourceId`-parameter specialization of the `#[op]` macro).
 #[must_use]
 pub fn lookup_resource(id: u32) -> Option<Rc<dyn Resource>> {
-    OpStateRegistry::with::<ResourceTable, _>(|table| {
-        table.get(ResourceId::from_u32(id)).cloned()
-    })
-    .ok()
-    .flatten()
+    OpStateRegistry::with::<ResourceTable, _>(|table| table.get(ResourceId::from_u32(id)).cloned())
+        .ok()
+        .flatten()
 }
 
 /// Adds one resource to the installed table (host bootstrap path).
@@ -69,10 +65,8 @@ pub fn add_resource(
 /// Closes one resource in the installed table (the JS-side close op path).
 #[must_use]
 pub fn close_resource(id: u32) -> bool {
-    OpStateRegistry::with_mut::<ResourceTable, _>(|table| {
-        table.close(ResourceId::from_u32(id))
-    })
-    .unwrap_or(false)
+    OpStateRegistry::with_mut::<ResourceTable, _>(|table| table.close(ResourceId::from_u32(id)))
+        .unwrap_or(false)
 }
 
 /// Closes every table-exclusive resource in the installed table
@@ -284,8 +278,12 @@ pub fn serialize_value<T: ::serde::Serialize>(
     context: &mut Context<'_>,
     value: &T,
 ) -> Result<JsValue, JsValue> {
-    ::serde::Serialize::serialize(value, JsValueSerializer::new(context))
-        .map_err(|error| op_error_value(context, OpError::of_class("InternalError", error.to_string())))
+    ::serde::Serialize::serialize(value, JsValueSerializer::new(context)).map_err(|error| {
+        op_error_value(
+            context,
+            OpError::of_class("InternalError", error.to_string()),
+        )
+    })
 }
 
 /// Converts an op error into the JavaScript error value it throws (§5.3):
@@ -516,12 +514,9 @@ mod tests {
     fn installed_ops_are_callable_from_javascript() {
         with_context(|context| {
             install_namespace(context).expect("namespace");
-            install_op(context, op_add::declaration(), op_add::call)
-                .expect("add");
-            install_op(context, op_greet::declaration(), op_greet::call)
-                .expect("greet");
-            install_op(context, op_fail::declaration(), op_fail::call)
-                .expect("fail");
+            install_op(context, op_add::declaration(), op_add::call).expect("add");
+            install_op(context, op_greet::declaration(), op_greet::call).expect("greet");
+            install_op(context, op_fail::declaration(), op_fail::call).expect("fail");
 
             assert_eq!(
                 script_text(context, "String(Fusor.ops.op_add(20, 22));"),
@@ -546,8 +541,7 @@ mod tests {
     fn argument_deserialization_failures_raise_parameter_indexed_type_errors() {
         with_context(|context| {
             install_namespace(context).expect("namespace");
-            install_op(context, op_add::declaration(), op_add::call)
-                .expect("add");
+            install_op(context, op_add::declaration(), op_add::call).expect("add");
 
             assert_eq!(
                 script_text(
@@ -599,8 +593,12 @@ mod tests {
         assert_eq!(op_with_context::declaration().parameter_types, &["i32"]);
         with_context(|context| {
             install_namespace(context).expect("namespace");
-            install_op(context, op_with_context::declaration(), op_with_context::call)
-                .expect("op");
+            install_op(
+                context,
+                op_with_context::declaration(),
+                op_with_context::call,
+            )
+            .expect("op");
             assert_eq!(
                 script_text(
                     context,
@@ -616,12 +614,13 @@ mod tests {
         with_context(|context| {
             install_namespace(context).expect("namespace");
             install_namespace(context).expect("namespace again");
-            install_op(context, op_add::declaration(), op_add::call)
-                .expect("add");
-            install_op(context, op_greet::declaration(), op_greet::call)
-                .expect("greet");
+            install_op(context, op_add::declaration(), op_add::call).expect("add");
+            install_op(context, op_greet::declaration(), op_greet::call).expect("greet");
             assert_eq!(
-                script_text(context, "String(Fusor.ops.op_add(1, 2) + '|' + Fusor.ops.op_greet('x'));"),
+                script_text(
+                    context,
+                    "String(Fusor.ops.op_add(1, 2) + '|' + Fusor.ops.op_greet('x'));"
+                ),
                 "3|hello x"
             );
         });

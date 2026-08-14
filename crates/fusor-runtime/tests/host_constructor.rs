@@ -9,9 +9,7 @@ use std::{cell::RefCell, rc::Rc, sync::Arc};
 
 use fusor_compiler::CompilationContext;
 use fusor_frontend::{CompilationGoal, FrontendOptions, GlobalScriptGoal, with_parsed_program};
-use fusor_runtime::{
-    Context, ExecutionLimits, JsNumber, Runtime, RuntimeLimits,
-};
+use fusor_runtime::{Context, ExecutionLimits, JsNumber, Runtime, RuntimeLimits};
 
 fn compile_global_script(source: &str) -> Arc<fusor_bytecode::VerifiedBytecode> {
     with_parsed_program(
@@ -117,15 +115,11 @@ fn host_function_construct_reports_the_new_target_identity() {
         let captured_for_callback = Rc::clone(&captured);
         let function = context
             .create_host_function("hostCtor", move |ctx, call| {
-                let target = call
-                    .new_target()
-                    .expect("construct call has a new.target");
+                let target = call.new_target().expect("construct call has a new.target");
                 let is_self = captured_for_callback
                     .borrow()
                     .as_ref()
-                    .is_some_and(|handle| {
-                        target.same_identity(handle).expect("same runtime")
-                    });
+                    .is_some_and(|handle| target.same_identity(handle).expect("same runtime"));
                 // An object result survives the construct completion, so the
                 // Boolean reaches the script instead of falling back to `this`.
                 let object = ctx
@@ -134,13 +128,7 @@ fn host_function_construct_reports_the_new_target_identity() {
                     .into_object()
                     .expect("object");
                 let key = ctx.property_key("value").expect("key");
-                object
-                    .set(
-                        ctx,
-                        key,
-                        ctx.boolean(is_self),
-                    )
-                    .expect("store");
+                object.set(ctx, key, ctx.boolean(is_self)).expect("store");
                 Ok(object.as_value())
             })
             .expect("host function");
@@ -149,7 +137,10 @@ fn host_function_construct_reports_the_new_target_identity() {
             .set_global("hostCtor", function.as_value())
             .expect("install global");
 
-        assert_eq!(script_text(context, "String(new hostCtor().value);"), "true");
+        assert_eq!(
+            script_text(context, "String(new hostCtor().value);"),
+            "true"
+        );
     });
 }
 
@@ -181,7 +172,9 @@ fn host_function_plain_call_keeps_the_ordinary_undefined_receiver() {
     with_context(|context| {
         let function = context
             .create_host_function("plainHost", |ctx, call| {
-                Ok(ctx.boolean(call.this().kind().expect("live") == fusor_runtime::ValueKind::Undefined))
+                Ok(ctx.boolean(
+                    call.this().kind().expect("live") == fusor_runtime::ValueKind::Undefined,
+                ))
             })
             .expect("host function");
         context

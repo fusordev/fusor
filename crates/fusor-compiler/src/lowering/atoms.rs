@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
-use oxc_ast::ast::PropertyKey as OxcPropertyKey;
 use fusor_bytecode::{Binary64Constant, CompilerAtom, CompilerString};
 use fusor_frontend::{Span, decode_oxc_cooked_string};
+use oxc_ast::ast::PropertyKey as OxcPropertyKey;
 
 use crate::storage::{BindingId, ExecutableId};
 

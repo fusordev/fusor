@@ -90,8 +90,7 @@ impl HostLoop {
     /// Returns [`HostLoopError::AlreadyInstalled`] when another loop owns
     /// this thread.
     pub fn new(mut runtime: Runtime, realm: Realm) -> Result<Self, HostLoopError> {
-        install_timer_state(TimerState::default())
-            .map_err(|_| HostLoopError::AlreadyInstalled)?;
+        install_timer_state(TimerState::default()).map_err(|_| HostLoopError::AlreadyInstalled)?;
         install_process_state(ProcessState::default())
             .map_err(|_| HostLoopError::AlreadyInstalled)?;
         crate::ops::OpStateRegistry::install(RejectionQueue::default())
@@ -107,13 +106,11 @@ impl HostLoop {
         // into the end-of-turn queue. A retain failure (root resource
         // exhaustion) drops the notification; the rejection itself is
         // unaffected.
-        runtime.set_promise_rejection_tracker(Rc::new(
-            |mut event: PromiseRejectionEvent<'_>| {
-                if let Ok(owned) = event.retain() {
-                    push_rejection_event(owned);
-                }
-            },
-        ));
+        runtime.set_promise_rejection_tracker(Rc::new(|mut event: PromiseRejectionEvent<'_>| {
+            if let Ok(owned) = event.retain() {
+                push_rejection_event(owned);
+            }
+        }));
         Ok(Self {
             runtime,
             realm,
@@ -387,9 +384,7 @@ impl HostLoop {
                 PromiseRejectionOperation::Reject => unhandled.push(event),
                 PromiseRejectionOperation::Handle => {
                     let promise = event.promise().as_value();
-                    unhandled.retain(|pending| {
-                        !pending.promise().as_value().same_object(&promise)
-                    });
+                    unhandled.retain(|pending| !pending.promise().as_value().same_object(&promise));
                 }
             }
         }
@@ -463,9 +458,11 @@ impl HostLoop {
                 state.now = deadline;
             }
         })
-        .map_err(|_| ExecutionError::from(fusor_runtime::EngineFault::RuntimeInvariant {
-            message: "timer state vanished",
-        }))?;
+        .map_err(|_| {
+            ExecutionError::from(fusor_runtime::EngineFault::RuntimeInvariant {
+                message: "timer state vanished",
+            })
+        })?;
         self.fire_due_timers()
     }
 
@@ -476,7 +473,9 @@ impl HostLoop {
 
     /// Returns the next timer deadline, if any.
     fn next_deadline(&self) -> Option<std::time::Instant> {
-        with_timer_state(|state| state.next_deadline()).ok().flatten()
+        with_timer_state(|state| state.next_deadline())
+            .ok()
+            .flatten()
     }
 
     /// Returns the virtual duration until the next timer deadline (§6.4),
@@ -504,7 +503,9 @@ impl HostLoop {
             || self.signals.has_pending_sigint()
             || has_pending_rejections()
             || with_timer_state(|state| {
-                state.next_deadline().is_some_and(|deadline| deadline <= state.now)
+                state
+                    .next_deadline()
+                    .is_some_and(|deadline| deadline <= state.now)
                     || !state.immediates.is_empty()
             })
             .unwrap_or(false)
@@ -723,10 +724,7 @@ impl HostLoop {
 
 /// Invokes one timer/immediate callback with the job-callback semantics:
 /// an ordinary `[[Call]]` with the `undefined` receiver (§6.4).
-fn invoke_callback(
-    context: &mut Context<'_>,
-    callback: &JsValue,
-) -> Result<(), CallError> {
+fn invoke_callback(context: &mut Context<'_>, callback: &JsValue) -> Result<(), CallError> {
     invoke_callback_with(context, callback, context.undefined(), Vec::new())
 }
 
@@ -744,12 +742,7 @@ fn invoke_callback_with(
         .into_function()
         .map_err(|error| CallError::Execution(ExecutionError::from(error)))?;
     context
-        .call_function(
-            &function,
-            receiver,
-            arguments,
-            ExecutionLimits::default(),
-        )
+        .call_function(&function, receiver, arguments, ExecutionLimits::default())
         .map(|_completion| ())
 }
 

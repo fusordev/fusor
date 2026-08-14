@@ -84,5 +84,9 @@ fn op_process_exit(code: f64) -> Result<(), OpError> {
 /// Returns an [`ExecutionError`] when an op cannot be installed.
 pub(crate) fn install_process(context: &mut Context<'_>) -> Result<(), ExecutionError> {
     install_op(context, op_process_on::declaration(), op_process_on::call)?;
-    install_op(context, op_process_exit::declaration(), op_process_exit::call)
+    install_op(
+        context,
+        op_process_exit::declaration(),
+        op_process_exit::call,
+    )
 }

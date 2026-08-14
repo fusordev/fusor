@@ -13,7 +13,9 @@ pub use diagnostics::{
 };
 pub use error_codes::ErrorCode;
 pub use exit_codes::ExitCode;
-pub use signals::{Signal, SignalForwardError, SignalForwarder, SignalState, spawn_signal_forwarder};
+pub use signals::{
+    Signal, SignalForwardError, SignalForwarder, SignalState, spawn_signal_forwarder,
+};
 pub(crate) use signals::{install_signal_state, take_signal_state, with_signal_state};
 pub(crate) use state::{
     ProcessState, RejectionQueue, has_pending_rejections, install_process_state,

@@ -173,23 +173,26 @@ fn host_set_writes_data_properties_and_invokes_setters() {
 
 #[test]
 fn host_set_fails_closed_on_a_frozen_data_property() {
-    with_setup("var frozen = Object.freeze({ x: 1 });", |context, global| {
-        let frozen_key = key(context, "frozen");
-        let x = key(context, "x");
-        let frozen = global
-            .get(context, frozen_key)
-            .expect("get frozen")
-            .into_object()
-            .expect("frozen is an object");
+    with_setup(
+        "var frozen = Object.freeze({ x: 1 });",
+        |context, global| {
+            let frozen_key = key(context, "frozen");
+            let x = key(context, "x");
+            let frozen = global
+                .get(context, frozen_key)
+                .expect("get frozen")
+                .into_object()
+                .expect("frozen is an object");
 
-        let result = frozen.set(context, x, context.number(JsNumber::from_i32(2)));
-        match result {
-            Err(ExecutionError::Exception(exception)) => {
-                assert_eq!(exception.kind(), Some(ExceptionKind::TypeError));
+            let result = frozen.set(context, x, context.number(JsNumber::from_i32(2)));
+            match result {
+                Err(ExecutionError::Exception(exception)) => {
+                    assert_eq!(exception.kind(), Some(ExceptionKind::TypeError));
+                }
+                other => panic!("expected a TypeError, got {other:?}"),
             }
-            other => panic!("expected a TypeError, got {other:?}"),
-        }
-    });
+        },
+    );
 }
 
 #[test]
@@ -238,7 +241,10 @@ fn host_delete_removes_configurable_and_refuses_non_configurable() {
                     .expect("live kind"),
                 ValueKind::Undefined
             );
-            assert!(!d.delete(context, b.clone()).expect("non-configurable refused"));
+            assert!(
+                !d.delete(context, b.clone())
+                    .expect("non-configurable refused")
+            );
             assert_number(&d.get(context, b).expect("still present"), 2);
         },
     );
@@ -264,7 +270,10 @@ fn host_define_own_property_creates_and_enforces_invariants() {
         }
         .into_descriptor()
         .expect("data descriptor");
-        assert!(o.define_own_property(context, x.clone(), non_writable).expect("create non-writable"));
+        assert!(
+            o.define_own_property(context, x.clone(), non_writable)
+                .expect("create non-writable")
+        );
 
         // A frozen data property accepts a SameValue rewrite as a no-op.
         let same = DescriptorFields::<JsValue> {
@@ -273,7 +282,10 @@ fn host_define_own_property_creates_and_enforces_invariants() {
         }
         .into_descriptor()
         .expect("data descriptor");
-        assert!(o.define_own_property(context, x.clone(), same).expect("SameValue rewrite"));
+        assert!(
+            o.define_own_property(context, x.clone(), same)
+                .expect("SameValue rewrite")
+        );
 
         // A different value is rejected with the internal-method Boolean result.
         let different = DescriptorFields::<JsValue> {
@@ -282,7 +294,10 @@ fn host_define_own_property_creates_and_enforces_invariants() {
         }
         .into_descriptor()
         .expect("data descriptor");
-        assert!(!o.define_own_property(context, x.clone(), different).expect("rejected definition reports false"));
+        assert!(
+            !o.define_own_property(context, x.clone(), different)
+                .expect("rejected definition reports false")
+        );
         assert_number(&o.get(context, x.clone()).expect("unchanged"), 1);
 
         // The non-writable invariant also blocks host writes.
@@ -334,9 +349,10 @@ fn host_define_own_property_installs_and_validates_accessors() {
             .expect("o is an object");
 
         let getter = context
-            .create_host_function("getter", |ctx, _call| {
-                Ok(ctx.number(JsNumber::from_i32(99)))
-            })
+            .create_host_function(
+                "getter",
+                |ctx, _call| Ok(ctx.number(JsNumber::from_i32(99))),
+            )
             .expect("host function");
         let accessor = DescriptorFields::<JsValue> {
             get: Some(getter.as_value()),
@@ -345,7 +361,10 @@ fn host_define_own_property_installs_and_validates_accessors() {
         }
         .into_descriptor()
         .expect("accessor descriptor");
-        assert!(o.define_own_property(context, g.clone(), accessor).expect("create accessor"));
+        assert!(
+            o.define_own_property(context, g.clone(), accessor)
+                .expect("create accessor")
+        );
         assert_number(&o.get(context, g).expect("getter runs"), 99);
 
         // A non-callable, non-undefined getter is rejected with a TypeError.
@@ -458,9 +477,11 @@ fn host_property_ops_reject_foreign_handles() {
         assert!(
             matches!(
                 result,
-                Err(ExecutionError::Handle(fusor_runtime::HandleError::ForeignRuntime {
-                    kind: fusor_runtime::HandleKind::Object
-                }))
+                Err(ExecutionError::Handle(
+                    fusor_runtime::HandleError::ForeignRuntime {
+                        kind: fusor_runtime::HandleKind::Object
+                    }
+                ))
             ),
             "expected a foreign-object error"
         );
@@ -468,11 +489,7 @@ fn host_property_ops_reject_foreign_handles() {
     assert_foreign_object(other_global.get(&mut context, x.clone()).map(|_| ()));
     assert_foreign_object(other_global.has(&mut context, x.clone()).map(|_| ()));
     let one = context.number(JsNumber::from_i32(1));
-    assert_foreign_object(
-        other_global
-            .set(&mut context, x.clone(), one)
-            .map(|_| ()),
-    );
+    assert_foreign_object(other_global.set(&mut context, x.clone(), one).map(|_| ()));
     assert_foreign_object(other_global.delete(&mut context, x.clone()).map(|_| ()));
     assert_foreign_object(other_global.own_property_keys(&mut context).map(|_| ()));
     let descriptor = DescriptorFields::<JsValue> {
@@ -489,9 +506,11 @@ fn host_property_ops_reject_foreign_handles() {
 
     assert!(matches!(
         global.set(&mut context, x.clone(), other_value.clone()),
-        Err(ExecutionError::Handle(fusor_runtime::HandleError::ForeignRuntime {
-            kind: fusor_runtime::HandleKind::Value
-        }))
+        Err(ExecutionError::Handle(
+            fusor_runtime::HandleError::ForeignRuntime {
+                kind: fusor_runtime::HandleKind::Value
+            }
+        ))
     ));
     let foreign_value_descriptor = DescriptorFields::<JsValue> {
         get: Some(other_value),
@@ -501,9 +520,11 @@ fn host_property_ops_reject_foreign_handles() {
     .expect("accessor descriptor");
     assert!(matches!(
         global.define_own_property(&mut context, x, foreign_value_descriptor),
-        Err(ExecutionError::Handle(fusor_runtime::HandleError::ForeignRuntime {
-            kind: fusor_runtime::HandleKind::Value
-        }))
+        Err(ExecutionError::Handle(
+            fusor_runtime::HandleError::ForeignRuntime {
+                kind: fusor_runtime::HandleKind::Value
+            }
+        ))
     ));
 }
 
@@ -515,7 +536,9 @@ fn context_property_key_constructs_string_index_and_symbol_keys() {
 
     let string_key = context.property_key("hello").expect("string key");
     assert_eq!(
-        string_key.as_atom().and_then(fusor_runtime::Atom::description),
+        string_key
+            .as_atom()
+            .and_then(fusor_runtime::Atom::description),
         Some(&JsString::from_utf8("hello").expect("fixture string"))
     );
 
@@ -537,10 +560,12 @@ fn context_property_key_constructs_string_index_and_symbol_keys() {
     let number_value = context.number(JsNumber::from_i32(1));
     assert!(matches!(
         context.property_key_from_value(&number_value),
-        Err(ExecutionError::Handle(fusor_runtime::HandleError::WrongValueKind {
-            expected: ValueKind::String,
-            actual: ValueKind::Number,
-        }))
+        Err(ExecutionError::Handle(
+            fusor_runtime::HandleError::WrongValueKind {
+                expected: ValueKind::String,
+                actual: ValueKind::Number,
+            }
+        ))
     ));
 }
 
@@ -559,7 +584,10 @@ fn context_global_object_roundtrips_with_set_global() {
         .expect("global object")
         .into_object()
         .expect("object");
-    assert_number(&global.get(&mut context, host_global).expect("read back"), 5);
+    assert_number(
+        &global.get(&mut context, host_global).expect("read back"),
+        5,
+    );
 }
 
 #[test]
@@ -592,9 +620,11 @@ fn host_property_ops_reject_orphaned_handles() {
         assert!(
             matches!(
                 result,
-                Err(ExecutionError::Handle(fusor_runtime::HandleError::Orphaned {
-                    kind: fusor_runtime::HandleKind::Object
-                }))
+                Err(ExecutionError::Handle(
+                    fusor_runtime::HandleError::Orphaned {
+                        kind: fusor_runtime::HandleKind::Object
+                    }
+                ))
             ),
             "expected an orphaned-object error"
         );
@@ -603,11 +633,7 @@ fn host_property_ops_reject_orphaned_handles() {
     assert_orphaned(orphaned.set(&mut other_context, x.clone(), one.clone()));
     assert_orphaned(orphaned.has(&mut other_context, x.clone()).map(|_| ()));
     assert_orphaned(orphaned.delete(&mut other_context, x.clone()).map(|_| ()));
-    assert_orphaned(
-        orphaned
-            .own_property_keys(&mut other_context)
-            .map(|_| ()),
-    );
+    assert_orphaned(orphaned.own_property_keys(&mut other_context).map(|_| ()));
     let descriptor = DescriptorFields::<JsValue> {
         value: Some(one.clone()),
         ..DescriptorFields::new()

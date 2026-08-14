@@ -40,11 +40,10 @@ fn color_policy_resolution_matrix() {
 
 #[test]
 fn the_nocolor_policy_emits_no_ansi_sequences() {
-    let diagnostic = HostDiagnostic::new(ExecutionError::EngineFault(
-        EngineFault::RuntimeInvariant {
+    let diagnostic =
+        HostDiagnostic::new(ExecutionError::EngineFault(EngineFault::RuntimeInvariant {
             message: "invariant boom",
-        },
-    ));
+        }));
     let rendered = render_diagnostic(diagnostic, ColorPolicy::Never);
     assert!(
         rendered.contains("invariant boom"),
@@ -58,11 +57,10 @@ fn the_nocolor_policy_emits_no_ansi_sequences() {
 
 #[test]
 fn the_color_policy_emits_ansi_sequences() {
-    let diagnostic = HostDiagnostic::new(ExecutionError::EngineFault(
-        EngineFault::RuntimeInvariant {
+    let diagnostic =
+        HostDiagnostic::new(ExecutionError::EngineFault(EngineFault::RuntimeInvariant {
             message: "invariant boom",
-        },
-    ));
+        }));
     let rendered = render_diagnostic(diagnostic, ColorPolicy::Always);
     assert!(
         rendered.contains("\x1b["),
@@ -81,11 +79,9 @@ fn uncaught_frames_become_source_labels() {
             "globalThis.n = 1;\nthrow new Error('boom');",
             FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
             |unit| {
-                let context = CompilationContext::new_with_source_name(
-                    unit,
-                    Arc::from("diagnostics.js"),
-                )
-                .expect("storage plan");
+                let context =
+                    CompilationContext::new_with_source_name(unit, Arc::from("diagnostics.js"))
+                        .expect("storage plan");
                 let tree = context
                     .compile_global_script(fusor_bytecode::VerificationLimits::default())
                     .expect("verified Global Script");

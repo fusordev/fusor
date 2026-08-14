@@ -3,11 +3,11 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use fusor_host::overlay::HostRuntime;
 use fusor_host::ops::{
-    OpError, Resource, ResourceId, ResourceTable, add_resource, install_op,
-    install_resource_table, lookup_resource,
+    OpError, Resource, ResourceId, ResourceTable, add_resource, install_op, install_resource_table,
+    lookup_resource,
 };
+use fusor_host::overlay::HostRuntime;
 use fusor_ops::op;
 use fusor_runtime::{Context, ExecutionLimits, JsNumber, Runtime, RuntimeLimits};
 
@@ -76,7 +76,9 @@ fn op_use_resource(id: fusor_host::ops::ResourceId) -> Result<u32, OpError> {
 fn ids_are_monotonic_and_never_reused() {
     let mut table = ResourceTable::new();
     let closed = Rc::new(RefCell::new(false));
-    let first = table.add(resource("first", Rc::clone(&closed))).expect("id");
+    let first = table
+        .add(resource("first", Rc::clone(&closed)))
+        .expect("id");
     let second = table.add(resource("second", closed)).expect("id");
     assert_ne!(first, second);
     assert_eq!(first.get(), 0);
@@ -84,7 +86,9 @@ fn ids_are_monotonic_and_never_reused() {
 
     // Closing and re-adding never reuses an id.
     assert!(table.close(first));
-    let third = table.add(resource("third", Rc::new(RefCell::new(false)))).expect("id");
+    let third = table
+        .add(resource("third", Rc::new(RefCell::new(false))))
+        .expect("id");
     assert_eq!(third.get(), 2);
     assert!(table.get(first).is_none());
 }
@@ -93,7 +97,9 @@ fn ids_are_monotonic_and_never_reused() {
 fn close_runs_the_resource_close_hook_exactly_once() {
     let mut table = ResourceTable::new();
     let closed = Rc::new(RefCell::new(false));
-    let id = table.add(resource("closable", Rc::clone(&closed))).expect("id");
+    let id = table
+        .add(resource("closable", Rc::clone(&closed)))
+        .expect("id");
     assert!(!*closed.borrow());
     assert!(table.close(id));
     assert!(*closed.borrow());
@@ -104,7 +110,9 @@ fn close_runs_the_resource_close_hook_exactly_once() {
 fn close_runs_the_hook_even_with_live_clones() {
     let mut table = ResourceTable::new();
     let closed = Rc::new(RefCell::new(false));
-    let id = table.add(resource("shared", Rc::clone(&closed))).expect("id");
+    let id = table
+        .add(resource("shared", Rc::clone(&closed)))
+        .expect("id");
     let clone = Rc::clone(table.get(id).expect("live"));
     assert!(table.close(id));
     // JavaScript close semantics: the hook runs immediately; the surviving

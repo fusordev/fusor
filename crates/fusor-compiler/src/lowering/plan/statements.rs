@@ -11,14 +11,14 @@ use super::super::{
     plan_put_slot, unsupported,
 };
 
+use fusor_bytecode::BranchKind;
+use fusor_frontend::Span;
 use oxc_ast::ast::{
     BlockStatement, Declaration, Directive, ExportDefaultDeclaration, ExportDefaultDeclarationKind,
     ExportNamedDeclaration, Expression, ForStatementLeft, Statement, SwitchStatement,
     VariableDeclaration,
 };
 use oxc_semantic::{NodeId, ScopeId};
-use fusor_bytecode::BranchKind;
-use fusor_frontend::Span;
 
 use crate::lowering::{CompilerLabel, LocalSlot, PlannedInstruction};
 

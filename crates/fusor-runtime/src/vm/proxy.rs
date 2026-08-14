@@ -1048,7 +1048,8 @@ pub(super) fn begin_internal_define_own_property(
                 execution_budget,
             );
         }
-        let outcome = define_own_property(runtime, &base, key.clone(), &definition, execution_budget)?;
+        let outcome =
+            define_own_property(runtime, &base, key.clone(), &definition, execution_budget)?;
         return match outcome {
             PropertyDefinitionOutcome::Complete => Ok(NativeDispatch::Immediate(match result {
                 DefinePropertyResult::Target => base,
@@ -1060,12 +1061,7 @@ pub(super) fn begin_internal_define_own_property(
                 Ok(NativeDispatch::Immediate(StoredValue::Boolean(false)))
             }
             PropertyDefinitionOutcome::Failed(failure) => Err(NativeFailure::Abrupt(
-                property_exception_at(
-                    realm,
-                    origin,
-                    property_key_name(&key).as_ref(),
-                    failure,
-                )?,
+                property_exception_at(realm, origin, property_key_name(&key).as_ref(), failure)?,
             )),
         };
     };

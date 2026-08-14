@@ -10,13 +10,7 @@ mod cdp;
 mod cli;
 
 use std::{
-    cell::RefCell,
-    error::Error,
-    io::Write as _,
-    path::Path,
-    process::ExitCode,
-    rc::Rc,
-    sync::Arc,
+    cell::RefCell, error::Error, io::Write as _, path::Path, process::ExitCode, rc::Rc, sync::Arc,
 };
 
 use fusor::{ScriptLimits, evaluate_preloaded_module_graph, evaluate_script};
@@ -328,27 +322,23 @@ async fn run_file(
         // Load the static graph asynchronously (concurrent per-level reads on
         // this runtime), evaluate it inside a turn, then drain parked dynamic
         // `import()` loads across turns.
-        let edges = match cli::loader::gather_static_graph(
-            &resolver.borrow(),
-            &source,
-            &root_name,
-            limits,
-        )
-        .await
-        {
-            Ok(edges) => edges,
-            Err(error) => {
-                emit_run_exception(
-                    &mut host_loop,
-                    &debug_session,
-                    cdp::inspector::CliException::from_module_error(&error, &source),
-                    source.clone(),
-                    root_name.clone(),
-                );
-                report_module_error(&root_name, error);
-                return 1;
-            }
-        };
+        let edges =
+            match cli::loader::gather_static_graph(&resolver.borrow(), &source, &root_name, limits)
+                .await
+            {
+                Ok(edges) => edges,
+                Err(error) => {
+                    emit_run_exception(
+                        &mut host_loop,
+                        &debug_session,
+                        cdp::inspector::CliException::from_module_error(&error, &source),
+                        source.clone(),
+                        root_name.clone(),
+                    );
+                    report_module_error(&root_name, error);
+                    return 1;
+                }
+            };
         let outcome: Rc<RefCell<Option<Result<(), fusor::ModuleEvaluationError>>>> =
             Rc::new(RefCell::new(None));
         let outcome_slot = Rc::clone(&outcome);

@@ -30,8 +30,8 @@ use std::{
 };
 
 use crate::{
-    Atom, ExecutionError, HandleError, HandleKind, JsBigInt, JsNumber, JsString, PropertyKey,
-    PropertyDescriptor, ValueKind,
+    Atom, ExecutionError, HandleError, HandleKind, JsBigInt, JsNumber, JsString,
+    PropertyDescriptor, PropertyKey, ValueKind,
     ids::{FunctionId, ObjectId},
 };
 
@@ -505,9 +505,7 @@ impl JsValue {
     /// Returns an error for an orphaned handle.
     pub fn to_boolean(&self) -> Result<bool, HandleError> {
         let stored = self.stored()?;
-        Ok(stored
-            .primitive_to_boolean()
-            .unwrap_or(true))
+        Ok(stored.primitive_to_boolean().unwrap_or(true))
     }
 
     /// Applies ECMA-262 `ToString` (7.1.17) to a primitive payload.
@@ -523,10 +521,7 @@ impl JsValue {
     /// Returns a handle error for an orphaned or foreign value, a `TypeError`
     /// exception for an object/function/Symbol conversion, and a string or
     /// engine error for a conversion failure.
-    pub fn to_string(
-        &self,
-        ctx: &mut crate::Context<'_>,
-    ) -> Result<JsString, ExecutionError> {
+    pub fn to_string(&self, ctx: &mut crate::Context<'_>) -> Result<JsString, ExecutionError> {
         let owner = self.owner()?;
         ctx.runtime.validate_owner(&owner, HandleKind::Value)?;
         let stored = self.stored()?.duplicate();
@@ -546,10 +541,7 @@ impl JsValue {
     /// Returns a handle error for an orphaned or foreign value, a `TypeError`
     /// exception for an object/function/BigInt/Symbol conversion, and a
     /// string or engine error for a conversion failure.
-    pub fn to_number(
-        &self,
-        ctx: &mut crate::Context<'_>,
-    ) -> Result<JsNumber, ExecutionError> {
+    pub fn to_number(&self, ctx: &mut crate::Context<'_>) -> Result<JsNumber, ExecutionError> {
         let owner = self.owner()?;
         ctx.runtime.validate_owner(&owner, HandleKind::Value)?;
         let stored = self.stored()?.duplicate();
@@ -843,14 +835,15 @@ impl Object {
         descriptor: PropertyDescriptor<JsValue>,
     ) -> Result<bool, ExecutionError> {
         let object = self.admitted_id(ctx)?;
-        let stored_field = |value: Option<&JsValue>| -> Result<Option<StoredValue>, ExecutionError> {
-            let Some(value) = value else {
-                return Ok(None);
+        let stored_field =
+            |value: Option<&JsValue>| -> Result<Option<StoredValue>, ExecutionError> {
+                let Some(value) = value else {
+                    return Ok(None);
+                };
+                let owner = value.owner()?;
+                ctx.runtime.validate_owner(&owner, HandleKind::Value)?;
+                Ok(Some(value.stored()?.duplicate()))
             };
-            let owner = value.owner()?;
-            ctx.runtime.validate_owner(&owner, HandleKind::Value)?;
-            Ok(Some(value.stored()?.duplicate()))
-        };
         let value = stored_field(descriptor.value())?;
         let get = stored_field(descriptor.getter())?;
         let set = stored_field(descriptor.setter())?;
@@ -890,12 +883,7 @@ impl Object {
         key: PropertyKey,
     ) -> Result<bool, ExecutionError> {
         let object = self.admitted_id(ctx)?;
-        crate::vm::host_has_property(
-            ctx.runtime,
-            HeapReference::Object(object),
-            key,
-            ctx.realm,
-        )
+        crate::vm::host_has_property(ctx.runtime, HeapReference::Object(object), key, ctx.realm)
     }
 
     /// Executes ECMA-262 `O.[[Delete]](P)` and returns its Boolean result
@@ -921,12 +909,7 @@ impl Object {
         key: PropertyKey,
     ) -> Result<bool, ExecutionError> {
         let object = self.admitted_id(ctx)?;
-        crate::vm::host_delete_property(
-            ctx.runtime,
-            HeapReference::Object(object),
-            key,
-            ctx.realm,
-        )
+        crate::vm::host_delete_property(ctx.runtime, HeapReference::Object(object), key, ctx.realm)
     }
 
     /// Executes ECMA-262 `O.[[OwnPropertyKeys]]()` (ECMA-262 10.1.11, algorithm
@@ -1112,12 +1095,10 @@ impl PromiseResolver {
         ) {
             Ok(_completion) => Ok(()),
             Err(crate::CallError::Execution(error)) => Err(error),
-            Err(crate::CallError::Thrown(_)) => {
-                Err(crate::EngineFault::RuntimeInvariant {
-                    message: "promise resolving function threw a value",
-                }
-                .into())
+            Err(crate::CallError::Thrown(_)) => Err(crate::EngineFault::RuntimeInvariant {
+                message: "promise resolving function threw a value",
             }
+            .into()),
         }
     }
 }

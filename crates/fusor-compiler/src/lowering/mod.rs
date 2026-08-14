@@ -1,5 +1,16 @@
 use std::sync::Arc;
 
+use fusor_bytecode::{
+    AtomPoolIndex, BranchKind, BytecodeGraphVerificationLimits, CompilerClosureBinding,
+    FinalOpcode, FunctionGraphVerificationLimits, MAX_FUNCTION_INDEX_ENTRIES, Operands,
+    UnverifiedCompilerBytecodeGraph, VerificationLimits, verify_compiler_bytecode_graph,
+};
+#[cfg(test)]
+use fusor_bytecode::{
+    Binary64Constant, CompilerCaptureLayout, CompilerCapturedBinding, FunctionIndexDomains,
+    UnverifiedFunctionHeader,
+};
+use fusor_frontend::{CompilationGoal, ParsedUnit, Span};
 use oxc_ast::{
     AstKind,
     ast::{
@@ -26,17 +37,6 @@ use oxc_span::GetSpan;
 use oxc_syntax::operator::{
     AssignmentOperator, BinaryOperator, LogicalOperator, UnaryOperator, UpdateOperator,
 };
-use fusor_bytecode::{
-    AtomPoolIndex, BranchKind, BytecodeGraphVerificationLimits, CompilerClosureBinding,
-    FinalOpcode, FunctionGraphVerificationLimits, MAX_FUNCTION_INDEX_ENTRIES, Operands,
-    UnverifiedCompilerBytecodeGraph, VerificationLimits, verify_compiler_bytecode_graph,
-};
-#[cfg(test)]
-use fusor_bytecode::{
-    Binary64Constant, CompilerCaptureLayout, CompilerCapturedBinding, FunctionIndexDomains,
-    UnverifiedFunctionHeader,
-};
-use fusor_frontend::{CompilationGoal, ParsedUnit, Span};
 
 use crate::storage::{
     BindingId, CompilationUnitKind, DeclarationKind, Executable, ExecutableId, ExecutableKind,

@@ -3,7 +3,9 @@
 //! diagnostic pipeline.
 
 use fusor_host::ops::OpError;
-use fusor_host::process::diagnostics::{ColorPolicy, HostDiagnostic, OpDiagnostic, render_diagnostic};
+use fusor_host::process::diagnostics::{
+    ColorPolicy, HostDiagnostic, OpDiagnostic, render_diagnostic,
+};
 use fusor_host::process::error_codes::ErrorCode;
 use fusor_runtime::{EngineFault, ExecutionError};
 
@@ -23,7 +25,10 @@ fn the_documented_table_matches_the_classification() {
 #[test]
 fn execution_errors_map_to_their_codes() {
     let fault = ExecutionError::EngineFault(EngineFault::RuntimeInvariant { message: "x" });
-    assert_eq!(ErrorCode::from_execution_error(&fault), ErrorCode::EngineFault);
+    assert_eq!(
+        ErrorCode::from_execution_error(&fault),
+        ErrorCode::EngineFault
+    );
     let interrupted = ExecutionError::Interrupted { executed: 0 };
     assert_eq!(
         ErrorCode::from_execution_error(&interrupted),
@@ -41,11 +46,10 @@ fn execution_errors_map_to_their_codes() {
 
 #[test]
 fn host_diagnostics_render_their_codes() {
-    let diagnostic = HostDiagnostic::new(ExecutionError::EngineFault(
-        EngineFault::RuntimeInvariant {
+    let diagnostic =
+        HostDiagnostic::new(ExecutionError::EngineFault(EngineFault::RuntimeInvariant {
             message: "invariant boom",
-        },
-    ));
+        }));
     let rendered = render_diagnostic(diagnostic, ColorPolicy::Never);
     assert!(
         rendered.contains("11005"),

@@ -47,9 +47,7 @@ mod tests {
 
     use fusor_bytecode::VerifiedBytecode;
     use fusor_compiler::CompilationContext;
-    use fusor_frontend::{
-        CompilationGoal, FrontendOptions, GlobalScriptGoal, with_parsed_program,
-    };
+    use fusor_frontend::{CompilationGoal, FrontendOptions, GlobalScriptGoal, with_parsed_program};
     use fusor_host::ops::set_print_sink;
     use fusor_host::overlay::{CoreOverlay, HostRuntime};
     use fusor_runtime::ExecutionLimits;

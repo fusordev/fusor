@@ -678,9 +678,7 @@ fn upgrade_websocket(stream: &mut TcpStream, headers: &HashMap<String, String>) 
 /// wire protocol it produces.
 fn cdp_trace_enabled() -> bool {
     static TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *TRACE.get_or_init(|| {
-        std::env::var("FUSOR_CDP_TRACE").is_ok_and(|value| value == "1")
-    })
+    *TRACE.get_or_init(|| std::env::var("FUSOR_CDP_TRACE").is_ok_and(|value| value == "1"))
 }
 
 /// Logs one protocol frame to stderr when the CDP trace is enabled.

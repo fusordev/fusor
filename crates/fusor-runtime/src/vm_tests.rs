@@ -81,11 +81,9 @@ impl OrdinaryDynamicFunctionCompiler for OxcDynamicCompiler {
                 )
                 .map_err(test_engine_failure)?;
                 context
-                        .compile_dynamic_function_script(
-                            fusor_bytecode::VerificationLimits::default(),
-                        )
-                        .map(|tree| Arc::new(tree.verified_bytecode().clone()))
-                        .map_err(test_engine_failure)
+                    .compile_dynamic_function_script(fusor_bytecode::VerificationLimits::default())
+                    .map(|tree| Arc::new(tree.verified_bytecode().clone()))
+                    .map_err(test_engine_failure)
             },
         )
         .map_err(test_engine_failure)?
@@ -6964,8 +6962,12 @@ fn dynamic_import_parks_each_load_until_the_host_settles_it() {
     let second_import = runtime
         .take_pending_dynamic_import()
         .expect("second parked import");
-    reject_dynamic_import_load(&mut runtime, second_import, "host could not load the module")
-        .expect("reject second");
+    reject_dynamic_import_load(
+        &mut runtime,
+        second_import,
+        "host could not load the module",
+    )
+    .expect("reject second");
     drain_host_jobs_with_limits(&mut runtime, None, ExecutionLimits::default())
         .expect("drain rejection jobs");
     for promise in [first_id, second_id] {
@@ -7540,10 +7542,7 @@ fn collected_host_functions_release_their_callback_slots() {
         }
         assert_eq!(runtime.host_functions.len(), 32);
         assert!(
-            runtime
-                .host_functions
-                .iter()
-                .all(|slot| slot.is_some()),
+            runtime.host_functions.iter().all(|slot| slot.is_some()),
             "live host functions retain their slots"
         );
     }
@@ -7551,10 +7550,7 @@ fn collected_host_functions_release_their_callback_slots() {
     // Every transient function is unreachable; its callback slot must be
     // released so the Rust closure does not leak.
     assert!(
-        runtime
-            .host_functions
-            .iter()
-            .all(|slot| slot.is_none()),
+        runtime.host_functions.iter().all(|slot| slot.is_none()),
         "collected host functions must release their callback slots"
     );
 }
@@ -7680,12 +7676,10 @@ fn snapshot_round_trips_dynamic_atoms() {
 #[test]
 fn snapshot_restore_fails_closed_on_damage() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
-    let keys = [
-        runtime
-            .atoms
-            .intern_string(&JsString::from_utf8("fusor-dynamic-a").expect("a"))
-            .expect("atom"),
-    ];
+    let keys = [runtime
+        .atoms
+        .intern_string(&JsString::from_utf8("fusor-dynamic-a").expect("a"))
+        .expect("atom")];
     let blob = runtime.snapshot().expect("snapshot");
     drop(keys);
     let fresh = || Runtime::try_new(RuntimeLimits::default()).expect("runtime");
@@ -7820,7 +7814,10 @@ fn snapshot_round_trips_ordinary_objects_and_shapes() {
         .expect("atom");
     assert_eq!(
         record.shape()[0].key().as_atom().map(|atom| {
-            atom.description().expect("description").to_utf8_lossy().expect("utf8")
+            atom.description()
+                .expect("description")
+                .to_utf8_lossy()
+                .expect("utf8")
         }),
         Some("alpha".to_owned()),
         "the shape key content round-trips"
@@ -7873,9 +7870,7 @@ fn snapshot_round_trips_binding_cells() {
     let cells_second = runtime
         .cells
         .try_insert(crate::runtime::BindingCell {
-            value: crate::value::SlotValue::Value(StoredValue::Number(
-                JsNumber::from_f64(2.5),
-            )),
+            value: crate::value::SlotValue::Value(StoredValue::Number(JsNumber::from_f64(2.5))),
             forward: None,
         })
         .expect("cell");
@@ -8042,7 +8037,8 @@ fn snapshot_round_trips_bytecode_functions() {
         .bytecode()
         .expect("bytecode implementation");
     assert_eq!(
-        function.template, authority.root_id(),
+        function.template,
+        authority.root_id(),
         "template identity preserved"
     );
     match function.environment.as_slice() {
@@ -8077,9 +8073,7 @@ fn snapshot_restore_rebinds_host_functions_by_name() {
             implementation: crate::runtime::FunctionImplementation::Native(
                 crate::runtime::NativeFunction {
                     realm: crate::ids::RealmId::ZERO,
-                    kind: crate::runtime::NativeFunctionKind::Host(
-                        crate::HostFunctionId::new(0),
-                    ),
+                    kind: crate::runtime::NativeFunctionKind::Host(crate::HostFunctionId::new(0)),
                 },
             ),
             object: ObjectRecord::from_parts(
@@ -8170,9 +8164,7 @@ fn snapshot_restore_fails_closed_on_corrupted_function_bytecode() {
     let mut damaged = blob.clone();
     // Locate the functions section payload: walk the section frames.
     let mut position = 8 + 4 + 4; // magic + stamp + section count
-    let mut sections = u32::from_le_bytes([
-        damaged[12], damaged[13], damaged[14], damaged[15],
-    ]);
+    let mut sections = u32::from_le_bytes([damaged[12], damaged[13], damaged[14], damaged[15]]);
     while sections > 0 {
         let tag = damaged[position];
         position += 1;
@@ -8232,7 +8224,10 @@ fn snapshot_fails_closed_on_unsupported_heap_content() {
     assert!(
         matches!(
             runtime.snapshot(),
-            Err(crate::snapshot::SnapshotError::Unsupported { what: "an accessor property slot", .. })
+            Err(crate::snapshot::SnapshotError::Unsupported {
+                what: "an accessor property slot",
+                ..
+            })
         ),
         "unsupported content fails closed"
     );
@@ -8245,11 +8240,9 @@ fn run_snapshot_script(runtime: &mut Runtime, realm: &Realm, source: &str) -> St
         source,
         FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
         |unit| {
-            let context = CompilationContext::new_with_source_name(
-                unit,
-                Arc::from("<snapshot realm test>"),
-            )
-            .expect("storage plan");
+            let context =
+                CompilationContext::new_with_source_name(unit, Arc::from("<snapshot realm test>"))
+                    .expect("storage plan");
             let tree = context
                 .compile_global_script(fusor_bytecode::VerificationLimits::default())
                 .expect("verified Global Script");
@@ -8353,7 +8346,10 @@ fn snapshot_fails_closed_on_uncovered_exotic_and_async_state() {
     assert!(
         matches!(
             runtime.snapshot(),
-            Err(crate::snapshot::SnapshotError::Unsupported { what: "a weak collection", .. })
+            Err(crate::snapshot::SnapshotError::Unsupported {
+                what: "a weak collection",
+                ..
+            })
         ),
         "weak collections fail closed"
     );
@@ -8368,7 +8364,10 @@ fn snapshot_fails_closed_on_uncovered_exotic_and_async_state() {
     assert!(
         matches!(
             runtime.snapshot(),
-            Err(crate::snapshot::SnapshotError::Unsupported { what: "a promise", .. })
+            Err(crate::snapshot::SnapshotError::Unsupported {
+                what: "a promise",
+                ..
+            })
         ),
         "promises fail closed"
     );
@@ -8382,7 +8381,10 @@ fn snapshot_fails_closed_on_uncovered_exotic_and_async_state() {
     assert!(
         matches!(
             runtime.snapshot(),
-            Err(crate::snapshot::SnapshotError::Unsupported { what: "a proxy", .. })
+            Err(crate::snapshot::SnapshotError::Unsupported {
+                what: "a proxy",
+                ..
+            })
         ),
         "proxies fail closed"
     );
@@ -8397,7 +8399,10 @@ fn snapshot_fails_closed_on_uncovered_exotic_and_async_state() {
     assert!(
         matches!(
             runtime.snapshot(),
-            Err(crate::snapshot::SnapshotError::Unsupported { what: "a suspended generator", .. })
+            Err(crate::snapshot::SnapshotError::Unsupported {
+                what: "a suspended generator",
+                ..
+            })
         ),
         "suspended generators fail closed"
     );
@@ -8436,7 +8441,10 @@ fn snapshot_fails_closed_on_a_module_registry() {
     assert!(
         matches!(
             runtime.snapshot(),
-            Err(crate::snapshot::SnapshotError::Unsupported { what: "a module registry", .. })
+            Err(crate::snapshot::SnapshotError::Unsupported {
+                what: "a module registry",
+                ..
+            })
         ),
         "module registries fail closed"
     );
@@ -8552,7 +8560,10 @@ fn snapshot_fails_closed_when_a_realm_is_created_after_user_content() {
     assert!(
         matches!(
             runtime.snapshot(),
-            Err(crate::snapshot::SnapshotError::Unsupported { what: "user heap content between realm creations", .. })
+            Err(crate::snapshot::SnapshotError::Unsupported {
+                what: "user heap content between realm creations",
+                ..
+            })
         ),
         "interleaved realm creation fails closed"
     );

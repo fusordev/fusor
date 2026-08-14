@@ -6,8 +6,13 @@ use fusor::{ScriptLimits, evaluate_script};
 use fusor_runtime::{Runtime, RuntimeLimits};
 
 fn evaluate(context: &mut fusor_runtime::Context<'_>, source: &str) -> fusor_runtime::JsValue {
-    evaluate_script(context, source, "error-stacks-test.js", ScriptLimits::default())
-        .expect("evaluate fixture")
+    evaluate_script(
+        context,
+        source,
+        "error-stacks-test.js",
+        ScriptLimits::default(),
+    )
+    .expect("evaluate fixture")
 }
 
 fn string_value(value: &fusor_runtime::JsValue) -> String {

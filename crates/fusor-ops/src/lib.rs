@@ -105,7 +105,12 @@ pub fn op(attribute: TokenStream, item: TokenStream) -> TokenStream {
     };
     let parameter_types: Vec<LitStr> = javascript_parameters
         .iter()
-        .map(|(_, ty)| LitStr::new(&quote!(#ty).to_string().replace(' ', ""), function_name.span()))
+        .map(|(_, ty)| {
+            LitStr::new(
+                &quote!(#ty).to_string().replace(' ', ""),
+                function_name.span(),
+            )
+        })
         .collect();
 
     // Per-parameter deserialization: `ResourceId` parameters resolve through
@@ -329,15 +334,11 @@ pub fn op(attribute: TokenStream, item: TokenStream) -> TokenStream {
 /// ```
 #[proc_macro]
 pub fn register_op(input: TokenStream) -> TokenStream {
-    let parsed =
-        parse_macro_input!(input with Punctuated::<Ident, Token![,]>::parse_terminated);
+    let parsed = parse_macro_input!(input with Punctuated::<Ident, Token![,]>::parse_terminated);
     if parsed.len() != 2 {
-        return syn::Error::new_spanned(
-            &parsed,
-            "expected `register_op!(registry, op_function)`",
-        )
-        .into_compile_error()
-        .into();
+        return syn::Error::new_spanned(&parsed, "expected `register_op!(registry, op_function)`")
+            .into_compile_error()
+            .into();
     }
     let registry = &parsed[0];
     let op = &parsed[1];

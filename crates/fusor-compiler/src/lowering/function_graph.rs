@@ -4,7 +4,6 @@ use crate::storage::{
     BindingId, CaptureSource, DeclarationKind, DeclarationPolicy, Executable, ExecutableId,
     InitializationPolicy, StoragePlacement, WritePolicy,
 };
-use oxc_semantic::ScopeId;
 use fusor_bytecode::{
     ClosureVariableDefinition as VerifiedClosureVariableDefinition,
     CompilerBindingKind as VerifiedBindingKind, CompilerBindingPolicy, CompilerCaptureLayout,
@@ -15,6 +14,7 @@ use fusor_bytecode::{
     FunctionTemplateId, ScopeLink, UnverifiedCompilerFunction, UnverifiedCompilerFunctionGraph,
     VariableDefinition, VerifiedCompilerFunctionGraph, verify_compiler_function_graph,
 };
+use oxc_semantic::ScopeId;
 
 use super::layouts::RealmGlobalRootSource;
 use super::{
@@ -879,8 +879,7 @@ impl CompilationContext<'_, '_, '_> {
                         span: Some(metadata.span()),
                     });
                 }
-                let initializer = if descriptor.origin
-                    == fusor_bytecode::ModuleBindingOrigin::Local
+                let initializer = if descriptor.origin == fusor_bytecode::ModuleBindingOrigin::Local
                     && descriptor.policy.kind() == fusor_bytecode::CompilerBindingKind::Function
                 {
                     let declaration =

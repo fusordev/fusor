@@ -9,9 +9,9 @@ use std::sync::Arc;
 use fusor_bytecode::VerifiedBytecode;
 use fusor_compiler::CompilationContext;
 use fusor_frontend::{CompilationGoal, FrontendOptions, GlobalScriptGoal, with_parsed_program};
-use fusor_host::process::Signal;
-use fusor_host::overlay::{CoreOverlay, HostRuntime};
 use fusor_host::r#loop::HostLoop;
+use fusor_host::overlay::{CoreOverlay, HostRuntime};
+use fusor_host::process::Signal;
 use fusor_runtime::{
     Context, ExecutionError, ExecutionLimits, GlobalScriptError, Runtime, RuntimeLimits,
 };
@@ -195,12 +195,10 @@ fn a_second_sigint_force_exits_with_130() {
     fixture.host.run_until_idle().expect("exits without error");
     let ran = Rc::new(RefCell::new(false));
     let ran_in = Rc::clone(&ran);
-    fixture
-        .host
-        .post_event(Box::new(move |_context| {
-            *ran_in.borrow_mut() = true;
-            Ok(())
-        }));
+    fixture.host.post_event(Box::new(move |_context| {
+        *ran_in.borrow_mut() = true;
+        Ok(())
+    }));
     fixture.host.run_one_turn().expect("turn is a no-op");
     assert!(!*ran.borrow(), "no work runs after a force exit");
 }
@@ -217,11 +215,11 @@ fn a_sigterm_force_exits_with_143() {
 #[test]
 fn a_sigint_interrupts_run_main() {
     let mut fixture = Fixture::new();
-    let authority = compile(&format!("globalThis.ran = false; {LONG_LOOP} globalThis.ran = true;"));
+    let authority = compile(&format!(
+        "globalThis.ran = false; {LONG_LOOP} globalThis.ran = true;"
+    ));
     fixture.host.post_signal(Signal::Interrupt);
-    let result = fixture
-        .host
-        .run_main(authority, ExecutionLimits::default());
+    let result = fixture.host.run_main(authority, ExecutionLimits::default());
     assert!(
         matches!(result, Err(ExecutionError::Interrupted { .. })),
         "the main script is cancelled at the next interrupt poll: {result:?}"

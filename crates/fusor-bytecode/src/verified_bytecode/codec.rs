@@ -23,6 +23,17 @@
 use std::sync::Arc;
 use std::{error::Error, fmt};
 
+use super::ModuleImportNameKind;
+use crate::compiler_graph::{
+    UnverifiedCompilerFunction, UnverifiedCompilerFunctionGraph, VerifiedCompilerFunction,
+    VerifiedCompilerFunctionGraph, verify_compiler_function_graph,
+};
+use crate::function::UnverifiedFunctionHeader;
+use crate::verifier::{
+    CompilerCaptureLayout, CompilerCapturedBinding, CompilerConstantKind, CompilerConstantLayout,
+    FunctionIndexDomains, UnverifiedCompilerFunctionBody, VerificationLimits,
+    verify_compiler_control_flow,
+};
 use crate::{
     AtomPoolIndex, Binary64Constant, CompilerAtom, CompilerBigInt, CompilerClosureSource,
     CompilerConstant, CompilerConstantValue, CompilerString, CompilerTemplateElement,
@@ -31,21 +42,11 @@ use crate::{
 use crate::{
     BytecodeGraphVerificationLimits, BytecodePc, ClosureVariableDefinition, CompilerBindingKind,
     CompilerBindingPolicy, CompilerClosureBinding, CompilerExecutableKind,
-    CompilerInitializationPolicy, CompilerWritePolicy, CompilerSource, ModuleBindingOrigin, ModuleImportName, ModuleRequestDescriptor, PcSourceSpan, ScopeLink, SourceByteSpan, UnverifiedCompilerBytecodeGraph,
-    UnverifiedFunctionMetadata, UnverifiedModuleBindingDescriptor,
+    CompilerInitializationPolicy, CompilerSource, CompilerWritePolicy, ModuleBindingOrigin,
+    ModuleImportName, ModuleRequestDescriptor, PcSourceSpan, ScopeLink, SourceByteSpan,
+    UnverifiedCompilerBytecodeGraph, UnverifiedFunctionMetadata, UnverifiedModuleBindingDescriptor,
     UnverifiedModuleDeclarationRecord, VariableDefinition, VerifiedBytecode,
     VerifiedFunctionMetadata, verify_compiler_bytecode_graph,
-};
-use crate::compiler_graph::{
-    UnverifiedCompilerFunction, UnverifiedCompilerFunctionGraph, VerifiedCompilerFunction,
-    VerifiedCompilerFunctionGraph, verify_compiler_function_graph,
-};
-use crate::function::UnverifiedFunctionHeader;
-use super::ModuleImportNameKind;
-use crate::verifier::{
-    CompilerCapturedBinding, CompilerCaptureLayout, CompilerConstantKind, CompilerConstantLayout,
-    FunctionIndexDomains, UnverifiedCompilerFunctionBody, VerificationLimits,
-    verify_compiler_control_flow,
 };
 
 /// The bytecode codec magic.
@@ -79,7 +80,10 @@ impl fmt::Display for BytecodeCodecError {
         match self {
             Self::MagicMismatch => formatter.write_str("not a bytecode payload (bad magic)"),
             Self::FormatMismatch { found } => {
-                write!(formatter, "unsupported bytecode format stamp or section tag {found}")
+                write!(
+                    formatter,
+                    "unsupported bytecode format stamp or section tag {found}"
+                )
             }
             Self::Truncated => formatter.write_str("the bytecode payload is truncated"),
             Self::String(message) => write!(formatter, "invalid bytecode pool value: {message}"),
@@ -196,7 +200,9 @@ pub fn read_sections(payload: &[u8]) -> Result<Vec<(u8, &[u8])>, BytecodeCodecEr
     for _ in 0..count {
         let tag = reader.read_u8()?;
         if tag <= previous_tag {
-            return Err(BytecodeCodecError::FormatMismatch { found: u32::from(tag) });
+            return Err(BytecodeCodecError::FormatMismatch {
+                found: u32::from(tag),
+            });
         }
         previous_tag = tag;
         let length = reader.read_u64()?;
@@ -241,8 +247,7 @@ fn encode_string(buffer: &mut Vec<u8>, string: &CompilerString) {
 fn decode_string(reader: &mut Reader<'_>) -> Result<CompilerString, BytecodeCodecError> {
     let length = reader.read_u32()?;
     let length = usize::try_from(length).map_err(|_| BytecodeCodecError::Truncated)?;
-    let bytes = reader
-        .read_bytes(length.checked_mul(2).ok_or(BytecodeCodecError::Truncated)?)?;
+    let bytes = reader.read_bytes(length.checked_mul(2).ok_or(BytecodeCodecError::Truncated)?)?;
     let mut units = Vec::new();
     units
         .try_reserve_exact(length)
@@ -295,7 +300,11 @@ fn decode_atom_pool_from(reader: &mut Reader<'_>) -> Result<Vec<CompilerAtom>, B
         let atom = match flag {
             0 => CompilerAtom::new(string),
             1 => CompilerAtom::new_static_property_only(string),
-            other => return Err(BytecodeCodecError::FormatMismatch { found: u32::from(other) }),
+            other => {
+                return Err(BytecodeCodecError::FormatMismatch {
+                    found: u32::from(other),
+                });
+            }
         };
         atoms.push(atom);
     }
@@ -408,16 +417,12 @@ fn decode_constant_pool_from(
                                     });
                                 }
                             };
-                            elements.push(CompilerTemplateElement::new(
-                                cooked,
-                                decode_string(reader)?,
-                            ));
+                            elements
+                                .push(CompilerTemplateElement::new(cooked, decode_string(reader)?));
                         }
                         CompilerConstantValue::TemplateObject(
                             CompilerTemplateObject::try_from_elements(Arc::from(elements))
-                                .map_err(|error| {
-                                    BytecodeCodecError::String(error.to_string())
-                                })?,
+                                .map_err(|error| BytecodeCodecError::String(error.to_string()))?,
                         )
                     }
                     other => {
@@ -699,9 +704,9 @@ fn decode_function_record(
         1 => {
             let binding_count = read_count(reader)?;
             let mut bindings = Vec::new();
-            bindings.try_reserve_exact(binding_count).map_err(|_| {
-                BytecodeCodecError::String("capture allocation failed".to_owned())
-            })?;
+            bindings
+                .try_reserve_exact(binding_count)
+                .map_err(|_| BytecodeCodecError::String("capture allocation failed".to_owned()))?;
             for _ in 0..binding_count {
                 bindings.push(match reader.read_u8()? {
                     0 => CompilerCapturedBinding::Argument(reader.read_u32()?),
@@ -777,9 +782,9 @@ fn decode_function_record(
     let function_initializer_prefix_start = reader.read_u32()?;
     let eval_reference_count = read_count(reader)?;
     let mut eval_references = Vec::new();
-    eval_references.try_reserve_exact(eval_reference_count).map_err(|_| {
-        BytecodeCodecError::String("eval reference allocation failed".to_owned())
-    })?;
+    eval_references
+        .try_reserve_exact(eval_reference_count)
+        .map_err(|_| BytecodeCodecError::String("eval reference allocation failed".to_owned()))?;
     for _ in 0..eval_reference_count {
         eval_references.push(reader.read_u32()?);
     }
@@ -918,9 +923,9 @@ pub fn decode_metadata(
         let function_name = read_option_atom(&mut reader)?;
         let variable_count = read_count(&mut reader)?;
         let mut variables = Vec::new();
-        variables.try_reserve_exact(variable_count).map_err(|_| {
-            BytecodeCodecError::String("variable allocation failed".to_owned())
-        })?;
+        variables
+            .try_reserve_exact(variable_count)
+            .map_err(|_| BytecodeCodecError::String("variable allocation failed".to_owned()))?;
         for _ in 0..variable_count {
             let name = read_option_atom(&mut reader)?;
             let scope_next = match reader.read_u8()? {
@@ -948,9 +953,9 @@ pub fn decode_metadata(
         }
         let closure_count = read_count(&mut reader)?;
         let mut closures = Vec::new();
-        closures.try_reserve_exact(closure_count).map_err(|_| {
-            BytecodeCodecError::String("closure allocation failed".to_owned())
-        })?;
+        closures
+            .try_reserve_exact(closure_count)
+            .map_err(|_| BytecodeCodecError::String("closure allocation failed".to_owned()))?;
         for _ in 0..closure_count {
             let name = read_option_atom(&mut reader)?;
             let binding_tag = reader.read_u8()?;
@@ -998,9 +1003,9 @@ pub fn decode_metadata(
         };
         let mapping_count = read_count(&mut reader)?;
         let mut mappings = Vec::new();
-        mappings.try_reserve_exact(mapping_count).map_err(|_| {
-            BytecodeCodecError::String("mapping allocation failed".to_owned())
-        })?;
+        mappings
+            .try_reserve_exact(mapping_count)
+            .map_err(|_| BytecodeCodecError::String("mapping allocation failed".to_owned()))?;
         for _ in 0..mapping_count {
             let pc = BytecodePc::new(reader.read_u32()?);
             mappings.push(PcSourceSpan::new(pc, read_span(&mut reader)?));
@@ -1024,15 +1029,25 @@ pub fn decode_metadata(
                 });
             }
         };
-        let source =
-            CompilerSource::new(display_name, text, function_span, name_span, Arc::from(mappings));
+        let source = CompilerSource::new(
+            display_name,
+            text,
+            function_span,
+            name_span,
+            Arc::from(mappings),
+        );
         let source = match strict_mode_pcs {
             Some(pcs) => source.with_strict_mode_pcs(pcs),
             None => source,
         };
         metadata.push(
-            UnverifiedFunctionMetadata::new(function_name, Arc::from(variables), Arc::from(closures), source)
-                .with_executable_kind(kind),
+            UnverifiedFunctionMetadata::new(
+                function_name,
+                Arc::from(variables),
+                Arc::from(closures),
+                source,
+            )
+            .with_executable_kind(kind),
         );
     }
     if reader.remaining() != 0 {
@@ -1165,9 +1180,9 @@ pub fn decode_module(
     let mut reader = Reader::new(payload);
     let binding_count = read_count(&mut reader)?;
     let mut bindings = Vec::new();
-    bindings.try_reserve_exact(binding_count).map_err(|_| {
-        BytecodeCodecError::String("module binding allocation failed".to_owned())
-    })?;
+    bindings
+        .try_reserve_exact(binding_count)
+        .map_err(|_| BytecodeCodecError::String("module binding allocation failed".to_owned()))?;
     for _ in 0..binding_count {
         let name = AtomPoolIndex::new(reader.read_u32()?);
         let slot = reader.read_u32()?;
@@ -1205,8 +1220,7 @@ pub fn decode_module(
                 });
             }
         };
-        let mut binding =
-            UnverifiedModuleBindingDescriptor::new(name, slot, policy, origin);
+        let mut binding = UnverifiedModuleBindingDescriptor::new(name, slot, policy, origin);
         if let Some(constant) = initializer {
             binding = binding.with_initializer(constant);
         }
@@ -1217,9 +1231,9 @@ pub fn decode_module(
     }
     let request_count = read_count(&mut reader)?;
     let mut requests = Vec::new();
-    requests.try_reserve_exact(request_count).map_err(|_| {
-        BytecodeCodecError::String("module request allocation failed".to_owned())
-    })?;
+    requests
+        .try_reserve_exact(request_count)
+        .map_err(|_| BytecodeCodecError::String("module request allocation failed".to_owned()))?;
     for _ in 0..request_count {
         let specifier = AtomPoolIndex::new(reader.read_u32()?);
         let has_assertions = reader.read_u8()? != 0;
@@ -1461,9 +1475,13 @@ fn write_closure_source_payload(buffer: &mut Vec<u8>, source: CompilerClosureSou
     }
 }
 
-fn read_closure_source(reader: &mut Reader<'_>) -> Result<CompilerClosureSource, BytecodeCodecError> {
+fn read_closure_source(
+    reader: &mut Reader<'_>,
+) -> Result<CompilerClosureSource, BytecodeCodecError> {
     match reader.read_u8()? {
-        0 => Ok(CompilerClosureSource::ParentVariableReference(reader.read_u32()?)),
+        0 => Ok(CompilerClosureSource::ParentVariableReference(
+            reader.read_u32()?,
+        )),
         1 => Ok(CompilerClosureSource::ParentClosure(reader.read_u32()?)),
         2 => Ok(CompilerClosureSource::ConstructorRealmGlobal(
             AtomPoolIndex::new(reader.read_u32()?),
@@ -1493,7 +1511,8 @@ fn write_utf8(buffer: &mut Vec<u8>, text: &str) {
 fn read_utf8(reader: &mut Reader<'_>) -> Result<String, BytecodeCodecError> {
     let length = read_count(reader)?;
     let bytes = reader.read_bytes(length)?;
-    String::from_utf8(bytes.to_vec()).map_err(|_| BytecodeCodecError::String("invalid UTF-8 text".to_owned()))
+    String::from_utf8(bytes.to_vec())
+        .map_err(|_| BytecodeCodecError::String("invalid UTF-8 text".to_owned()))
 }
 
 fn write_span(buffer: &mut Vec<u8>, span: SourceByteSpan) {
@@ -1519,12 +1538,8 @@ mod tests {
 
     #[test]
     fn section_framing_round_trips() {
-        let payload = frame_sections(&[
-            (1, vec![1, 2, 3]),
-            (2, Vec::new()),
-            (3, vec![0xAB; 300]),
-        ])
-        .expect("framing");
+        let payload = frame_sections(&[(1, vec![1, 2, 3]), (2, Vec::new()), (3, vec![0xAB; 300])])
+            .expect("framing");
         assert!(payload.starts_with(&BYTECODE_CODEC_MAGIC));
         let sections = read_sections(&payload).expect("read");
         assert_eq!(sections.len(), 3);
@@ -1535,8 +1550,7 @@ mod tests {
 
     #[test]
     fn framing_fails_closed_on_damage() {
-        let payload =
-            frame_sections(&[(1, vec![7, 8])]).expect("framing");
+        let payload = frame_sections(&[(1, vec![7, 8])]).expect("framing");
         let mut target;
 
         target = payload.clone();

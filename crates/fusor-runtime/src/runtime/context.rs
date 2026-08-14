@@ -29,13 +29,12 @@ use super::{
     Arc, AtomError, BoxedPrimitive, BytecodeFunction, CompilerExecutableKind, Context,
     DataViewByteLength, DynamicFunctionScriptError, EnvironmentBinding, ErrorObjectKind,
     ExceptionKind, ExecutionLimits, Function, FunctionImplementation, GlobalScriptError,
-    HandleError, HandleKind, HeapFunction, HeapObject, HeapReference,
-    InstallError, InstalledCode, InstalledRoot, InstalledTemplate, JsNumber, JsString, JsValue,
-    ObjectId, ObjectRecord, OrdinaryDynamicFunctionCompiler, PendingRootEnvironment,
-    PredefinedAtom, PrimitiveValue, PromiseState, PropertyKey, PropertyLayout, RootPublication,
-    Runtime, RuntimeResource, RuntimeUsage, StoredValue, TypedArrayLength, VerifiedBytecode,
-    WeakKey, check_install_limit, global_declaration_error, preflight_opcodes, require_root_kind,
-    usize_to_u64,
+    HandleError, HandleKind, HeapFunction, HeapObject, HeapReference, InstallError, InstalledCode,
+    InstalledRoot, InstalledTemplate, JsNumber, JsString, JsValue, ObjectId, ObjectRecord,
+    OrdinaryDynamicFunctionCompiler, PendingRootEnvironment, PredefinedAtom, PrimitiveValue,
+    PromiseState, PropertyKey, PropertyLayout, RootPublication, Runtime, RuntimeResource,
+    RuntimeUsage, StoredValue, TypedArrayLength, VerifiedBytecode, WeakKey, check_install_limit,
+    global_declaration_error, preflight_opcodes, require_root_kind, usize_to_u64,
 };
 use crate::SharedArrayBufferHandle;
 
@@ -434,10 +433,7 @@ impl Context<'_> {
     ///
     /// Returns a string error when `name` is not valid UTF-16, or an atom
     /// error when the atom table refuses the interning.
-    pub fn property_key(
-        &mut self,
-        name: &str,
-    ) -> Result<PropertyKey, crate::ExecutionError> {
+    pub fn property_key(&mut self, name: &str) -> Result<PropertyKey, crate::ExecutionError> {
         let string = JsString::from_utf8(name)?;
         Ok(self.runtime.property_key_from_string(&string)?)
     }
@@ -465,12 +461,8 @@ impl Context<'_> {
         let owner = value.owner()?;
         self.runtime.validate_owner(&owner, HandleKind::Value)?;
         match value.stored()? {
-            StoredValue::String(string) => {
-                Ok(self.runtime.property_key_from_string(string)?)
-            }
-            StoredValue::Symbol(symbol) => {
-                Ok(self.runtime.property_key_from_symbol(symbol)?)
-            }
+            StoredValue::String(string) => Ok(self.runtime.property_key_from_string(string)?),
+            StoredValue::Symbol(symbol) => Ok(self.runtime.property_key_from_symbol(symbol)?),
             other => Err(HandleError::WrongValueKind {
                 expected: crate::ValueKind::String,
                 actual: other.kind(),
@@ -555,17 +547,21 @@ impl Context<'_> {
             Rejected(StoredValue),
         }
         let settled = {
-            let entry = self.runtime.objects.get(*object).ok_or(
-                crate::EngineFault::StaleHeapEdge {
-                    edge: "object",
-                    index: object.index(),
-                    generation: object.generation(),
-                },
-            )?;
+            let entry =
+                self.runtime
+                    .objects
+                    .get(*object)
+                    .ok_or(crate::EngineFault::StaleHeapEdge {
+                        edge: "object",
+                        index: object.index(),
+                        generation: object.generation(),
+                    })?;
             match entry.promise_state() {
                 Some(PromiseState::Pending { .. }) => Settled::Pending,
                 Some(PromiseState::Fulfilled(value)) => Settled::Fulfilled(value.duplicate()),
-                Some(PromiseState::Rejected { reason, .. }) => Settled::Rejected(reason.duplicate()),
+                Some(PromiseState::Rejected { reason, .. }) => {
+                    Settled::Rejected(reason.duplicate())
+                }
                 None => Settled::NotAPromise,
             }
         };
@@ -656,13 +652,15 @@ impl Context<'_> {
         let StoredValue::Object(object) = value.stored()? else {
             return Ok(None);
         };
-        let object_entry = self.runtime.objects.get(*object).ok_or(
-            crate::EngineFault::StaleHeapEdge {
-                edge: "object",
-                index: object.index(),
-                generation: object.generation(),
-            },
-        )?;
+        let object_entry =
+            self.runtime
+                .objects
+                .get(*object)
+                .ok_or(crate::EngineFault::StaleHeapEdge {
+                    edge: "object",
+                    index: object.index(),
+                    generation: object.generation(),
+                })?;
         #[derive(Clone, Copy)]
         enum Shape {
             None,
@@ -861,7 +859,9 @@ impl Context<'_> {
         else {
             return Ok(None);
         };
-        let buffer = self.runtime.public_value(StoredValue::Object(state.buffer()))?;
+        let buffer = self
+            .runtime
+            .public_value(StoredValue::Object(state.buffer()))?;
         Ok(Some(crate::DataViewInspection {
             buffer,
             byte_offset: state.byte_offset(),
@@ -907,7 +907,9 @@ impl Context<'_> {
         else {
             return Ok(None);
         };
-        let buffer = self.runtime.public_value(StoredValue::Object(state.buffer()))?;
+        let buffer = self
+            .runtime
+            .public_value(StoredValue::Object(state.buffer()))?;
         let element = state.element();
         Ok(Some(crate::TypedArrayInspection {
             buffer,
@@ -936,10 +938,7 @@ impl Context<'_> {
     ///
     /// Returns a handle error for an orphaned, foreign, or stale value, or an
     /// engine fault if the runtime heap does not contain the object.
-    pub fn date_value(
-        &self,
-        value: &JsValue,
-    ) -> Result<Option<JsNumber>, crate::ExecutionError> {
+    pub fn date_value(&self, value: &JsValue) -> Result<Option<JsNumber>, crate::ExecutionError> {
         let owner = value.owner()?;
         self.runtime.validate_owner(&owner, HandleKind::Value)?;
         let StoredValue::Object(object) = value.stored()? else {
@@ -1801,8 +1800,12 @@ impl Context<'_> {
         let prototype = self.runtime.realm_function_prototype(self.realm)?;
         let name_key = self.runtime.predefined_property_key(PredefinedAtom::Name);
         let length_key = self.runtime.predefined_property_key(PredefinedAtom::Length);
-        let prototype_key = self.runtime.predefined_property_key(PredefinedAtom::Prototype);
-        let constructor_key = self.runtime.predefined_property_key(PredefinedAtom::Constructor);
+        let prototype_key = self
+            .runtime
+            .predefined_property_key(PredefinedAtom::Prototype);
+        let constructor_key = self
+            .runtime
+            .predefined_property_key(PredefinedAtom::Constructor);
         let function_name = JsString::from_utf8(name).map_err(crate::ExecutionError::from)?;
         // The installation commits four property slots: name, length, the
         // `prototype` property, and the prototype object's `constructor`.
@@ -1860,12 +1863,12 @@ impl Context<'_> {
         )?;
         let mut prototype_record =
             ObjectRecord::empty(Some(HeapReference::Object(object_prototype)));
-        prototype_record
-            .try_reserve_data(1)
-            .map_err(|_| crate::ExecutionError::AllocationFailed {
+        prototype_record.try_reserve_data(1).map_err(|_| {
+            crate::ExecutionError::AllocationFailed {
                 resource: RuntimeResource::ObjectProperties,
                 additional: 1,
-            })?;
+            }
+        })?;
         prototype_record
             .append_data(
                 constructor_key.clone(),
@@ -1884,14 +1887,18 @@ impl Context<'_> {
                 additional: 1,
             })?;
         if !record.replace_existing_data(
-            &self.runtime.predefined_property_key(PredefinedAtom::Prototype),
+            &self
+                .runtime
+                .predefined_property_key(PredefinedAtom::Prototype),
             StoredValue::Object(prototype_object),
         ) {
             let removed = self.runtime.objects.remove(prototype_object);
             debug_assert!(removed.is_some());
-            return Err(crate::ExecutionError::from(crate::EngineFault::RuntimeInvariant {
-                message: "host function lost its prototype property before installation",
-            }));
+            return Err(crate::ExecutionError::from(
+                crate::EngineFault::RuntimeInvariant {
+                    message: "host function lost its prototype property before installation",
+                },
+            ));
         }
 
         super::check_execution_limit(
@@ -1932,9 +1939,11 @@ impl Context<'_> {
             debug_assert!(removed.is_some());
             let removed = self.runtime.objects.remove(prototype_object);
             debug_assert!(removed.is_some());
-            return Err(crate::ExecutionError::from(crate::EngineFault::RuntimeInvariant {
-                message: "host function prototype lost its constructor property",
-            }));
+            return Err(crate::ExecutionError::from(
+                crate::EngineFault::RuntimeInvariant {
+                    message: "host function prototype lost its constructor property",
+                },
+            ));
         }
         self.runtime.object_properties = self.runtime.object_properties.saturating_add(4);
         self.runtime.collection_pending = true;
@@ -2099,10 +2108,7 @@ impl Context<'_> {
     ///
     /// Returns a handle error for a foreign element or a limit, allocation,
     /// or engine error when the array cannot be created.
-    pub fn new_array(
-        &mut self,
-        elements: Vec<JsValue>,
-    ) -> Result<JsValue, crate::ExecutionError> {
+    pub fn new_array(&mut self, elements: Vec<JsValue>) -> Result<JsValue, crate::ExecutionError> {
         let mut stored = Vec::with_capacity(elements.len());
         for element in &elements {
             let owner = element.owner()?;
@@ -2398,7 +2404,9 @@ impl Context<'_> {
     /// Returns an [`crate::ExecutionError`] when the value is not a
     /// callable function or the pending-job limit is exhausted.
     pub fn enqueue_host_job(&mut self, callback: JsValue) -> Result<(), crate::ExecutionError> {
-        let function = callback.into_function().map_err(crate::ExecutionError::from)?;
+        let function = callback
+            .into_function()
+            .map_err(crate::ExecutionError::from)?;
         let id = function.id().map_err(crate::ExecutionError::from)?;
         crate::vm::enqueue_host_job(self.runtime, id)
     }

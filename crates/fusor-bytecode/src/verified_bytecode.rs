@@ -25,10 +25,10 @@ mod object_provenance;
 
 pub use codec::{
     BYTECODE_CODEC_MAGIC, BYTECODE_CODEC_STAMP, BytecodeCodecError, decode_atom_pool,
-    decode_closure_sources, decode_constant_pool, decode_graph, decode_metadata,
+    decode_closure_sources, decode_constant_pool, decode_graph, decode_metadata, decode_module,
     decode_verified_bytecode, encode_atom_pool, encode_closure_sources, encode_constant_pool,
     encode_graph, encode_metadata, encode_module, encode_verified_bytecode, frame_sections,
-    read_sections, decode_module,
+    read_sections,
 };
 
 use lexical_environment::verify_lexical_arrow_environments;

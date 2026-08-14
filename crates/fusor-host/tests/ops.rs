@@ -31,7 +31,6 @@ fn async_ops_mark_their_declaration() {
     assert_eq!(declaration.parameter_types, &["u64"]);
 }
 
-
 #[test]
 fn the_registry_rejects_same_name_conflicts() {
     let mut registry = OpRegistry::new();

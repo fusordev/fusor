@@ -181,13 +181,11 @@ impl Runtime {
         // successful reservation, so this cannot panic).
         if slot.index() >= self.host_functions.len() {
             let additional = slot.index() + 1 - self.host_functions.len();
-            self.host_functions
-                .try_reserve(additional)
-                .map_err(|_| {
-                    crate::ExecutionError::from(crate::EngineFault::RuntimeInvariant {
-                        message: "the host function table reservation failed",
-                    })
-                })?;
+            self.host_functions.try_reserve(additional).map_err(|_| {
+                crate::ExecutionError::from(crate::EngineFault::RuntimeInvariant {
+                    message: "the host function table reservation failed",
+                })
+            })?;
             self.host_functions.resize_with(slot.index() + 1, || None);
         }
         self.host_functions[slot.index()] = Some(Box::new(callback));

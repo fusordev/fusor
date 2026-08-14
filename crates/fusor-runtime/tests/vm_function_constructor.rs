@@ -78,8 +78,7 @@ impl OrdinaryDynamicFunctionCompiler for TestCompiler {
         .map_err(|error| {
             if matches!(
                 error.stage(),
-                fusor_frontend::DiagnosticStage::Parser
-                    | fusor_frontend::DiagnosticStage::Semantic
+                fusor_frontend::DiagnosticStage::Parser | fusor_frontend::DiagnosticStage::Semantic
             ) {
                 let message = error
                     .diagnostics()

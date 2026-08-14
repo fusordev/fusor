@@ -2556,7 +2556,9 @@ impl HostConstructContinuation {
         for argument in &self.arguments {
             trace_stored_value_root(argument, mark);
         }
-        mark(CollectionRoot::Heap(HeapReference::Function(self.new_target)));
+        mark(CollectionRoot::Heap(HeapReference::Function(
+            self.new_target,
+        )));
     }
 }
 
@@ -2591,9 +2593,7 @@ pub(super) fn begin_host_construct(
         origin,
     };
     match dispatch {
-        NativeDispatch::Immediate(requested) => {
-            finish_host_construct(runtime, state, &requested)
-        }
+        NativeDispatch::Immediate(requested) => finish_host_construct(runtime, state, &requested),
         NativeDispatch::Call(mut call) => {
             prepend_native_continuations(
                 &mut call,
@@ -2702,7 +2702,10 @@ fn call_host_callback(
     };
 
     let mut context = crate::Context { runtime, realm };
-    let result = callback(&mut context, crate::HostCall::new(this, arguments, new_target));
+    let result = callback(
+        &mut context,
+        crate::HostCall::new(this, arguments, new_target),
+    );
     context.runtime.host_functions[id.index()] = Some(callback);
 
     // A host callback must not smuggle a value from another runtime (or a

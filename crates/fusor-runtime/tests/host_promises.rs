@@ -162,7 +162,9 @@ fn the_first_settlement_wins_and_later_calls_are_ignored() {
             .error(fusor_runtime::ErrorObjectKind::Error, "late")
             .expect("reason");
         resolver.resolve(context, first).expect("first resolve");
-        resolver.resolve(context, second).expect("second resolve ignored");
+        resolver
+            .resolve(context, second)
+            .expect("second resolve ignored");
         resolver.reject(context, late).expect("late reject ignored");
         context
             .drain_host_jobs(ExecutionLimits::default(), None)
@@ -197,7 +199,10 @@ fn a_pending_host_promise_survives_drains_and_finalizes_later() {
                 .drain_host_jobs(ExecutionLimits::default(), None)
                 .expect("drain");
         }
-        assert_eq!(script_text(context, "String(observed === undefined);"), "true");
+        assert_eq!(
+            script_text(context, "String(observed === undefined);"),
+            "true"
+        );
 
         let five = context.number(JsNumber::from_i32(5));
         resolver.resolve(context, five).expect("resolve later");

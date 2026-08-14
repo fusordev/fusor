@@ -65,7 +65,12 @@ impl WebSocketClient {
             }
         }
         frame.extend_from_slice(&mask);
-        frame.extend(payload.iter().enumerate().map(|(index, byte)| byte ^ mask[index % 4]));
+        frame.extend(
+            payload
+                .iter()
+                .enumerate()
+                .map(|(index, byte)| byte ^ mask[index % 4]),
+        );
         self.stream.write_all(&frame).expect("frame write");
     }
 
@@ -98,9 +103,7 @@ impl WebSocketClient {
     /// ignored. Server frames are unmasked.
     fn recv_until(&mut self, matches: impl Fn(&serde_json::Value) -> bool) -> serde_json::Value {
         loop {
-            let message = self
-                .recv_frame()
-                .expect("frame within the socket timeout");
+            let message = self.recv_frame().expect("frame within the socket timeout");
             if matches(&message) {
                 return message;
             }
@@ -160,8 +163,7 @@ fn repl_forwards_uncaught_errors_to_the_inspector() {
         .expect("write the throwing entry");
 
     let event = client.recv_until(|message| {
-        message.get("method").and_then(|method| method.as_str())
-            == Some("Runtime.exceptionThrown")
+        message.get("method").and_then(|method| method.as_str()) == Some("Runtime.exceptionThrown")
     });
     let details = &event["params"]["exceptionDetails"];
     assert!(
@@ -204,12 +206,13 @@ fn repl_forwards_syntax_errors_to_the_inspector() {
         .expect("write the syntax-error entry");
 
     let event = client.recv_until(|message| {
-        message.get("method").and_then(|method| method.as_str())
-            == Some("Runtime.exceptionThrown")
+        message.get("method").and_then(|method| method.as_str()) == Some("Runtime.exceptionThrown")
     });
     let details = &event["params"]["exceptionDetails"];
     assert!(
-        details["text"].as_str().is_some_and(|text| !text.is_empty()),
+        details["text"]
+            .as_str()
+            .is_some_and(|text| !text.is_empty()),
         "the syntax error renders its diagnostic text: {details}"
     );
     assert_eq!(
@@ -249,7 +252,8 @@ fn console_evaluations_expand_map_entries_over_the_wire() {
         "method": "Runtime.evaluate",
         "params": {"expression": "new Map([['a', 1]])", "objectGroup": "console"},
     }));
-    let evaluated = client.recv_until(|message| message.get("id").and_then(|id| id.as_i64()) == Some(2));
+    let evaluated =
+        client.recv_until(|message| message.get("id").and_then(|id| id.as_i64()) == Some(2));
     let map_id = evaluated["result"]["result"]["objectId"]
         .as_str()
         .expect("map objectId")
@@ -259,7 +263,8 @@ fn console_evaluations_expand_map_entries_over_the_wire() {
         "method": "Runtime.getProperties",
         "params": {"objectId": map_id, "ownProperties": true},
     }));
-    let properties = client.recv_until(|message| message.get("id").and_then(|id| id.as_i64()) == Some(3));
+    let properties =
+        client.recv_until(|message| message.get("id").and_then(|id| id.as_i64()) == Some(3));
     let internal = properties["result"]["internalProperties"]
         .as_array()
         .expect("internal properties");
@@ -279,7 +284,8 @@ fn console_evaluations_expand_map_entries_over_the_wire() {
         "method": "Runtime.getProperties",
         "params": {"objectId": entries_id},
     }));
-    let expanded = client.recv_until(|message| message.get("id").and_then(|id| id.as_i64()) == Some(4));
+    let expanded =
+        client.recv_until(|message| message.get("id").and_then(|id| id.as_i64()) == Some(4));
     let rows = expanded["result"]["result"].as_array().expect("entry rows");
     assert_eq!(rows.len(), 1, "one live entry row: {rows:?}");
     assert_eq!(rows[0]["name"], "0");
@@ -325,7 +331,8 @@ fn console_evaluations_report_exceptions_in_the_response_alone() {
         "method": "Runtime.evaluate",
         "params": {"expression": "1 +", "replMode": true, "userGesture": true},
     }));
-    let response = client.recv_until(|message| message.get("id").and_then(|id| id.as_i64()) == Some(2));
+    let response =
+        client.recv_until(|message| message.get("id").and_then(|id| id.as_i64()) == Some(2));
     let details = &response["result"]["exceptionDetails"];
     assert!(
         details["text"]
@@ -339,7 +346,10 @@ fn console_evaluations_report_exceptions_in_the_response_alone() {
     );
     // No exceptionThrown event may follow: the frontend doubles the entry
     // when both the response and the event surface the same failure.
-    client.stream.set_read_timeout(Some(Duration::from_millis(800))).expect("timeout");
+    client
+        .stream
+        .set_read_timeout(Some(Duration::from_millis(800)))
+        .expect("timeout");
     loop {
         let frame = client.recv_frame();
         let Some(message) = frame else {
@@ -351,7 +361,10 @@ fn console_evaluations_report_exceptions_in_the_response_alone() {
             "console evaluations must not emit exceptionThrown: {message}"
         );
     }
-    client.stream.set_read_timeout(Some(Duration::from_secs(15))).expect("timeout");
+    client
+        .stream
+        .set_read_timeout(Some(Duration::from_secs(15)))
+        .expect("timeout");
 
     child
         .stdin
@@ -517,10 +530,7 @@ fn repl_drives_the_host_loop_for_set_immediate() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("7"),
-        "expected 7 in repl output: {stdout}"
-    );
+    assert!(stdout.contains("7"), "expected 7 in repl output: {stdout}");
 }
 
 #[test]
@@ -546,10 +556,7 @@ fn run_path_drives_the_host_loop_for_set_immediate() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("42"),
-        "expected 42 on stdout: {stdout}"
-    );
+    assert!(stdout.contains("42"), "expected 42 on stdout: {stdout}");
 }
 
 #[test]
@@ -658,9 +665,7 @@ fn repl_fires_timers_while_waiting_for_input() {
     {
         let stdin = child.stdin.as_mut().expect("stdin");
         stdin
-            .write_all(
-                b"Fusor.ops.op_set_timeout(function () { print('fired'); }, 300);\n",
-            )
+            .write_all(b"Fusor.ops.op_set_timeout(function () { print('fired'); }, 300);\n")
             .expect("write the timer entry");
         stdin.flush().expect("flush stdin");
     }
@@ -701,10 +706,7 @@ fn repl_fires_timers_while_waiting_for_input() {
         .write_all(b".exit\n")
         .expect("write exit");
     let output = child.wait().expect("wait for repl");
-    assert!(
-        output.success(),
-        "repl failed"
-    );
+    assert!(output.success(), "repl failed");
 }
 
 #[test]
@@ -727,8 +729,5 @@ fn script_path_prints_through_the_overlay_shim() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("7"),
-        "expected 7 on stdout: {stdout}"
-    );
+    assert!(stdout.contains("7"), "expected 7 on stdout: {stdout}");
 }

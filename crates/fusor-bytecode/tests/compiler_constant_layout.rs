@@ -231,9 +231,8 @@ fn constant_operand_bounds_are_checked_before_constant_kind() {
 #[test]
 fn complete_predecode_and_static_bounds_keep_priority_over_kind_errors() {
     let mut truncated = encode(&[(FinalOpcode::FClosure, Operands::Const(0))]);
-    let truncated_pc = fusor_bytecode::BytecodePc::new(
-        u32::try_from(truncated.len()).expect("fixture fits u32"),
-    );
+    let truncated_pc =
+        fusor_bytecode::BytecodePc::new(u32::try_from(truncated.len()).expect("fixture fits u32"));
     truncated.push(FinalOpcode::FClosure.encoded_byte());
     let decode_error = verify_compiler_control_flow(
         compiler_body(truncated, 1).with_constant_layout(layout(&[CompilerConstantKind::Value])),
@@ -270,10 +269,7 @@ fn complete_predecode_and_static_bounds_keep_priority_over_kind_errors() {
             len: 1,
         }
     );
-    assert_eq!(
-        bounds_error.pc(),
-        Some(fusor_bytecode::BytecodePc::new(5))
-    );
+    assert_eq!(bounds_error.pc(), Some(fusor_bytecode::BytecodePc::new(5)));
     assert_eq!(bounds_error.opcode(), Some(FinalOpcode::FClosure));
 }
 

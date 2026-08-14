@@ -72,8 +72,8 @@ impl OpRuntime {
     ///
     /// Returns [`OpRuntimeError::RuntimeCreation`] when Tokio cannot start.
     pub fn new() -> Result<Self, OpRuntimeError> {
-        let runtime = Runtime::new()
-            .map_err(|error| OpRuntimeError::RuntimeCreation(error.to_string()))?;
+        let runtime =
+            Runtime::new().map_err(|error| OpRuntimeError::RuntimeCreation(error.to_string()))?;
         let (sender, receiver) = mpsc::channel();
         Ok(Self {
             runtime,
@@ -94,7 +94,11 @@ impl OpRuntime {
     /// # Errors
     ///
     /// Returns an [`OpRuntimeError`] when the future cannot be spawned.
-    pub fn spawn<T, F>(&mut self, resolver: PromiseResolver, future: F) -> Result<(), OpRuntimeError>
+    pub fn spawn<T, F>(
+        &mut self,
+        resolver: PromiseResolver,
+        future: F,
+    ) -> Result<(), OpRuntimeError>
     where
         T: serde::Serialize + Send + 'static,
         F: Future<Output = Result<T, OpError>> + Send + 'static,

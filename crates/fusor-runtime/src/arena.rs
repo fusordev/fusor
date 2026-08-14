@@ -166,7 +166,9 @@ impl<K, T> Arena<K, T> {
                 let hole = self.slots.len();
                 self.slots.push(Slot {
                     generation: 0,
-                    state: SlotState::Vacant { next: self.free_head },
+                    state: SlotState::Vacant {
+                        next: self.free_head,
+                    },
                 });
                 self.free_head = Some(hole);
                 self.free_len += 1;
@@ -222,9 +224,9 @@ impl<K, T> Arena<K, T> {
         if self.slots.len() < end {
             return false;
         }
-        self.slots[..end].iter().all(|slot| {
-            slot.generation == 0 && matches!(slot.state, SlotState::Occupied(_))
-        })
+        self.slots[..end]
+            .iter()
+            .all(|slot| slot.generation == 0 && matches!(slot.state, SlotState::Occupied(_)))
     }
 
     /// True when every slot is occupied first-generation (a churn-free
@@ -551,7 +553,9 @@ mod tests {
             arena.restore_insert(0, "clash").is_none(),
             "an occupied index rejects a second restore"
         );
-        let far = arena.restore_insert(10, "far").expect("pads up to index 10");
+        let far = arena
+            .restore_insert(10, "far")
+            .expect("pads up to index 10");
         assert_eq!(far.index(), 10);
         assert_eq!(arena.get(far), Some(&"far"));
         assert_eq!(arena.len(), 4);

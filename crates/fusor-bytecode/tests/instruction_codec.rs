@@ -263,10 +263,7 @@ fn decoder_rejects_reserved_unknown_and_out_of_bounds_program_counters() {
         })
     );
     assert_eq!(
-        fusor_bytecode::decode_instruction(
-            &[FinalOpcode::Nop.encoded_byte()],
-            BytecodePc::new(1)
-        ),
+        fusor_bytecode::decode_instruction(&[FinalOpcode::Nop.encoded_byte()], BytecodePc::new(1)),
         Err(DecodeError::MissingOpcode {
             pc: BytecodePc::new(1),
             expected_bytes: 1,
@@ -274,10 +271,7 @@ fn decoder_rejects_reserved_unknown_and_out_of_bounds_program_counters() {
         })
     );
     assert_eq!(
-        fusor_bytecode::decode_instruction(
-            &[FinalOpcode::Nop.encoded_byte()],
-            BytecodePc::new(2)
-        ),
+        fusor_bytecode::decode_instruction(&[FinalOpcode::Nop.encoded_byte()], BytecodePc::new(2)),
         Err(DecodeError::PcOutOfBounds {
             pc: BytecodePc::new(2),
             bytecode_len: 1,

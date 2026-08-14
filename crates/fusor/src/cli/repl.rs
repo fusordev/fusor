@@ -26,23 +26,19 @@ use std::{
     thread,
 };
 
-use fusor::{ModuleEvaluationError, ScriptEvaluationError, ScriptLimits, evaluate_preloaded_module_graph, evaluate_script};
+use fusor::{
+    ModuleEvaluationError, ScriptEvaluationError, ScriptLimits, evaluate_preloaded_module_graph,
+    evaluate_script,
+};
 use fusor_host::r#loop::HostLoop;
 use fusor_host::ops::set_print_sink;
 use fusor_host::overlay::{CoreOverlay, HostRuntime};
 use tokio::sync::mpsc;
 
+use crate::cdp::{self as cdp, format::format_value, inspector};
 use crate::{
-    cli::overlay::CliOverlay,
-    cli::resolver::NodeLikeResolver,
-    report_execution,
-    report_module_error,
-    report_script_error,
-};
-use crate::cdp::{
-    self as cdp,
-    format::format_value,
-    inspector,
+    cli::overlay::CliOverlay, cli::resolver::NodeLikeResolver, report_execution,
+    report_module_error, report_script_error,
 };
 
 /// The DevTools bundle the REPL forwards uncaught entry failures to while an
@@ -297,8 +293,7 @@ async fn run_with_inspector(
     // intrinsics are created inside a turn and held across turns.
     let inspect: Rc<RefCell<inspector::InspectState>> =
         Rc::new(RefCell::new(inspector::InspectState::new()));
-    let intrinsics: Rc<RefCell<Option<inspector::InspectIntrinsics>>> =
-        Rc::new(RefCell::new(None));
+    let intrinsics: Rc<RefCell<Option<inspector::InspectIntrinsics>>> = Rc::new(RefCell::new(None));
     let intrinsic_failure: Rc<RefCell<Option<inspector::InspectSetupError>>> =
         Rc::new(RefCell::new(None));
     let intrinsic_slot = Rc::clone(&intrinsics);
@@ -462,8 +457,7 @@ async fn evaluate_repl_entry(
         };
         // Evaluation happens inside a turn (§6); the completion value is a
         // rooted handle, safe to print after the turn.
-        let completion: Rc<RefCell<Option<fusor_runtime::JsValue>>> =
-            Rc::new(RefCell::new(None));
+        let completion: Rc<RefCell<Option<fusor_runtime::JsValue>>> = Rc::new(RefCell::new(None));
         let value_slot = Rc::clone(&completion);
         let outcome: Rc<RefCell<Option<Result<(), ModuleEvaluationError>>>> =
             Rc::new(RefCell::new(None));
@@ -473,9 +467,14 @@ async fn evaluate_repl_entry(
         let emission = inspection.cloned();
         let emit_source = evaluation_source.clone();
         host_loop.post_event(Box::new(move |context| {
-            let result =
-                evaluate_preloaded_module_graph(context, &evaluation_source, &evaluate_name, gathered, limits)
-                    .map(|value| *value_slot.borrow_mut() = Some(value));
+            let result = evaluate_preloaded_module_graph(
+                context,
+                &evaluation_source,
+                &evaluate_name,
+                gathered,
+                limits,
+            )
+            .map(|value| *value_slot.borrow_mut() = Some(value));
             if let Err(error) = &result
                 && let Some(inspection) = &emission
             {
@@ -506,7 +505,13 @@ async fn evaluate_repl_entry(
         {
             let exception = inspector::CliException::Message(error.to_string());
             report_module_error("module entry", error);
-            emit_in_turn(host_loop, inspection, exception, source.clone(), name.clone());
+            emit_in_turn(
+                host_loop,
+                inspection,
+                exception,
+                source.clone(),
+                name.clone(),
+            );
         }
         // Probe the module's evaluation error inside a turn.
         let error_slot: Rc<RefCell<Option<ModuleEvaluationError>>> = Rc::new(RefCell::new(None));
@@ -544,8 +549,7 @@ async fn evaluate_repl_entry(
         imports.extend(extract_imports(entry));
     } else {
         let name = format!("<repl>:{entry_index}");
-        let completion: Rc<RefCell<Option<fusor_runtime::JsValue>>> =
-            Rc::new(RefCell::new(None));
+        let completion: Rc<RefCell<Option<fusor_runtime::JsValue>>> = Rc::new(RefCell::new(None));
         let value_slot = Rc::clone(&completion);
         let outcome: Rc<RefCell<Option<Result<(), ScriptEvaluationError>>>> =
             Rc::new(RefCell::new(None));

@@ -8,10 +8,10 @@ use std::sync::Arc;
 use fusor_bytecode::VerifiedBytecode;
 use fusor_compiler::CompilationContext;
 use fusor_frontend::{CompilationGoal, FrontendOptions, GlobalScriptGoal, with_parsed_program};
+use fusor_host::r#loop::HostLoop;
 use fusor_host::ops::{OpError, OpRuntime, Resource, install_op, install_op_runtime};
 use fusor_host::overlay::{CoreOverlay, HostRuntime};
 use fusor_host::process::{ExitCode, Signal, SignalState, spawn_signal_forwarder};
-use fusor_host::r#loop::HostLoop;
 use fusor_ops::op;
 use fusor_runtime::{
     Context, ExecutionError, ExecutionLimits, GlobalScriptError, Runtime, RuntimeLimits,
@@ -131,12 +131,7 @@ fn shutdown_cancels_pending_async_ops() {
     let mut host_runtime = HostRuntime::builder().build().expect("built");
     {
         let mut context = host_runtime.context().expect("context");
-        install_op(
-            &mut context,
-            op_hang::declaration(),
-            op_hang::call,
-        )
-        .expect("hang op");
+        install_op(&mut context, op_hang::declaration(), op_hang::call).expect("hang op");
     }
     let op_runtime = OpRuntime::new().expect("op runtime");
     install_op_runtime(op_runtime).expect("installed");

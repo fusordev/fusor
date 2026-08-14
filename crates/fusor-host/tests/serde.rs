@@ -40,7 +40,10 @@ fn serialize<T: Serialize>(
 fn primitives_round_trip() {
     with_context(|context| {
         let boolean = context.boolean(true);
-        assert_eq!(deserialize::<bool>(context, &boolean, 0).expect("bool"), true);
+        assert_eq!(
+            deserialize::<bool>(context, &boolean, 0).expect("bool"),
+            true
+        );
 
         let forty_two = number(context, 42.0);
         assert_eq!(deserialize::<i32>(context, &forty_two, 0).expect("i32"), 42);
@@ -52,7 +55,10 @@ fn primitives_round_trip() {
         );
 
         let one_and_half = number(context, 1.5);
-        assert_eq!(deserialize::<f64>(context, &one_and_half, 0).expect("f64"), 1.5);
+        assert_eq!(
+            deserialize::<f64>(context, &one_and_half, 0).expect("f64"),
+            1.5
+        );
 
         let hello = string(context, "hello");
         assert_eq!(
@@ -68,8 +74,7 @@ fn primitives_round_trip() {
 
         let undefined = context.undefined();
         assert_eq!(
-            deserialize::<Option<String>>(context, &undefined, 0)
-                .expect("undefined option"),
+            deserialize::<Option<String>>(context, &undefined, 0).expect("undefined option"),
             None
         );
 
@@ -156,8 +161,8 @@ fn maps_and_structs_read_own_string_keys() {
         let count = context.property_key("count").expect("key");
         let nine = number(context, 9.0);
         numeric.set(context, count, nine).expect("set");
-        let map = deserialize::<HashMap<String, i32>>(context, &numeric.as_value(), 0)
-            .expect("map");
+        let map =
+            deserialize::<HashMap<String, i32>>(context, &numeric.as_value(), 0).expect("map");
         assert_eq!(map.get("count"), Some(&9));
 
         // Round trip: serialize the struct back and re-read it.
@@ -178,11 +183,17 @@ fn the_serializer_produces_spec_shapes() {
             ValueKind::Undefined
         );
         assert_eq!(
-            serialize(context, &None::<i32>).expect("none").kind().expect("live"),
+            serialize(context, &None::<i32>)
+                .expect("none")
+                .kind()
+                .expect("live"),
             ValueKind::Null
         );
         assert_eq!(
-            serialize(context, &true).expect("bool").kind().expect("live"),
+            serialize(context, &true)
+                .expect("bool")
+                .kind()
+                .expect("live"),
             ValueKind::Boolean
         );
         assert_eq!(

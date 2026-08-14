@@ -433,9 +433,7 @@ fn optional_and_spread_super_method_calls_keep_the_actual_receiver() {
         opcodes.contains(&FinalOpcode::CallMethod)
             || opcodes.contains(&FinalOpcode::TailCallMethod)
     );
-    assert!(
-        opcodes.contains(&FinalOpcode::Apply) || opcodes.contains(&FinalOpcode::TailApply)
-    );
+    assert!(opcodes.contains(&FinalOpcode::Apply) || opcodes.contains(&FinalOpcode::TailApply));
 }
 
 #[test]
@@ -581,14 +579,12 @@ fn a_parenthesized_class_assignment_target_keeps_the_empty_default_name() {
         .filter_map(|instruction| {
             let instruction = instruction.decoded().instruction();
             match (instruction.opcode(), instruction.operands()) {
-                (FinalOpcode::DefineClass, fusor_bytecode::Operands::AtomU8 { atom, .. }) => {
-                    Some(
-                        tree.root().atoms()[atom.get() as usize]
-                            .string()
-                            .code_units()
-                            .collect::<Vec<_>>(),
-                    )
-                }
+                (FinalOpcode::DefineClass, fusor_bytecode::Operands::AtomU8 { atom, .. }) => Some(
+                    tree.root().atoms()[atom.get() as usize]
+                        .string()
+                        .code_units()
+                        .collect::<Vec<_>>(),
+                ),
                 _ => None,
             }
         })
@@ -639,14 +635,12 @@ fn anonymous_base_class_formal_parameter_defaults_respect_the_binding_shape() {
         .filter_map(|instruction| {
             let instruction = instruction.decoded().instruction();
             match (instruction.opcode(), instruction.operands()) {
-                (FinalOpcode::DefineClass, fusor_bytecode::Operands::AtomU8 { atom, .. }) => {
-                    Some(
-                        tree.root().atoms()[atom.get() as usize]
-                            .string()
-                            .code_units()
-                            .collect::<Vec<_>>(),
-                    )
-                }
+                (FinalOpcode::DefineClass, fusor_bytecode::Operands::AtomU8 { atom, .. }) => Some(
+                    tree.root().atoms()[atom.get() as usize]
+                        .string()
+                        .code_units()
+                        .collect::<Vec<_>>(),
+                ),
                 _ => None,
             }
         })
@@ -1545,5 +1539,3 @@ fn derived_class_without_an_explicit_constructor_lowers_a_certified_heritage_pat
         ]
     );
 }
-
-

@@ -28,10 +28,7 @@ fn host_property_origin(operation: &'static str) -> JsStackFrame {
 /// Converts an internal dispatch failure into a structured execution error,
 /// materializing engine-raised exceptions exactly like an interpreter entry
 /// point does.
-fn execution_from_native_failure(
-    runtime: &mut Runtime,
-    failure: NativeFailure,
-) -> ExecutionError {
+fn execution_from_native_failure(runtime: &mut Runtime, failure: NativeFailure) -> ExecutionError {
     match failure {
         NativeFailure::Execution(error) => error,
         NativeFailure::Abrupt(pending) | NativeFailure::AbruptAfterTransient(pending) => {
@@ -67,13 +64,7 @@ pub(crate) fn host_get_property(
     .map_err(|failure| execution_from_native_failure(runtime, failure))?;
     let dispatch =
         resolve_native_dispatch(runtime, dispatch, &[], 0, 0, None, &mut execution_budget);
-    execute_root_dispatch_with_budget(
-        runtime,
-        dispatch,
-        Vec::new(),
-        None,
-        &mut execution_budget,
-    )
+    execute_root_dispatch_with_budget(runtime, dispatch, Vec::new(), None, &mut execution_budget)
 }
 
 /// Executes ECMA-262 `Set(O, P, V, O)` with strict semantics: a failed write
@@ -107,14 +98,8 @@ pub(crate) fn host_set_property(
     .map_err(|failure| execution_from_native_failure(runtime, failure))?;
     let dispatch =
         resolve_native_dispatch(runtime, dispatch, &[], 0, 0, None, &mut execution_budget);
-    execute_root_dispatch_with_budget(
-        runtime,
-        dispatch,
-        Vec::new(),
-        None,
-        &mut execution_budget,
-    )
-    .map(|_completion| ())
+    execute_root_dispatch_with_budget(runtime, dispatch, Vec::new(), None, &mut execution_budget)
+        .map(|_completion| ())
 }
 
 /// Executes ECMA-262 `HasProperty(O, P)` and returns the Boolean result.
@@ -340,7 +325,9 @@ pub(crate) fn host_to_string(
     realm: RealmId,
 ) -> Result<JsString, ExecutionError> {
     if matches!(value, StoredValue::Function(_) | StoredValue::Object(_)) {
-        return Err(synchronous_object_conversion_error(runtime, realm, "string"));
+        return Err(synchronous_object_conversion_error(
+            runtime, realm, "string",
+        ));
     }
     let origin = host_property_origin("to string");
     operator_primitive_to_string(value, realm, &origin)
@@ -357,7 +344,9 @@ pub(crate) fn host_to_number(
     realm: RealmId,
 ) -> Result<JsNumber, ExecutionError> {
     if matches!(value, StoredValue::Function(_) | StoredValue::Object(_)) {
-        return Err(synchronous_object_conversion_error(runtime, realm, "number"));
+        return Err(synchronous_object_conversion_error(
+            runtime, realm, "number",
+        ));
     }
     let origin = host_property_origin("to number");
     operator_to_number(value, realm, &origin)

@@ -85,10 +85,7 @@ pub(crate) mod op_core_print {
     }
 
     /// The variadic core print glue (§5.7 shape).
-    pub(crate) fn call(
-        context: &mut Context<'_>,
-        call: HostCall,
-    ) -> Result<JsValue, JsValue> {
+    pub(crate) fn call(context: &mut Context<'_>, call: HostCall) -> Result<JsValue, JsValue> {
         let rendered: Vec<String> = call
             .arguments()
             .iter()
@@ -98,8 +95,9 @@ pub(crate) mod op_core_print {
         if !OpStateRegistry::has::<PrintSink>() {
             let _ = OpStateRegistry::install(PrintSink::default());
         }
-        OpStateRegistry::with_mut::<PrintSink, _>(|sink| (sink.0)(&line))
-            .map_err(|error| ::fusor_host::ops::op_error_value(context, OpError::new(error.to_string())))?;
+        OpStateRegistry::with_mut::<PrintSink, _>(|sink| (sink.0)(&line)).map_err(|error| {
+            ::fusor_host::ops::op_error_value(context, OpError::new(error.to_string()))
+        })?;
         Ok(context.undefined())
     }
 }
@@ -125,10 +123,7 @@ pub(crate) mod op_core_gc {
     }
 
     /// Runs the forced collection (§5.7 shape).
-    pub(crate) fn call(
-        context: &mut Context<'_>,
-        _call: HostCall,
-    ) -> Result<JsValue, JsValue> {
+    pub(crate) fn call(context: &mut Context<'_>, _call: HostCall) -> Result<JsValue, JsValue> {
         context.collect_cycles().map_err(|error| {
             ::fusor_host::ops::op_error_value(context, OpError::new(error.to_string()))
         })?;
@@ -185,10 +180,7 @@ pub(crate) mod op_core_now {
     }
 
     /// Returns the elapsed milliseconds since the time origin (§5.7 shape).
-    pub(crate) fn call(
-        context: &mut Context<'_>,
-        _call: HostCall,
-    ) -> Result<JsValue, JsValue> {
+    pub(crate) fn call(context: &mut Context<'_>, _call: HostCall) -> Result<JsValue, JsValue> {
         let elapsed = OpStateRegistry::with::<ClockState, _>(|state| state.start.elapsed())
             .map(|elapsed| elapsed.as_secs_f64() * 1_000.0)
             .unwrap_or(0.0);

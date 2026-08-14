@@ -11,11 +11,9 @@ use std::time::Duration;
 use fusor_bytecode::VerifiedBytecode;
 use fusor_compiler::CompilationContext;
 use fusor_frontend::{CompilationGoal, FrontendOptions, GlobalScriptGoal, with_parsed_program};
-use fusor_host::overlay::{CoreOverlay, HostRuntime};
 use fusor_host::r#loop::HostLoop;
-use fusor_runtime::{
-    Context, ExecutionError, ExecutionLimits, GlobalScriptError,
-};
+use fusor_host::overlay::{CoreOverlay, HostRuntime};
+use fusor_runtime::{Context, ExecutionError, ExecutionLimits, GlobalScriptError};
 
 /// Compiles one Global Script into the authority `run_main` and
 /// `execute_global_script` consume.
@@ -133,7 +131,10 @@ fn a_timeout_fires_when_the_virtual_clock_reaches_its_deadline() {
         "1",
         "10ms: fired exactly once"
     );
-    assert!(!fixture.host.alive(), "nothing pending: the loop is no longer alive");
+    assert!(
+        !fixture.host.alive(),
+        "nothing pending: the loop is no longer alive"
+    );
 }
 
 #[test]
@@ -181,12 +182,19 @@ fn set_interval_rearms_and_clear_interval_stops_it() {
         "globalThis.ticks = 0; \
          globalThis.handle = Fusor.ops.op_set_interval(function () { globalThis.ticks++; }, 10);",
     );
-    assert!(fixture.host.alive(), "a pending interval keeps the loop alive");
+    assert!(
+        fixture.host.alive(),
+        "a pending interval keeps the loop alive"
+    );
     fixture
         .host
         .advance_time(Duration::from_millis(10))
         .expect("advance");
-    assert_eq!(fixture.observe("String(globalThis.ticks);"), "1", "first period");
+    assert_eq!(
+        fixture.observe("String(globalThis.ticks);"),
+        "1",
+        "first period"
+    );
     fixture
         .host
         .advance_time(Duration::from_millis(20))
@@ -207,12 +215,19 @@ fn set_interval_rearms_and_clear_interval_stops_it() {
         "40ms: the re-armed deadline fires"
     );
     fixture.eval("Fusor.ops.op_clear_interval(globalThis.handle);");
-    assert!(!fixture.host.alive(), "a cleared interval no longer keeps the loop alive");
+    assert!(
+        !fixture.host.alive(),
+        "a cleared interval no longer keeps the loop alive"
+    );
     fixture
         .host
         .advance_time(Duration::from_millis(100))
         .expect("advance");
-    assert_eq!(fixture.observe("String(globalThis.ticks);"), "3", "no firing after clear");
+    assert_eq!(
+        fixture.observe("String(globalThis.ticks);"),
+        "3",
+        "no firing after clear"
+    );
 }
 
 #[test]

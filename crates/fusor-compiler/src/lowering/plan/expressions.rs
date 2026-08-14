@@ -20,8 +20,8 @@ use super::super::{
 use super::abrupt::{AbruptMarker, AbruptMarkerKind, AbruptMarkerTag};
 use super::bindings::{WithObjectSource, plan_external_put_init};
 use super::calls::MemberCallee;
-use oxc_ast::ast::{SpreadElement, StaticBlock};
 use fusor_bytecode::CompilerBindingKind;
+use oxc_ast::ast::{SpreadElement, StaticBlock};
 use std::collections::HashSet;
 
 pub(in crate::lowering) fn anonymous_named_evaluation_span(

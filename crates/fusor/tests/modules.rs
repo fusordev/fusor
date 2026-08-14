@@ -1067,7 +1067,6 @@ fn facade_module_evaluation_error_reports_the_async_outcome() {
     );
 }
 
-
 #[test]
 fn a_shared_module_across_two_graphs_evaluates_exactly_once() {
     let entries = [
@@ -1156,9 +1155,8 @@ fn module_evaluation_errors_distinguish_typed_engine_failures_from_exceptions() 
         "while (true) {}",
         "spinning.mjs",
         &mut spinning,
-        ScriptLimits::default().with_execution(
-            fusor_runtime::ExecutionLimits::default().with_instruction_fuel(100),
-        ),
+        ScriptLimits::default()
+            .with_execution(fusor_runtime::ExecutionLimits::default().with_instruction_fuel(100)),
     );
     match exhausted {
         Err(fusor::ModuleEvaluationError::Runtime(error)) => {

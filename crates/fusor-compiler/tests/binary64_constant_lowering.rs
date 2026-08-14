@@ -306,9 +306,7 @@ fn binary64_and_function_templates_share_one_typed_constant_pool() {
             fusor_bytecode::CompilerConstant::Value(CompilerConstantValue::Number(
                 Binary64Constant::from_f64(1.5),
             )),
-            fusor_bytecode::CompilerConstant::Function(
-                fusor_bytecode::FunctionTemplateId::new(1),
-            ),
+            fusor_bytecode::CompilerConstant::Function(fusor_bytecode::FunctionTemplateId::new(1),),
             fusor_bytecode::CompilerConstant::Value(CompilerConstantValue::Number(
                 Binary64Constant::from_f64(2.5),
             )),

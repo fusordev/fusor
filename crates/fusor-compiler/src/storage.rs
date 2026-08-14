@@ -5,6 +5,9 @@ use std::{
     sync::Arc,
 };
 
+use fusor_frontend::{
+    CompilationGoal, DynamicFunctionKind, ModuleExportLocalName, ParsedUnit, Span,
+};
 use oxc_ast::{
     AstKind,
     ast::{
@@ -14,9 +17,6 @@ use oxc_ast::{
 };
 use oxc_semantic::{AstNodes, NodeId, ReferenceId, ScopeId, SymbolFlags, SymbolId};
 use oxc_span::GetSpan;
-use fusor_frontend::{
-    CompilationGoal, DynamicFunctionKind, ModuleExportLocalName, ParsedUnit, Span,
-};
 
 /// Dense plan-local compiler identity of one executable body.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -1500,12 +1500,12 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             bindings.len(),
             scoping.scopes_len(),
             scoping.symbol_ids().map(|symbol| {
-                    (
-                        symbol,
-                        scoping.symbol_scope_id(symbol),
-                        scoping.symbol_span(symbol),
-                    )
-                }),
+                (
+                    symbol,
+                    scoping.symbol_scope_id(symbol),
+                    scoping.symbol_span(symbol),
+                )
+            }),
         )?;
         for (&binding, &scope) in scope_overrides {
             let target =
@@ -3185,7 +3185,8 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         for symbol_id in scoping.symbol_ids() {
             if dynamic_function_wrapper_name.is_some_and(|name| name.symbol == symbol_id) {
                 continue;
-            }            let flags = scoping.symbol_flags(symbol_id);
+            }
+            let flags = scoping.symbol_flags(symbol_id);
             if !flags.is_value() {
                 return Err(CompilerError::SemanticInvariant {
                     invariant: "JavaScript semantic symbol is a value",

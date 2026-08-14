@@ -8,11 +8,9 @@ use std::sync::Arc;
 
 use fusor_compiler::CompilationContext;
 use fusor_frontend::{CompilationGoal, FrontendOptions, GlobalScriptGoal, with_parsed_program};
-use fusor_host::overlay::{CoreOverlay, HostRuntime};
 use fusor_host::r#loop::HostLoop;
-use fusor_runtime::{
-    Context, ExecutionError, ExecutionLimits, GlobalScriptError,
-};
+use fusor_host::overlay::{CoreOverlay, HostRuntime};
+use fusor_runtime::{Context, ExecutionError, ExecutionLimits, GlobalScriptError};
 
 /// Evaluates one Global Script, mapping both failure arms onto
 /// [`ExecutionError`].
@@ -32,9 +30,8 @@ fn compile(source: &str) -> Arc<fusor_bytecode::VerifiedBytecode> {
         source,
         FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
         |unit| {
-            let context =
-                CompilationContext::new_with_source_name(unit, Arc::from("core-ops.js"))
-                    .expect("storage plan");
+            let context = CompilationContext::new_with_source_name(unit, Arc::from("core-ops.js"))
+                .expect("storage plan");
             let tree = context
                 .compile_global_script(fusor_bytecode::VerificationLimits::default())
                 .expect("verified Global Script");
@@ -80,9 +77,7 @@ fn op_core_print_returns_undefined_without_throwing() {
     let mut host = fixture();
     let result = Rc::new(RefCell::new(String::new()));
     let result_in = Rc::clone(&result);
-    let authority = compile(
-        "Fusor.ops.op_core_print({ a: 1 }, function () {}); 'ok';",
-    );
+    let authority = compile("Fusor.ops.op_core_print({ a: 1 }, function () {}); 'ok';");
     host.post_event(Box::new(move |context| {
         let value = context
             .execute_global_script(authority, ExecutionLimits::default())

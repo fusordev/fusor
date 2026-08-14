@@ -7,8 +7,13 @@ use fusor::{ScriptLimits, evaluate_script};
 use fusor_runtime::{CollectionInspection, PromiseInspection, Realm, Runtime, RuntimeLimits};
 
 fn evaluate(context: &mut fusor_runtime::Context<'_>, source: &str) -> fusor_runtime::JsValue {
-    evaluate_script(context, source, "internal-slots-test.js", ScriptLimits::default())
-        .expect("evaluate fixture")
+    evaluate_script(
+        context,
+        source,
+        "internal-slots-test.js",
+        ScriptLimits::default(),
+    )
+    .expect("evaluate fixture")
 }
 
 fn runtime() -> (Runtime, Realm) {
@@ -47,7 +52,10 @@ fn promise_inspection_reports_the_specification_state() {
         .expect("rejected inspection")
     {
         Some(PromiseInspection::Rejected(reason)) => {
-            assert_eq!(reason.kind().expect("reason kind"), fusor_runtime::ValueKind::Object);
+            assert_eq!(
+                reason.kind().expect("reason kind"),
+                fusor_runtime::ValueKind::Object
+            );
         }
         other => panic!("expected a rejected promise, got {other:?}"),
     }
@@ -75,8 +83,14 @@ fn proxy_inspection_reports_handler_and_target() {
     assert!(!inspection.revoked, "a live proxy is not revoked");
     let handler = inspection.handler.expect("handler");
     let target = inspection.target.expect("target");
-    assert_eq!(handler.kind().expect("handler kind"), fusor_runtime::ValueKind::Object);
-    assert_eq!(target.kind().expect("target kind"), fusor_runtime::ValueKind::Object);
+    assert_eq!(
+        handler.kind().expect("handler kind"),
+        fusor_runtime::ValueKind::Object
+    );
+    assert_eq!(
+        target.kind().expect("target kind"),
+        fusor_runtime::ValueKind::Object
+    );
     let target_key = context.property_key("x").expect("key");
     assert_eq!(
         target
@@ -113,7 +127,10 @@ fn proxy_inspection_reports_handler_and_target() {
         .expect("revoked inspection")
         .expect("proxy");
     assert!(inspection.revoked, "a revoked proxy reports the flag");
-    assert!(inspection.handler.is_none(), "revocation clears the handler");
+    assert!(
+        inspection.handler.is_none(),
+        "revocation clears the handler"
+    );
     assert!(inspection.target.is_none(), "revocation clears the target");
 
     let plain = evaluate(&mut context, "({})");
@@ -187,7 +204,10 @@ fn collection_inspection_reports_map_and_set_entries() {
     {
         CollectionInspection::Entries(entries) => {
             assert_eq!(entries.len(), 1, "the weak map entry is reported");
-            assert_eq!(entries[0].0.kind().expect("key kind"), fusor_runtime::ValueKind::Object);
+            assert_eq!(
+                entries[0].0.kind().expect("key kind"),
+                fusor_runtime::ValueKind::Object
+            );
             assert_eq!(entries[0].1.as_f64().expect("number").expect("some"), 9.0);
         }
         other => panic!("expected weak map entries, got {other:?}"),
@@ -201,7 +221,10 @@ fn collection_inspection_reports_map_and_set_entries() {
     {
         CollectionInspection::Values(values) => {
             assert_eq!(values.len(), 1, "the weak set value is reported");
-            assert_eq!(values[0].kind().expect("value kind"), fusor_runtime::ValueKind::Object);
+            assert_eq!(
+                values[0].kind().expect("value kind"),
+                fusor_runtime::ValueKind::Object
+            );
         }
         other => panic!("expected weak set values, got {other:?}"),
     }
@@ -229,7 +252,10 @@ fn array_buffer_inspection_reports_length_and_bytes() {
     assert_eq!(inspection.byte_length, 16);
     assert!(!inspection.detached);
     assert!(!inspection.shared);
-    assert_eq!(inspection.max_byte_length, None, "fixed-length buffers have no maximum");
+    assert_eq!(
+        inspection.max_byte_length, None,
+        "fixed-length buffers have no maximum"
+    );
     assert_eq!(
         context
             .array_buffer_bytes(&buffer, 4)
