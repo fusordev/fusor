@@ -8012,6 +8012,59 @@ fn snapshot_round_trips_bytecode_functions() {
 }
 
 #[test]
+fn snapshot_restore_rebinds_host_functions_by_name() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let name_key = runtime.predefined_property_key(crate::PredefinedAtom::Name);
+    let shape = Arc::new(vec![ShapeProperty::from_parts(
+        name_key,
+        PropertyLayout::data(false, true, false),
+    )]);
+    runtime
+        .insert_heap_function(crate::runtime::HeapFunction {
+            implementation: crate::runtime::FunctionImplementation::Native(
+                crate::runtime::NativeFunction {
+                    realm: crate::ids::RealmId::ZERO,
+                    kind: crate::runtime::NativeFunctionKind::Host(
+                        crate::HostFunctionId::new(0),
+                    ),
+                },
+            ),
+            object: ObjectRecord::from_parts(
+                None,
+                true,
+                false,
+                shape,
+                None,
+                vec![PropertySlot::Data(StoredValue::String(
+                    JsString::from_utf8("op_probe").expect("name"),
+                ))],
+            ),
+            public_roots: 0,
+        })
+        .expect("function");
+
+    let blob = runtime.snapshot().expect("snapshot");
+    let mut restored = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    restored.from_snapshot(&blob).expect("restore");
+
+    // The closure table starts empty after restore; the host re-binds
+    // each assembled op by name (§8.2, §8.5).
+    restored
+        .rebind_host_function("op_probe", |_context, _call| {
+            unreachable!("the callback is not invoked in this test")
+        })
+        .expect("rebind");
+
+    // An op-set mismatch fails closed.
+    let error = restored
+        .rebind_host_function("op_ghost", |_context, _call| {
+            unreachable!("the callback is not invoked in this test")
+        })
+        .expect_err("unknown names must fail closed");
+    assert!(!error.to_string().is_empty());
+}
+
+#[test]
 fn snapshot_fails_closed_on_unsupported_heap_content() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     // An accessor slot is not serializable yet (§8.2 intermediate).

@@ -119,6 +119,81 @@ impl Runtime {
             })
     }
 
+    /// Re-binds one host function's Rust closure after a snapshot restore
+    /// (§8.2): the restored heap retains each host function's slot
+    /// identity and its name property, but the closure table starts
+    /// empty. The host re-binds every assembled op by name in
+    /// registration order; an op-set mismatch fails closed (§8.5).
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`crate::ExecutionError`] when no restored host
+    /// function carries `name` (an op-set mismatch) or the name cannot be
+    /// interned.
+    pub fn rebind_host_function<F>(
+        &mut self,
+        name: &str,
+        callback: F,
+    ) -> Result<(), crate::ExecutionError>
+    where
+        F: crate::HostCallback + 'static,
+    {
+        let name_string = JsString::from_utf8(name).map_err(crate::ExecutionError::from)?;
+        let name_key = self.predefined_property_key(PredefinedAtom::Name);
+        let mut slot = None;
+        for function in self.functions.iter() {
+            let FunctionImplementation::Native(native) = &function.1.implementation else {
+                continue;
+            };
+            let NativeFunctionKind::Host(host_slot) = native.kind else {
+                continue;
+            };
+            let record = &function.1.object;
+            let mut named = false;
+            for (index, property) in record.shape().iter().enumerate() {
+                if *property.key() != name_key {
+                    continue;
+                }
+                named = matches!(
+                    record.slots().get(index),
+                    Some(crate::object::PropertySlot::Data(StoredValue::String(value)))
+                        if value == &name_string
+                );
+                break;
+            }
+            if named {
+                slot = Some(host_slot);
+                break;
+            }
+        }
+        let Some(slot) = slot else {
+            return Err(crate::ExecutionError::from(
+                crate::EngineFault::RuntimeInvariant {
+                    message: format!(
+                        "no restored host function carries the name '{name}' (op-set mismatch)",
+                    )
+                    .leak(),
+                },
+            ));
+        };
+        // The restored closure table starts empty: reserve up to the
+        // restored slot before binding (resize cannot reallocate after a
+        // successful reservation, so this cannot panic).
+        if slot.index() >= self.host_functions.len() {
+            let additional = slot.index() + 1 - self.host_functions.len();
+            self.host_functions
+                .try_reserve(additional)
+                .map_err(|_| {
+                    crate::ExecutionError::from(crate::EngineFault::RuntimeInvariant {
+                        message: "the host function table reservation failed",
+                    })
+                })?;
+            self.host_functions.resize_with(slot.index() + 1, || None);
+        }
+        self.host_functions[slot.index()] = Some(Box::new(callback));
+        Ok(())
+    }
+
     pub(crate) fn predefined_property_key(&self, atom: PredefinedAtom) -> PropertyKey {
         PropertyKey::from_validated_atom(self.atoms.predefined(atom))
     }
