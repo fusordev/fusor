@@ -900,11 +900,21 @@ fn syntax_error_remote(
         message,
         &stack,
     ) {
-        Ok(object) => remote_object(context, &mut state.objects, intrinsics, &object, None, false),
-        Err(_) => {
-            let description = format!("SyntaxError: {message}");
-            json!({"type": "object", "subtype": "error", "className": "SyntaxError", "description": description})
+        Ok(object) => {
+            // The frontend concatenates exceptionDetails.text with the
+            // exception description into the title line; an empty
+            // description keeps the line single (V8 behavior).
+            let mut remote =
+                remote_object(context, &mut state.objects, intrinsics, &object, None, false);
+            remote["description"] = Value::String(String::new());
+            remote
         }
+        Err(_) => json!({
+            "type": "object",
+            "subtype": "error",
+            "className": "SyntaxError",
+            "description": "",
+        }),
     }
 }
 
@@ -1001,14 +1011,19 @@ fn engine_error_remote_object(
         ));
     }
     let object = context.error_with_stack(family, &message, &stack).ok()?;
-    Some(remote_object(
+    // The frontend concatenates exceptionDetails.text with the exception
+    // description into the title line; an empty description keeps the line
+    // single (V8 behavior).
+    let mut remote = remote_object(
         context,
         &mut state.objects,
         intrinsics,
         &object,
         None,
         false,
-    ))
+    );
+    remote["description"] = Value::String(String::new());
+    Some(remote)
 }
 
 /// Renders one live value as a CDP `RemoteObject`.
@@ -2082,7 +2097,13 @@ fn collection_entry_previews(
 ) -> Vec<Value> {
     let mut entries = Vec::new();
     let object_preview = |entry: Value| {
-        let mut preview = json!({"type": entry["type"], "value": entry["value"]});
+        // The frontend renders EntryPreview items from their description.
+        let description = entry["value"].as_str().unwrap_or_default();
+        let mut preview = json!({
+            "type": entry["type"],
+            "description": description,
+            "value": entry["value"],
+        });
         if let Some(subtype) = entry.get("subtype") {
             preview["subtype"] = subtype.clone();
         }
