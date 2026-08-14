@@ -19,7 +19,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::process::{Signal, SignalState};
+use crate::process::{ProcessState, Signal, SignalState, install_process_state, install_signal_state, with_process_state};
 use fusor_runtime::{Context, ExecutionError, ExecutionLimits, GlobalScriptError, Realm, Runtime};
 use timers::{TimerState, install_timer_state};
 
@@ -82,7 +82,10 @@ impl HostLoop {
     pub fn new(mut runtime: Runtime, realm: Realm) -> Result<Self, HostLoopError> {
         install_timer_state(TimerState::default())
             .map_err(|_| HostLoopError::AlreadyInstalled)?;
+        install_process_state(ProcessState::default())
+            .map_err(|_| HostLoopError::AlreadyInstalled)?;
         let signals = SignalState::default();
+        install_signal_state(signals.clone()).map_err(|_| HostLoopError::AlreadyInstalled)?;
         runtime.set_interrupt_handler(Arc::new({
             let signals = signals.clone();
             move || signals.interrupt_requested()
@@ -196,6 +199,7 @@ impl HostLoop {
         // host callback (§6.2).
         self.poll_op_completions();
         self.drain()?;
+        self.run_signal_handlers()?;
         self.fire_due_timers()?;
         while let Some(event) = self.custom_events.pop_front() {
             let mut context = self
@@ -220,6 +224,35 @@ impl HostLoop {
             .context(&self.realm)
             .map_err(ExecutionError::from)?;
         context.drain_host_jobs(ExecutionLimits::default(), None)
+    }
+
+    /// Invokes the registered JS SIGINT handler once per pending delivery
+    /// (§7.1), draining to quiescence after each invocation (§6.2). The
+    /// receiver is the global `process` object; a handler that throws
+    /// fails the turn closed and its delivery is dropped (one-shot
+    /// handler work is the embedder's to retry).
+    fn run_signal_handlers(&mut self) -> Result<(), ExecutionError> {
+        let pending = self.signals.take_pending_sigint();
+        for _ in 0..pending {
+            let Some(handler) = with_process_state(|state| state.sigint_handler.clone())
+                .ok()
+                .flatten()
+            else {
+                return Ok(());
+            };
+            let mut context = self
+                .runtime
+                .context(&self.realm)
+                .map_err(ExecutionError::from)?;
+            let process_key = context.property_key("process")?;
+            let receiver = context
+                .global_object()?
+                .into_object()?
+                .get(&mut context, process_key)?;
+            invoke_callback_with(&mut context, &handler, receiver)?;
+            self.drain()?;
+        }
+        Ok(())
     }
 
     /// Advances the virtual clock, firing every timer that comes due.
@@ -263,6 +296,7 @@ impl HostLoop {
     /// Returns whether any event is due this turn.
     fn turn_has_work(&self) -> bool {
         !self.custom_events.is_empty()
+            || self.signals.has_pending_sigint()
             || with_timer_state(|state| {
                 state.next_deadline().is_some_and(|deadline| deadline <= state.now)
                     || !state.immediates.is_empty()
@@ -410,6 +444,7 @@ impl HostLoop {
         self.signals.pending_exit_code().is_none()
             && self.exit_when_idle
             && (!self.custom_events.is_empty()
+                || self.signals.has_pending_sigint()
                 || self.pending_ops() > 0
                 || with_timer_state(|state| state.has_pending()).unwrap_or(false))
     }
@@ -431,6 +466,16 @@ impl HostLoop {
 /// Invokes one timer/immediate callback with the job-callback semantics:
 /// an ordinary `[[Call]]` with the `undefined` receiver (§6.4).
 fn invoke_callback(context: &mut Context<'_>, callback: &fusor_runtime::JsValue) -> Result<(), ExecutionError> {
+    invoke_callback_with(context, callback, context.undefined())
+}
+
+/// Invokes one host callback with an explicit receiver (timer callbacks
+/// use `undefined`, §6.4; signal handlers use the `process` object, §7.1).
+fn invoke_callback_with(
+    context: &mut Context<'_>,
+    callback: &fusor_runtime::JsValue,
+    receiver: fusor_runtime::JsValue,
+) -> Result<(), ExecutionError> {
     let function = callback
         .clone()
         .into_function()
@@ -438,7 +483,7 @@ fn invoke_callback(context: &mut Context<'_>, callback: &fusor_runtime::JsValue)
     context
         .call_function(
             &function,
-            context.undefined(),
+            receiver,
             Vec::new(),
             ExecutionLimits::default(),
         )
@@ -447,7 +492,7 @@ fn invoke_callback(context: &mut Context<'_>, callback: &fusor_runtime::JsValue)
             fusor_runtime::CallError::Execution(source) => source,
             fusor_runtime::CallError::Thrown(_) => {
                 ExecutionError::from(fusor_runtime::EngineFault::RuntimeInvariant {
-                    message: "timer callback threw an uncaught exception",
+                    message: "host callback threw an uncaught exception",
                 })
             }
         })

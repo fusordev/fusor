@@ -11,9 +11,16 @@
 //! script consumes within its turn is cleared at the turn's end (an idle
 //! Ctrl+C interrupts nothing, exactly like an idle REPL prompt). Force
 //! exits take effect at the next turn boundary and never reset.
+//!
+//! A JS-side SIGINT handler registered through `process.on` replaces the
+//! default policy: each delivery is handed to the handler by the loop
+//! instead of arming the interrupt or the exit, and registering clears
+//! any pending interrupt request. SIGTERM is not interceptable in the
+//! alpha host (documented).
 
+use std::cell::RefCell;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 
 /// The host-interpreted signal subset (§7.1).
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -38,7 +45,8 @@ impl Signal {
 }
 
 /// The shared signal state: the interrupt request flag consulted by the
-/// engine's [`InterruptHandler`] and the pending force-exit code.
+/// engine's [`InterruptHandler`], the pending force-exit code, and the
+/// JS-handler delivery channel.
 ///
 /// All mutations are atomic, so OS signal-delivery threads and the owner
 /// task share one state without further synchronization (§7.6: signal
@@ -48,19 +56,27 @@ impl Signal {
 pub struct SignalState {
     interrupt: Arc<AtomicBool>,
     force_exit: Arc<AtomicI32>,
+    js_sigint_handler: Arc<AtomicBool>,
+    pending_sigint: Arc<AtomicU32>,
 }
 
 impl SignalState {
     /// Delivers one signal, applying the §7.1 policy.
     ///
     /// Returns `true` when this delivery forces an exit (a second SIGINT
-    /// while a request was outstanding, or any SIGTERM).
+    /// while a request was outstanding, or any SIGTERM). With a JS SIGINT
+    /// handler registered the delivery is handed to the handler instead
+    /// and returns `false`.
     pub fn deliver(&self, signal: Signal) -> bool {
         match signal {
             Signal::Interrupt => {
-                // `swap(true)` reports whether a request was already
-                // outstanding: that makes this delivery the second SIGINT.
-                if self.interrupt.swap(true, Ordering::SeqCst) {
+                if self.js_sigint_handler.load(Ordering::SeqCst) {
+                    self.pending_sigint.fetch_add(1, Ordering::SeqCst);
+                    false
+                } else if self.interrupt.swap(true, Ordering::SeqCst) {
+                    // `swap(true)` reports whether a request was already
+                    // outstanding: that makes this delivery the second
+                    // SIGINT.
                     self.force_exit.store(signal.exit_code(), Ordering::SeqCst);
                     true
                 } else {
@@ -72,6 +88,25 @@ impl SignalState {
                 true
             }
         }
+    }
+
+    /// Enables or disables the JS SIGINT handler path (§7.1). The owner
+    /// task toggles this when `process.on("SIGINT", ...)` registers; the
+    /// delivery thread reads it.
+    pub(crate) fn set_js_sigint_handler(&self, registered: bool) {
+        self.js_sigint_handler.store(registered, Ordering::SeqCst);
+    }
+
+    /// Returns whether SIGINT deliveries are waiting for the JS handler
+    /// (the loop's alive/work predicates).
+    pub(crate) fn has_pending_sigint(&self) -> bool {
+        self.pending_sigint.load(Ordering::SeqCst) > 0
+    }
+
+    /// Takes every pending JS-handler delivery, returning the count to
+    /// invoke (§7.1).
+    pub(crate) fn take_pending_sigint(&self) -> u32 {
+        self.pending_sigint.swap(0, Ordering::SeqCst)
     }
 
     /// Returns whether an interrupt is requested (the engine's
@@ -99,6 +134,57 @@ impl SignalState {
         }
     }
 }
+
+thread_local! {
+    static SIGNAL_STATE: RefCell<Option<SignalState>> = const { RefCell::new(None) };
+}
+
+/// Installs the owner-task [`SignalState`] clone (the `process.on` op
+/// entry point).
+///
+/// # Errors
+///
+/// Returns the state unchanged when one is already installed.
+pub(crate) fn install_signal_state(state: SignalState) -> Result<(), SignalState> {
+    SIGNAL_STATE.with(|slot| {
+        if slot.borrow().is_some() {
+            return Err(state);
+        }
+        *slot.borrow_mut() = Some(state);
+        Ok(())
+    })
+}
+
+/// Borrows the installed signal state (the `process.on` op entry point).
+pub(crate) fn with_signal_state<R>(
+    operation: impl FnOnce(&SignalState) -> R,
+) -> Result<R, SignalStateError> {
+    SIGNAL_STATE.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .map(operation)
+            .ok_or(SignalStateError::NotInstalled)
+    })
+}
+
+/// Signal-state failures.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SignalStateError {
+    /// No signal state is installed on the owner task.
+    NotInstalled,
+}
+
+impl std::fmt::Display for SignalStateError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotInstalled => formatter.write_str(
+                "no signal state is installed (create the HostLoop first)",
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SignalStateError {}
 
 /// Failures while attaching the OS signal forwarder.
 #[derive(Debug)]

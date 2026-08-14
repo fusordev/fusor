@@ -2,6 +2,7 @@
 //! assembly registry.
 
 mod op_runtime;
+mod process;
 mod resources;
 mod serde;
 mod timers;
@@ -10,6 +11,7 @@ pub use op_runtime::{
     OpRuntime, OpRuntimeError, install_op_runtime, pending_op_count, poll_op_completions,
     spawn_op,
 };
+pub use process::install_process;
 pub use resources::{
     Resource, ResourceId, ResourceTable, ResourceTableError,
 };
@@ -330,9 +332,20 @@ where
     let ops_key = context.property_key("ops")?;
     let fusor = global.get(context, fusor_key)?.into_object()?;
     let ops = fusor.get(context, ops_key)?.into_object()?;
+    define_op_on(context, ops, declaration, function.as_value())
+}
+
+/// The shared installation tail: defines one op function on a target
+/// object as a writable, enumerable, configurable data property (§5.4).
+pub(crate) fn define_op_on(
+    context: &mut Context<'_>,
+    target: fusor_runtime::Object,
+    declaration: OpDeclaration,
+    function: JsValue,
+) -> Result<(), fusor_runtime::ExecutionError> {
     let op_key = context.property_key(declaration.name)?;
     let descriptor = fusor_runtime::DescriptorFields::<JsValue> {
-        value: Some(function.as_value()),
+        value: Some(function),
         writable: Some(true),
         enumerable: Some(true),
         configurable: Some(true),
@@ -342,9 +355,9 @@ where
     .map_err(|_| fusor_runtime::EngineFault::RuntimeInvariant {
         message: "op descriptor is data-only by construction",
     })?;
-    if !ops.define_own_property(context, op_key, descriptor)? {
+    if !target.define_own_property(context, op_key, descriptor)? {
         return Err(fusor_runtime::EngineFault::RuntimeInvariant {
-            message: "the Fusor.ops object refused an op definition",
+            message: "the target object refused an op definition",
         }
         .into());
     }
