@@ -370,6 +370,21 @@ impl JsValue {
         Ok(&self.0.value)
     }
 
+    /// Returns whether both handles root the same heap object.
+    ///
+    /// This is heap identity, not ECMA-262 `===`: primitives never compare
+    /// equal here, and two public roots of the same heap object match even
+    /// though the roots themselves are distinct allocations. The host's
+    /// Promise rejection reconciliation (§7.3 of the host design) needs
+    /// exactly this to pair a `Handle` notification with its `Reject`.
+    #[must_use]
+    pub fn same_object(&self, other: &JsValue) -> bool {
+        match (&self.0.value, &other.0.value) {
+            (StoredValue::Object(left), StoredValue::Object(right)) => left == right,
+            _ => false,
+        }
+    }
+
     /// Returns the observable value family.
     ///
     /// # Errors

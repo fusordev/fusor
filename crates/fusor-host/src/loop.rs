@@ -16,11 +16,19 @@ pub(crate) use timers::{TimerCallback, TimerId, with_timer_state};
 use std::collections::VecDeque;
 use std::error::Error;
 use std::fmt;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::process::{ProcessState, Signal, SignalState, install_process_state, install_signal_state, with_process_state};
-use fusor_runtime::{Context, ExecutionError, ExecutionLimits, GlobalScriptError, Realm, Runtime};
+use crate::process::{
+    ProcessState, Signal, SignalState, has_pending_rejections, install_process_state,
+    install_signal_state, push_rejection_event, take_rejection_events, with_process_state,
+};
+use fusor_runtime::{
+    CallError, Context, ErrorObjectKind, ExceptionKind, ExecutionError, ExecutionLimits,
+    GlobalScriptError, JsException, JsValue, PromiseRejectionEvent, PromiseRejectionOperation,
+    Realm, Runtime,
+};
 use timers::{TimerState, install_timer_state};
 
 /// One custom host event: a closure the loop invokes on the owner task.
@@ -90,6 +98,18 @@ impl HostLoop {
             let signals = signals.clone();
             move || signals.interrupt_requested()
         }));
+        // The rejection tracker (§7.3) runs while JavaScript is suspended
+        // and must not re-enter the runtime: it retains each notification
+        // into the end-of-turn queue. A retain failure (root resource
+        // exhaustion) drops the notification; the rejection itself is
+        // unaffected.
+        runtime.set_promise_rejection_tracker(Rc::new(
+            |mut event: PromiseRejectionEvent<'_>| {
+                if let Ok(owned) = event.retain() {
+                    push_rejection_event(owned);
+                }
+            },
+        ));
         Ok(Self {
             runtime,
             realm,
@@ -126,8 +146,18 @@ impl HostLoop {
                 if matches!(&source, ExecutionError::Interrupted { .. }) {
                     // The running script consumed the request (§7.1).
                     self.signals.consume_interrupt();
+                    return Err(source);
                 }
-                return Err(source);
+                match source {
+                    // §7.3: an uncaught exception goes through the
+                    // uncaughtException handler or the default exit-1
+                    // path.
+                    ExecutionError::Exception(exception) => {
+                        let value = exception_value(&mut context, &exception)?;
+                        self.handle_uncaught(value)?;
+                    }
+                    other => return Err(other),
+                }
             }
         }
         self.run_until_idle()
@@ -206,13 +236,26 @@ impl HostLoop {
                 .runtime
                 .context(&self.realm)
                 .map_err(ExecutionError::from)?;
-            event(&mut context)?;
+            match event(&mut context) {
+                Ok(()) => {}
+                // §7.3: an uncaught exception in host event work goes
+                // through the uncaughtException path; the event is
+                // dropped (one-shot host work).
+                Err(ExecutionError::Exception(exception)) => {
+                    let value = exception_value(&mut context, &exception)?;
+                    self.handle_uncaught(value)?;
+                }
+                Err(error) => return Err(error),
+            }
             self.drain()?;
         }
         // `setImmediate` runs after this turn's events, before the
         // turn-final checkpoint (§6.4).
         self.run_immediates()?;
         self.drain()?;
+        // The rejection tracker's notifications reconcile at the end of
+        // the turn, after the final checkpoint (§7.3).
+        self.handle_promise_rejections()?;
         Ok(())
     }
 
@@ -228,9 +271,9 @@ impl HostLoop {
 
     /// Invokes the registered JS SIGINT handler once per pending delivery
     /// (§7.1), draining to quiescence after each invocation (§6.2). The
-    /// receiver is the global `process` object; a handler that throws
-    /// fails the turn closed and its delivery is dropped (one-shot
-    /// handler work is the embedder's to retry).
+    /// receiver is the `Fusor.process` object; a handler that throws goes
+    /// to the uncaughtException path (Node semantics) and its delivery is
+    /// spent.
     fn run_signal_handlers(&mut self) -> Result<(), ExecutionError> {
         let pending = self.signals.take_pending_sigint();
         for _ in 0..pending {
@@ -244,12 +287,116 @@ impl HostLoop {
                 .runtime
                 .context(&self.realm)
                 .map_err(ExecutionError::from)?;
-            let process_key = context.property_key("process")?;
-            let receiver = context
-                .global_object()?
-                .into_object()?
-                .get(&mut context, process_key)?;
-            invoke_callback_with(&mut context, &handler, receiver)?;
+            let receiver = fusor_process_object(&mut context)?;
+            match invoke_callback_with(&mut context, &handler, receiver, Vec::new()) {
+                Ok(()) => {}
+                Err(CallError::Thrown(error)) => self.handle_uncaught(error)?,
+                Err(CallError::Execution(source)) => return Err(source),
+            }
+            self.drain()?;
+        }
+        Ok(())
+    }
+
+    /// Routes one uncaught JavaScript exception (§7.3): with a registered
+    /// `Fusor.process.on("uncaughtException")` handler the handler runs as
+    /// a host event with the error value (receiver `Fusor.process`) and
+    /// its jobs drain immediately; otherwise the default path renders the
+    /// exception and requests exit 1.
+    fn handle_uncaught(&mut self, error: JsValue) -> Result<(), ExecutionError> {
+        let Some(handler) = with_process_state(|state| state.uncaught_handler.clone())
+            .ok()
+            .flatten()
+        else {
+            let mut context = self
+                .runtime
+                .context(&self.realm)
+                .map_err(ExecutionError::from)?;
+            let message = value_text(&mut context, &error);
+            eprintln!("Uncaught exception: {message}");
+            self.signals.request_exit(1);
+            return Ok(());
+        };
+        let mut context = self
+            .runtime
+            .context(&self.realm)
+            .map_err(ExecutionError::from)?;
+        let receiver = fusor_process_object(&mut context)?;
+        match invoke_callback_with(&mut context, &handler, receiver, vec![error]) {
+            Ok(()) => {}
+            // A throwing uncaughtException handler is not routed again:
+            // fail closed with a typed error.
+            Err(CallError::Thrown(_)) => {
+                return Err(ExecutionError::from(
+                    fusor_runtime::EngineFault::RuntimeInvariant {
+                        message: "the uncaughtException handler threw an uncaught exception",
+                    },
+                ));
+            }
+            Err(CallError::Execution(source)) => return Err(source),
+        }
+        self.drain()
+    }
+
+    /// Reconciles the end-of-turn rejection notifications (§7.3): a
+    /// `Reject` whose Promise gained no handler within the turn is an
+    /// unhandled rejection — the registered handler receives
+    /// `(reason, promise)` (receiver `Fusor.process`), or the default
+    /// path warns and requests exit 1. `Handle` notifications only cancel
+    /// their matching `Reject`.
+    fn handle_promise_rejections(&mut self) -> Result<(), ExecutionError> {
+        let events = take_rejection_events();
+        if events.is_empty() {
+            return Ok(());
+        }
+        let mut unhandled: Vec<fusor_runtime::OwnedPromiseRejectionEvent> = Vec::new();
+        for event in events {
+            match event.operation() {
+                PromiseRejectionOperation::Reject => unhandled.push(event),
+                PromiseRejectionOperation::Handle => {
+                    let promise = event.promise().as_value();
+                    unhandled.retain(|pending| {
+                        !pending.promise().as_value().same_object(&promise)
+                    });
+                }
+            }
+        }
+        let handler = with_process_state(|state| state.unhandled_rejection_handler.clone())
+            .ok()
+            .flatten();
+        for event in unhandled {
+            let (_, promise, reason) = event.into_parts();
+            let Some(handler) = handler.clone() else {
+                let mut context = self
+                    .runtime
+                    .context(&self.realm)
+                    .map_err(ExecutionError::from)?;
+                let message = value_text(&mut context, &reason);
+                eprintln!("Unhandled promise rejection: {message}");
+                self.signals.request_exit(1);
+                continue;
+            };
+            let mut context = self
+                .runtime
+                .context(&self.realm)
+                .map_err(ExecutionError::from)?;
+            let receiver = fusor_process_object(&mut context)?;
+            match invoke_callback_with(
+                &mut context,
+                &handler,
+                receiver,
+                vec![reason, promise.as_value()],
+            ) {
+                Ok(()) => {}
+                Err(CallError::Thrown(_)) => {
+                    return Err(ExecutionError::from(
+                        fusor_runtime::EngineFault::RuntimeInvariant {
+                            message: "the unhandledRejection handler threw an uncaught exception",
+                        },
+                    ));
+                }
+                Err(CallError::Execution(source)) => return Err(source),
+            }
             self.drain()?;
         }
         Ok(())
@@ -297,6 +444,7 @@ impl HostLoop {
     fn turn_has_work(&self) -> bool {
         !self.custom_events.is_empty()
             || self.signals.has_pending_sigint()
+            || has_pending_rejections()
             || with_timer_state(|state| {
                 state.next_deadline().is_some_and(|deadline| deadline <= state.now)
                     || !state.immediates.is_empty()
@@ -345,14 +493,21 @@ impl HostLoop {
                 .runtime
                 .context(&self.realm)
                 .map_err(ExecutionError::from)?;
-            if let Err(error) = invoke_callback(&mut context, &callback.callback) {
-                // The timer did not complete its firing: keep it
+            match invoke_callback(&mut context, &callback.callback) {
+                Ok(()) => {}
+                // A throwing callback is spent (§7.3): the exception
+                // goes to the uncaughtException path and the sweep
+                // continues.
+                Err(CallError::Thrown(error)) => self.handle_uncaught(error)?,
+                // The callback did not complete its firing: keep it
                 // registered so it fires again in a later turn.
-                with_timer_state(|state| {
-                    state.callbacks.insert(entry.id, callback);
-                })
-                .ok();
-                return Err(error);
+                Err(CallError::Execution(source)) => {
+                    with_timer_state(|state| {
+                        state.callbacks.insert(entry.id, callback);
+                    })
+                    .ok();
+                    return Err(source);
+                }
             }
             self.drain()?;
             fired.insert(entry);
@@ -405,13 +560,20 @@ impl HostLoop {
                 .runtime
                 .context(&self.realm)
                 .map_err(ExecutionError::from)?;
-            if let Err(error) = invoke_callback(&mut context, &callback.callback) {
-                with_timer_state(|state| {
-                    state.immediates.push_front(id);
-                    state.callbacks.insert(id, callback);
-                })
-                .ok();
-                return Err(error);
+            match invoke_callback(&mut context, &callback.callback) {
+                Ok(()) => {}
+                // A throwing callback is spent (§7.3).
+                Err(CallError::Thrown(error)) => self.handle_uncaught(error)?,
+                // The callback did not complete: restore it to the queue
+                // for a later turn.
+                Err(CallError::Execution(source)) => {
+                    with_timer_state(|state| {
+                        state.immediates.push_front(id);
+                        state.callbacks.insert(id, callback);
+                    })
+                    .ok();
+                    return Err(source);
+                }
             }
         }
     }
@@ -445,6 +607,7 @@ impl HostLoop {
             && self.exit_when_idle
             && (!self.custom_events.is_empty()
                 || self.signals.has_pending_sigint()
+                || has_pending_rejections()
                 || self.pending_ops() > 0
                 || with_timer_state(|state| state.has_pending()).unwrap_or(false))
     }
@@ -465,37 +628,104 @@ impl HostLoop {
 
 /// Invokes one timer/immediate callback with the job-callback semantics:
 /// an ordinary `[[Call]]` with the `undefined` receiver (§6.4).
-fn invoke_callback(context: &mut Context<'_>, callback: &fusor_runtime::JsValue) -> Result<(), ExecutionError> {
-    invoke_callback_with(context, callback, context.undefined())
+fn invoke_callback(
+    context: &mut Context<'_>,
+    callback: &JsValue,
+) -> Result<(), CallError> {
+    invoke_callback_with(context, callback, context.undefined(), Vec::new())
 }
 
-/// Invokes one host callback with an explicit receiver (timer callbacks
-/// use `undefined`, §6.4; signal handlers use the `process` object, §7.1).
+/// Invokes one host callback with an explicit receiver and argument list
+/// (timer callbacks use `undefined` and no arguments, §6.4; signal and
+/// exception handlers use the `Fusor.process` receiver, §7.1, §7.3).
 fn invoke_callback_with(
     context: &mut Context<'_>,
-    callback: &fusor_runtime::JsValue,
-    receiver: fusor_runtime::JsValue,
-) -> Result<(), ExecutionError> {
+    callback: &JsValue,
+    receiver: JsValue,
+    arguments: Vec<JsValue>,
+) -> Result<(), CallError> {
     let function = callback
         .clone()
         .into_function()
-        .map_err(ExecutionError::from)?;
+        .map_err(|error| CallError::Execution(ExecutionError::from(error)))?;
     context
         .call_function(
             &function,
             receiver,
-            Vec::new(),
+            arguments,
             ExecutionLimits::default(),
         )
         .map(|_completion| ())
-        .map_err(|error| match error {
-            fusor_runtime::CallError::Execution(source) => source,
-            fusor_runtime::CallError::Thrown(_) => {
-                ExecutionError::from(fusor_runtime::EngineFault::RuntimeInvariant {
-                    message: "host callback threw an uncaught exception",
-                })
-            }
-        })
+}
+
+/// Returns the `Fusor.process` object as a value (§7.1: the process
+/// surface lives inside the Fusor namespace).
+fn fusor_process_object(context: &mut Context<'_>) -> Result<JsValue, ExecutionError> {
+    let global = context.global_object()?.into_object()?;
+    let fusor_key = context.property_key("Fusor")?;
+    let fusor = global.get(context, fusor_key)?.into_object()?;
+    let process_key = context.property_key("process")?;
+    fusor.get(context, process_key)
+}
+
+/// Extracts the error value a handler observes from one escaping
+/// exception (§7.3): the original thrown value, or a materialized
+/// equivalent error object for engine-created errors.
+fn exception_value(
+    context: &mut Context<'_>,
+    exception: &JsException,
+) -> Result<JsValue, ExecutionError> {
+    if let Some(value) = exception.thrown_value() {
+        return Ok(value.clone());
+    }
+    let kind = exception.kind().unwrap_or(ExceptionKind::TypeError);
+    let message = exception
+        .message()
+        .and_then(|message| message.to_utf8_lossy().ok())
+        .unwrap_or_default();
+    context.error(error_object_kind(kind), &message)
+}
+
+/// Maps one engine exception kind onto the error-object family.
+fn error_object_kind(kind: ExceptionKind) -> ErrorObjectKind {
+    match kind {
+        ExceptionKind::InternalError => ErrorObjectKind::InternalError,
+        ExceptionKind::RangeError => ErrorObjectKind::RangeError,
+        ExceptionKind::ReferenceError => ErrorObjectKind::ReferenceError,
+        ExceptionKind::SyntaxError => ErrorObjectKind::SyntaxError,
+        ExceptionKind::TypeError => ErrorObjectKind::TypeError,
+        ExceptionKind::UriError => ErrorObjectKind::UriError,
+    }
+}
+
+/// Renders one value's `ToString` for the default diagnostic paths; never
+/// fails, panics, or re-enters the engine on a conversion error. Objects
+/// (Error instances among them) cannot use the host `ToString` (fail
+/// closed), so an object renders as `<name>: <message>` when the shape is
+/// there.
+fn value_text(context: &mut Context<'_>, value: &JsValue) -> String {
+    if let Ok(string) = value.to_string(context)
+        && let Ok(text) = string.to_utf8_lossy()
+    {
+        return text;
+    }
+    if let Ok(object) = value.clone().into_object()
+        && let Ok(name_key) = context.property_key("name")
+        && let Ok(message_key) = context.property_key("message")
+    {
+        let name = object
+            .get(context, name_key)
+            .ok()
+            .map(|name| value_text(context, &name))
+            .unwrap_or_else(|| "Object".to_owned());
+        let message = object
+            .get(context, message_key)
+            .ok()
+            .map(|message| value_text(context, &message))
+            .unwrap_or_default();
+        return format!("{name}: {message}");
+    }
+    "<unrenderable>".to_owned()
 }
 
 impl fmt::Debug for HostLoop {

@@ -1,5 +1,5 @@
-//! Process-global ops (§7.1, §7.2) installed on the realm-global
-//! `process` object.
+//! Process ops (§7.1, §7.2) installed on the `Fusor.process` object of
+//! the realm-global `Fusor` namespace.
 
 use fusor_ops::op;
 use fusor_runtime::{Context, ExecutionError, JsValue};
@@ -9,28 +9,47 @@ use crate::process::{with_process_state, with_signal_state};
 
 #[op(name = "on")]
 fn op_process_on(event: String, handler: JsValue) -> Result<(), OpError> {
-    if event != "SIGINT" {
-        return Err(OpError::of_class(
-            "RangeError",
-            format!("unsupported process event '{event}' (the alpha host supports 'SIGINT')"),
-        ));
-    }
     let _function = handler
         .clone()
         .into_function()
         .map_err(|_| OpError::type_error(1, "expected a function"))?;
-    with_process_state(|state| {
-        state.sigint_handler = Some(handler);
-    })
-    .map_err(|error| OpError::new(error.to_string()))?;
-    with_signal_state(|state| {
-        state.set_js_sigint_handler(true);
-        // A handler replaces the default policy (§7.1): a pending
-        // interrupt request from before the registration must not abort
-        // the next script.
-        state.consume_interrupt();
-    })
-    .map_err(|error| OpError::new(error.to_string()))?;
+    match event.as_str() {
+        "SIGINT" => {
+            with_process_state(|state| {
+                state.sigint_handler = Some(handler);
+            })
+            .map_err(|error| OpError::new(error.to_string()))?;
+            with_signal_state(|state| {
+                state.set_js_sigint_handler(true);
+                // A handler replaces the default policy (§7.1): a pending
+                // interrupt request from before the registration must not
+                // abort the next script.
+                state.consume_interrupt();
+            })
+            .map_err(|error| OpError::new(error.to_string()))?;
+        }
+        "uncaughtException" => {
+            with_process_state(|state| {
+                state.uncaught_handler = Some(handler);
+            })
+            .map_err(|error| OpError::new(error.to_string()))?;
+        }
+        "unhandledRejection" => {
+            with_process_state(|state| {
+                state.unhandled_rejection_handler = Some(handler);
+            })
+            .map_err(|error| OpError::new(error.to_string()))?;
+        }
+        _ => {
+            return Err(OpError::of_class(
+                "RangeError",
+                format!(
+                    "unsupported process event '{event}' (the alpha host supports \
+                     'SIGINT', 'uncaughtException', and 'unhandledRejection')"
+                ),
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -50,7 +69,7 @@ fn op_process_exit(code: f64) -> Result<(), OpError> {
     Ok(())
 }
 
-/// Installs one op on the global `process` object (§7.1).
+/// Installs one op on the `Fusor.process` object (§7.1).
 fn install_process_op<F>(
     context: &mut Context<'_>,
     declaration: super::OpDeclaration,
@@ -61,28 +80,35 @@ where
 {
     let function = context.create_host_function(declaration.name, glue)?;
     let global = context.global_object()?.into_object()?;
+    let fusor_key = context.property_key("Fusor")?;
     let process_key = context.property_key("process")?;
-    let process = global.get(context, process_key)?.into_object()?;
+    let fusor = global.get(context, fusor_key)?.into_object()?;
+    let process = fusor.get(context, process_key)?.into_object()?;
     define_op_on(context, process, declaration, function.as_value())
 }
 
-/// Installs the global `process` object and its ops (§7): a non-writable,
-/// non-enumerable, non-configurable data property on the realm global,
-/// with `process.on` (§7.1) and `process.exit` (§7.2) on it. Repeated
-/// installation is idempotent, like [`super::install_namespace`].
+/// Installs the `Fusor.process` object and its ops (§7): a non-writable,
+/// non-enumerable, non-configurable data property on the `Fusor`
+/// namespace object, with `process.on` (§7.1) and `process.exit` (§7.2)
+/// on it. Repeated installation is idempotent, like
+/// [`super::install_namespace`], and it must run after
+/// [`super::install_namespace`] so the namespace exists.
 ///
-/// `process.exit(code)` truncates the code to 8 bits and requests the
-/// exit; it does not wait for pending async ops, and the exit takes
+/// `Fusor.process.exit(code)` truncates the code to 8 bits and requests
+/// the exit; it does not wait for pending async ops, and the exit takes
 /// effect at the next turn boundary (§7.2, documented).
 ///
 /// # Errors
 ///
-/// Returns an [`ExecutionError`] when the global refuses the definitions
-/// (for example a frozen global) or allocation fails.
+/// Returns an [`ExecutionError`] when the namespace is missing, the
+/// objects refuse the definitions (for example a frozen global), or
+/// allocation fails.
 pub fn install_process(context: &mut Context<'_>) -> Result<(), ExecutionError> {
     let global = context.global_object()?.into_object()?;
+    let fusor_key = context.property_key("Fusor")?;
     let process_key = context.property_key("process")?;
-    if global.has(context, process_key.clone())? {
+    let fusor = global.get(context, fusor_key)?.into_object()?;
+    if fusor.has(context, process_key.clone())? {
         return Ok(());
     }
     let process = context.new_object()?;
@@ -97,9 +123,9 @@ pub fn install_process(context: &mut Context<'_>) -> Result<(), ExecutionError> 
     .map_err(|_| fusor_runtime::EngineFault::RuntimeInvariant {
         message: "process descriptor is data-only by construction",
     })?;
-    if !global.define_own_property(context, process_key, descriptor)? {
+    if !fusor.define_own_property(context, process_key, descriptor)? {
         return Err(fusor_runtime::EngineFault::RuntimeInvariant {
-            message: "the global refused the process object definition",
+            message: "the Fusor namespace refused the process object definition",
         }
         .into());
     }

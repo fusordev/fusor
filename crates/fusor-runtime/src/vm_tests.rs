@@ -7554,3 +7554,27 @@ fn collected_host_functions_release_their_callback_slots() {
         "collected host functions must release their callback slots"
     );
 }
+
+#[test]
+fn jsvalue_same_object_compares_heap_identity() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let first = context.new_object().expect("object");
+    let second = first.clone();
+    assert!(
+        first.same_object(&second),
+        "clones root the same heap object"
+    );
+    let other = context.new_object().expect("object");
+    assert!(
+        !first.same_object(&other),
+        "distinct heap objects are distinct identities"
+    );
+    let one = context.number(crate::JsNumber::from_i32(1));
+    let one_again = context.number(crate::JsNumber::from_i32(1));
+    assert!(
+        !one.same_object(&one_again),
+        "primitives never compare equal as heap objects"
+    );
+}

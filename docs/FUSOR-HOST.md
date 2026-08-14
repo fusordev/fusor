@@ -324,8 +324,9 @@ stdin 通道作为事件源进入同一 turn 循环(替代现在 run_with_inspec
 `tokio::signal` 作为事件源(§6.3 ③)。语义:首次 SIGINT → 触发引擎
 `InterruptHandler`(当前 JS 在指令边界抛不可捕获 `Interrupted`,REPL 中即"中断
 当前输入求值");第二次 SIGINT / SIGTERM → 强制退出,exit code = `128 + n`
-(Node 语义)。宿主可注册 JS 侧处理器(`process.on("SIGINT", ...)`,经 ops 暴露);
-默认策略:无处理器时按上述退出。
+(Node 语义)。宿主可注册 JS 侧处理器(`Fusor.process.on("SIGINT", ...)`,经 ops
+暴露);默认策略:无处理器时按上述退出。`process` 对象挂在 `Fusor` 命名空间下
+(`Fusor.process`),不占 global。
 
 ### 7.2 exit codes(文档化)
 
@@ -335,10 +336,10 @@ stdin 通道作为事件源进入同一 turn 循环(替代现在 run_with_inspec
 | uncaughtException | 1 |
 | unhandledRejection(对齐 Node 15+) | 1 |
 | 强制信号 | 128 + n |
-| `process.exit(code)` | code 截断到 8 位(Node 语义:`exit(256)` → 0) |
+| `Fusor.process.exit(code)` | code 截断到 8 位(Node 语义:`exit(256)` → 0) |
 | 资源/限制类引擎中止(instruction limit 等) | 2(引擎中止,文档化) |
 
-`process.exit(code)` 为常规 op;**退出不等待** pending 异步 op(文档化;
+`Fusor.process.exit(code)` 为常规 op;**退出不等待** pending 异步 op(文档化;
 `beforeExit` YAGNI);退出请求在下个 turn 边界生效,首个请求胜出、不可覆盖;
 中断(`Interrupted`)本身不终结进程(REPL 消费),不进表。
 

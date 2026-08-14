@@ -328,14 +328,17 @@ fn run_main_evaluates_the_main_script_then_drives_the_loop_to_idle() {
 }
 
 #[test]
-fn run_main_fails_closed_when_the_main_script_throws() {
+fn run_main_routes_a_throwing_main_script_to_the_default_exit_path() {
     let mut fixture = Fixture::new();
     let authority = compile("throw new Error('boom');");
-    assert!(
-        fixture
-            .host
-            .run_main(authority, ExecutionLimits::default())
-            .is_err(),
-        "a throwing main script fails closed with a typed error"
+    fixture
+        .host
+        .run_main(authority, ExecutionLimits::default())
+        .expect("default path");
+    assert_eq!(
+        fixture.host.pending_exit_code(),
+        Some(1),
+        "a throwing main script fails closed with the documented exit 1 (§7.3)"
     );
+    assert!(!fixture.host.alive());
 }
