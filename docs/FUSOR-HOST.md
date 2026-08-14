@@ -395,6 +395,11 @@ shutdown 期间不再 drain 微任务(文档化)。
 
 - 序列化:全部 heap records(objects + shapes + 属性表、functions、strings、atoms
   表、模块注册表、realm 表、binding cells)
+- **函数按字节码序列化**:JS Function 的 blob 记录其 verified bytecode
+  (InstalledCode),恢复时重建函数对象与闭包环境;host/native Function 不序列化
+  Rust 闭包——blob 记录"host 槽位 + op 元数据"并以 `[native code]` 标记占位,恢复
+  时宿主重建 op 闭包表并重绑定(不匹配 fail closed);native 函数
+  `Function.prototype.toString` 显示 `[native code]`
 - **Rust 闭包不可序列化**:堆内 host Function 对象解耦存储——blob 记录"host 槽位 +
   op 元数据",恢复时宿主重建 op 闭包表并重绑定;op 集按序匹配,不匹配 fail closed
 - **资源表不可序列化**(fd 等运行时资源):快照中不存资源;overlay init 创建的资源

@@ -26,7 +26,11 @@
 use std::error::Error;
 
 use super::*;
-use crate::{RuntimeLimits, value::StoredValue};
+use crate::{
+    RuntimeLimits,
+    object::{HeapObject, HeapObjectKind, ObjectRecord, PropertySlot, ShapeProperty},
+    value::StoredValue,
+};
 use fusor_compiler::CompilationContext;
 use fusor_frontend::{
     CompilationGoal, DynamicFunctionKind, DynamicFunctionSource, FrontendLimits, FrontendOptions,
@@ -7616,16 +7620,19 @@ fn js_exceptions_expose_their_origin_span() {
 #[test]
 fn snapshot_round_trips_dynamic_atoms() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
-    let realm = runtime.create_realm().expect("realm");
-    // The keys keep the dynamic atoms alive; the context must drop before
-    // the immutable snapshot borrow.
-    let keys = {
-        let mut context = runtime.context(&realm).expect("context");
-        [
-            context.property_key("fusor-dynamic-a").expect("key"),
-            context.property_key("fusor-dynamic-b").expect("key"),
-        ]
-    };
+    // Intern the dynamic atoms directly (no realm: realm creation builds
+    // exotic objects whose serializer slices land later, §8.2); the keys
+    // keep the atoms alive.
+    let keys = [
+        runtime
+            .atoms
+            .intern_string(&JsString::from_utf8("fusor-dynamic-a").expect("a"))
+            .expect("atom"),
+        runtime
+            .atoms
+            .intern_string(&JsString::from_utf8("fusor-dynamic-b").expect("b"))
+            .expect("atom"),
+    ];
     let source = runtime.atoms.snapshot_atoms();
     // The atoms payload encodes and decodes exactly (kind + code units).
     let encoded = crate::snapshot::encode_atoms(&source);
@@ -7654,15 +7661,13 @@ fn snapshot_round_trips_dynamic_atoms() {
         PredefinedAtom::COUNT as u32,
         "restore leaves the accounting clean (entries stay only while referenced)"
     );
-    // The restored runtime works: realm creation and interning succeed.
-    // The key must stay alive while the usage is read (atoms live only
-    // while referenced, §8 snapshot format).
-    let restored_realm = restored.create_realm().expect("realm");
+    // The restored runtime works: interning the same content succeeds
+    // (the atom must stay alive while the usage is read).
     let realm_atoms = restored.atom_usage().live_atoms;
-    let again = {
-        let mut restored_context = restored.context(&restored_realm).expect("context");
-        restored_context.property_key("fusor-dynamic-a").expect("key")
-    };
+    let again = restored
+        .atoms
+        .intern_string(&JsString::from_utf8("fusor-dynamic-a").expect("a"))
+        .expect("atom");
     assert_eq!(
         restored.atom_usage().live_atoms,
         realm_atoms + 1,
@@ -7675,11 +7680,12 @@ fn snapshot_round_trips_dynamic_atoms() {
 #[test]
 fn snapshot_restore_fails_closed_on_damage() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
-    let realm = runtime.create_realm().expect("realm");
-    let keys = {
-        let mut context = runtime.context(&realm).expect("context");
-        [context.property_key("fusor-dynamic-a").expect("key")]
-    };
+    let keys = [
+        runtime
+            .atoms
+            .intern_string(&JsString::from_utf8("fusor-dynamic-a").expect("a"))
+            .expect("atom"),
+    ];
     let blob = runtime.snapshot().expect("snapshot");
     drop(keys);
     let fresh = || Runtime::try_new(RuntimeLimits::default()).expect("runtime");
@@ -7726,3 +7732,143 @@ fn snapshot_restore_fails_closed_on_damage() {
 }
 
 const SNAPSHOT_MAGIC_LEN: usize = 8;
+
+#[test]
+fn snapshot_round_trips_ordinary_objects_and_shapes() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    // A synthetic object graph without a realm (the realm's intrinsics
+    // contain exotic kinds whose serializer slices land later, §8.2).
+    let key_alpha = runtime
+        .atoms
+        .intern_string(&JsString::from_utf8("alpha").expect("alpha"))
+        .expect("atom");
+    let key_beta = runtime
+        .atoms
+        .intern_string(&JsString::from_utf8("beta").expect("beta"))
+        .expect("atom");
+    let shape = Arc::new(vec![
+        ShapeProperty::from_parts(
+            PropertyKey::from_validated_atom(key_alpha.clone()),
+            PropertyLayout::data(true, true, false),
+        ),
+        ShapeProperty::from_parts(
+            PropertyKey::from_validated_atom(key_beta),
+            PropertyLayout::data(false, true, true),
+        ),
+    ]);
+    let first = runtime
+        .objects
+        .try_insert(HeapObject::ordinary(ObjectRecord::from_parts(
+            None,
+            true,
+            false,
+            Arc::clone(&shape),
+            None,
+            vec![
+                PropertySlot::Data(StoredValue::Number(JsNumber::from_f64(1.5))),
+                PropertySlot::Data(StoredValue::String(
+                    JsString::from_utf8("value").expect("value"),
+                )),
+            ],
+        )))
+        .expect("object");
+    // The second object references the first: prototype + a slot value.
+    // The shape stays aligned with the slots (engine invariant).
+    runtime
+        .objects
+        .try_insert(HeapObject::ordinary(ObjectRecord::from_parts(
+            Some(HeapReference::Object(first)),
+            false,
+            false,
+            Arc::new(vec![ShapeProperty::from_parts(
+                PropertyKey::from_validated_atom(key_alpha.clone()),
+                PropertyLayout::data(true, false, false),
+            )]),
+            None,
+            vec![PropertySlot::Data(StoredValue::Object(first))],
+        )))
+        .expect("object");
+
+    let blob = runtime.snapshot().expect("snapshot");
+    let mut restored = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    restored.from_snapshot(&blob).expect("restore");
+
+    let restored_objects: Vec<_> = restored.objects.iter().collect();
+    assert_eq!(restored_objects.len(), 2, "both objects restored");
+    let (first_id, first_object) = restored_objects[0];
+    assert!(matches!(first_object.kind(), HeapObjectKind::Ordinary));
+    let record = &first_object.record;
+    assert_eq!(record.shape().len(), 2, "the shape restored");
+    assert_eq!(record.slots().len(), 2, "the slots restored");
+    assert!(record.is_extensible());
+    assert!(matches!(
+        record.slots()[0],
+        PropertySlot::Data(StoredValue::Number(_))
+    ));
+    assert!(matches!(
+        record.slots()[1],
+        PropertySlot::Data(StoredValue::String(_))
+    ));
+    // Shape keys round-trip: the first key re-interns to the same
+    // description.
+    let restored_alpha = restored
+        .atoms
+        .intern_string(&JsString::from_utf8("alpha").expect("alpha"))
+        .expect("atom");
+    assert_eq!(
+        record.shape()[0].key().as_atom().map(|atom| {
+            atom.description().expect("description").to_utf8_lossy().expect("utf8")
+        }),
+        Some("alpha".to_owned()),
+        "the shape key content round-trips"
+    );
+    assert_eq!(
+        record.shape()[0].layout().writable(),
+        Some(true),
+        "the data layout bits round-trip"
+    );
+    let (_, second_object) = restored_objects[1];
+    let second_record = &second_object.record;
+    assert!(
+        matches!(
+            second_record.prototype(),
+            Some(HeapReference::Object(target)) if target.index() == first_id.index()
+        ),
+        "the prototype reference resolves to the restored first object"
+    );
+    assert!(
+        matches!(
+            second_record.slots()[0],
+            PropertySlot::Data(StoredValue::Object(target)) if target.index() == first_id.index()
+        ),
+        "the slot reference resolves to the restored first object"
+    );
+    drop(restored_alpha);
+}
+
+#[test]
+fn snapshot_fails_closed_on_unsupported_heap_content() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    // An accessor slot is not serializable yet (§8.2 intermediate).
+    runtime
+        .objects
+        .try_insert(HeapObject::ordinary(ObjectRecord::from_parts(
+            None,
+            true,
+            false,
+            Arc::new(Vec::new()),
+            None,
+            vec![PropertySlot::Accessor {
+                getter: None,
+                setter: None,
+            }],
+        )))
+        .expect("object");
+    assert!(
+        matches!(
+            runtime.snapshot(),
+            Err(crate::snapshot::SnapshotError::Unsupported { what: "an accessor property slot", .. })
+        ),
+        "unsupported content fails closed"
+    );
+}

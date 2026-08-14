@@ -94,9 +94,27 @@ impl WeakKey {
 }
 
 #[derive(Clone, Eq, Hash, PartialEq)]
-struct ShapeProperty {
+pub(crate) struct ShapeProperty {
     key: PropertyKey,
     layout: PropertyLayout,
+}
+
+impl ShapeProperty {
+    /// The property key (the snapshot serializer's shape content, §8.2).
+    pub(crate) const fn key(&self) -> &PropertyKey {
+        &self.key
+    }
+
+    /// The property layout (the snapshot serializer's shape content).
+    pub(crate) const fn layout(&self) -> &PropertyLayout {
+        &self.layout
+    }
+
+    /// Rebuilds a shape property from snapshot parts (the restore path,
+    /// §8.3).
+    pub(crate) const fn from_parts(key: PropertyKey, layout: PropertyLayout) -> Self {
+        Self { key, layout }
+    }
 }
 
 #[derive(Clone, Eq, Hash, PartialEq)]
@@ -1687,7 +1705,7 @@ impl ForInIterator {
     }
 }
 
-enum PropertySlot {
+pub(crate) enum PropertySlot {
     Data(StoredValue),
     Accessor {
         getter: Option<FunctionId>,
@@ -1756,6 +1774,38 @@ pub(crate) struct ObjectRecord {
     shape: Arc<Vec<ShapeProperty>>,
     shape_interner: Option<Rc<RefCell<ShapeInterner>>>,
     slots: Vec<PropertySlot>,
+}
+
+impl ObjectRecord {
+    /// The canonical property shape (the snapshot serializer's content).
+    pub(crate) fn shape(&self) -> &Arc<Vec<ShapeProperty>> {
+        &self.shape
+    }
+
+    /// The property slots, aligned with the shape (the snapshot
+    /// serializer's content).
+    pub(crate) fn slots(&self) -> &[PropertySlot] {
+        &self.slots
+    }
+
+    /// Rebuilds a record from snapshot parts (the restore path, §8.3).
+    pub(crate) fn from_parts(
+        prototype: Option<HeapReference>,
+        extensible: bool,
+        is_html_dda: bool,
+        shape: Arc<Vec<ShapeProperty>>,
+        shape_interner: Option<Rc<RefCell<ShapeInterner>>>,
+        slots: Vec<PropertySlot>,
+    ) -> Self {
+        Self {
+            prototype,
+            extensible,
+            is_html_dda,
+            shape,
+            shape_interner,
+            slots,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

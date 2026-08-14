@@ -579,6 +579,22 @@ enum PropertyLayoutRepr {
 }
 
 impl PropertyLayout {
+    /// The `[[Enumerable]]` bit (the snapshot serializer's content, §8.2).
+    pub(crate) const fn enumerable(&self) -> bool {
+        match &self.0 {
+            PropertyLayoutRepr::Data { enumerable, .. }
+            | PropertyLayoutRepr::Accessor { enumerable, .. } => *enumerable,
+        }
+    }
+
+    /// The `[[Configurable]]` bit (the snapshot serializer's content).
+    pub(crate) const fn configurable(&self) -> bool {
+        match &self.0 {
+            PropertyLayoutRepr::Data { configurable, .. }
+            | PropertyLayoutRepr::Accessor { configurable, .. } => *configurable,
+        }
+    }
+
     /// Creates an ordinary data-property layout.
     #[must_use]
     pub const fn data(writable: bool, enumerable: bool, configurable: bool) -> Self {
