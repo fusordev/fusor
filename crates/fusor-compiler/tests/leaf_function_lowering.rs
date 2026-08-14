@@ -362,30 +362,48 @@ fn deepest_leaf_checked_capture_writes_keep_assignment_and_postfix_stack_order()
         .collect::<Vec<_>>();
 
     assert_eq!(
-        instructions,
+        instructions
+            .iter()
+            .map(|(opcode, _)| *opcode)
+            .collect::<Vec<_>>(),
         [
-            (FinalOpcode::Push1, Operands::NoneInt),
-            (FinalOpcode::Dup, Operands::None),
-            (FinalOpcode::PutVarRefCheck, Operands::VarRef(0)),
-            (FinalOpcode::Drop, Operands::None),
-            (FinalOpcode::GetVarRefCheck, Operands::VarRef(0)),
-            (FinalOpcode::Push2, Operands::NoneInt),
-            (FinalOpcode::Add, Operands::None),
-            (FinalOpcode::Dup, Operands::None),
-            (FinalOpcode::PutVarRefCheck, Operands::VarRef(0)),
-            (FinalOpcode::Drop, Operands::None),
-            (FinalOpcode::GetVarRefCheck, Operands::VarRef(0)),
-            (FinalOpcode::PostInc, Operands::None),
-            (FinalOpcode::PutVarRefCheck, Operands::VarRef(0)),
-            (FinalOpcode::Return, Operands::None),
+            FinalOpcode::MakeVarRefRef,
+            FinalOpcode::Push1,
+            FinalOpcode::Insert3,
+            FinalOpcode::PutRefValue,
+            FinalOpcode::Drop,
+            FinalOpcode::MakeVarRefRef,
+            FinalOpcode::GetRefValue,
+            FinalOpcode::Push2,
+            FinalOpcode::Add,
+            FinalOpcode::Insert3,
+            FinalOpcode::PutRefValue,
+            FinalOpcode::Drop,
+            FinalOpcode::GetVarRefCheck,
+            FinalOpcode::PostInc,
+            FinalOpcode::PutVarRefCheck,
+            FinalOpcode::Return,
         ]
     );
+    // Both var-ref creations name the captured `value` atom (pool index 0);
+    // the checked postfix pair reads and writes the same variable reference
+    // slot.
+    assert_eq!(
+        instructions[0].1.atom_pool_index().map(|index| index.get()),
+        Some(0)
+    );
+    assert_eq!(
+        instructions[5].1.atom_pool_index().map(|index| index.get()),
+        Some(0)
+    );
+    assert_eq!(instructions[12].1, Operands::VarRef(0));
+    assert_eq!(instructions[14].1, Operands::VarRef(0));
     assert_eq!(flow.domains(), FunctionIndexDomains::new(2, 0, 0, 0, 1));
-    assert_eq!(flow.computed_stack_size(), 2);
+    assert_eq!(flow.computed_stack_size(), 4);
 }
 
 #[test]
-fn deepest_leaf_non_tdz_capture_uses_value_preserving_set_and_postfix_put() {
+fn deepest_leaf_non_tdz_capture_postfix_uses_the_unchecked_put() {
     let compiled = compile(
         "function outer(){ var value=0; function inner(){ value=1; return value++; } }",
         "inner",
@@ -401,16 +419,28 @@ fn deepest_leaf_non_tdz_capture_uses_value_preserving_set_and_postfix_put() {
         .collect::<Vec<_>>();
 
     assert_eq!(
-        instructions,
+        instructions
+            .iter()
+            .map(|(opcode, _)| *opcode)
+            .collect::<Vec<_>>(),
         [
-            (FinalOpcode::Push1, Operands::NoneInt),
-            (FinalOpcode::SetVarRef0, Operands::NoneVarRef),
-            (FinalOpcode::Drop, Operands::None),
-            (FinalOpcode::GetVarRef0, Operands::NoneVarRef),
-            (FinalOpcode::PostInc, Operands::None),
-            (FinalOpcode::PutVarRef0, Operands::NoneVarRef),
-            (FinalOpcode::Return, Operands::None),
+            FinalOpcode::MakeVarRefRef,
+            FinalOpcode::Push1,
+            FinalOpcode::Insert3,
+            FinalOpcode::PutRefValue,
+            FinalOpcode::Drop,
+            FinalOpcode::GetVarRef0,
+            FinalOpcode::PostInc,
+            FinalOpcode::PutVarRef0,
+            FinalOpcode::Return,
         ]
+    );
+    // The var-ref creation names the captured `value` atom (pool index 0);
+    // the non-TDZ postfix pair reads and writes the unboxed variable
+    // reference slot.
+    assert_eq!(
+        instructions[0].1.atom_pool_index().map(|index| index.get()),
+        Some(0)
     );
     assert_eq!(
         compiled.control_flow().domains(),
@@ -460,9 +490,9 @@ fn unsupported_leaf_shapes_fail_closed_at_source_spans() {
             "function nested() {}",
         ),
         (
-            "function f(arg) { const fixed = 1; fixed = arg; return fixed; }",
-            UnsupportedLeafFeature::UnsupportedReference,
-            "fixed",
+            "function f(arg) { class A {} return arg; }",
+            UnsupportedLeafFeature::NestedExecutable,
+            "class A {}",
         ),
     ];
 
