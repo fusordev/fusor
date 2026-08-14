@@ -226,6 +226,81 @@ fn repl_forwards_syntax_errors_to_the_inspector() {
 }
 
 #[test]
+fn console_evaluations_expand_map_entries_over_the_wire() {
+    // The `[[Entries]]` handle must be expandable end to end: the internal
+    // property carries a registered objectId, and getProperties on it
+    // returns the internal#entry rows the frontend renders as `key => value`.
+    let (mut child, port) = spawn_inspected_repl();
+    let mut client = WebSocketClient::connect(port);
+    client.send(&serde_json::json!({"id": 1, "method": "Runtime.enable", "params": {}}));
+    client.recv_until(|message| {
+        message.get("method").and_then(|method| method.as_str())
+            == Some("Runtime.executionContextCreated")
+    });
+
+    client.send(&serde_json::json!({
+        "id": 2,
+        "method": "Runtime.evaluate",
+        "params": {"expression": "new Map([['a', 1]])", "objectGroup": "console"},
+    }));
+    let evaluated = client.recv_until(|message| message.get("id").and_then(|id| id.as_i64()) == Some(2));
+    let map_id = evaluated["result"]["result"]["objectId"]
+        .as_str()
+        .expect("map objectId")
+        .to_owned();
+    client.send(&serde_json::json!({
+        "id": 3,
+        "method": "Runtime.getProperties",
+        "params": {"objectId": map_id, "ownProperties": true},
+    }));
+    let properties = client.recv_until(|message| message.get("id").and_then(|id| id.as_i64()) == Some(3));
+    let internal = properties["result"]["internalProperties"]
+        .as_array()
+        .expect("internal properties");
+    let entries = internal
+        .iter()
+        .find(|entry| entry["name"] == "[[Entries]]")
+        .expect("[[Entries]] entry")
+        .clone();
+    assert_eq!(entries["value"]["description"], "Map(1)");
+    let entries_id = entries["value"]["objectId"]
+        .as_str()
+        .expect("expandable entries objectId")
+        .to_owned();
+
+    client.send(&serde_json::json!({
+        "id": 4,
+        "method": "Runtime.getProperties",
+        "params": {"objectId": entries_id},
+    }));
+    let expanded = client.recv_until(|message| message.get("id").and_then(|id| id.as_i64()) == Some(4));
+    let rows = expanded["result"]["result"].as_array().expect("entry rows");
+    assert_eq!(rows.len(), 1, "one live entry row: {rows:?}");
+    assert_eq!(rows[0]["name"], "0");
+    assert_eq!(rows[0]["value"]["subtype"], "internal#entry");
+    let row_preview = rows[0]["value"]["preview"]["properties"]
+        .as_array()
+        .expect("row preview");
+    assert_eq!(row_preview[0]["name"], "key");
+    assert_eq!(row_preview[0]["value"], "a");
+    assert_eq!(row_preview[1]["name"], "value");
+    assert_eq!(row_preview[1]["value"], "1");
+
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin")
+        .write_all(b".exit\n")
+        .expect("write exit");
+    let output = child.wait_with_output().expect("wait for repl");
+    assert!(
+        output.status.success(),
+        "repl failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn console_evaluations_emit_exception_thrown_events() {
     // V8-aligned: a DevTools-console evaluation failure surfaces twice —
     // the response carries exceptionDetails and an exceptionThrown event
@@ -566,26 +641,45 @@ fn repl_fires_timers_while_waiting_for_input() {
         stdin.flush().expect("flush stdin");
     }
     // The REPL now waits for the next line; the timer must fire during the
-    // wait, not after the next entry. The window is generous because the
-    // suite spawns binaries under parallel load.
-    std::thread::sleep(std::time::Duration::from_millis(1200));
+    // wait, not after the next entry. Poll stdout until the callback's
+    // output appears — a fixed sleep window is load-sensitive under
+    // parallel test runs.
+    let stdout = child.stdout.take().expect("stdout");
+    let lines: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let collector = std::sync::Arc::clone(&lines);
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            collector.lock().expect("collector").push(line);
+        }
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        if lines
+            .lock()
+            .expect("collector")
+            .iter()
+            .any(|line| line.contains("fired"))
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the timer must fire while the REPL waits for input: {:?}",
+            lines.lock().expect("collector")
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
     child
         .stdin
         .as_mut()
         .expect("stdin")
         .write_all(b".exit\n")
         .expect("write exit");
-    let output = child.wait_with_output().expect("wait for repl");
+    let output = child.wait().expect("wait for repl");
     assert!(
-        output.status.success(),
-        "repl failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("fired"),
-        "the timer must fire while the REPL waits for input: stdout={stdout:?} stderr={:?}",
-        String::from_utf8_lossy(&output.stderr)
+        output.success(),
+        "repl failed"
     );
 }
 

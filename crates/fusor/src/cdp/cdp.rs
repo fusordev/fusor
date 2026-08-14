@@ -332,7 +332,9 @@ impl DebugSession {
                             "lineNumber": line,
                             "columnNumber": column,
                             "url": source_name,
+                            "scriptId": source_name,
                             "exception": {"type": "object", "subtype": "error", "description": text},
+                            "executionContextId": 1,
                         }
                     }),
                 )
@@ -670,6 +672,25 @@ fn upgrade_websocket(stream: &mut TcpStream, headers: &HashMap<String, String>) 
     stream.write_all(response.as_bytes())
 }
 
+/// Reports whether the CDP frame trace is enabled (`FUSOR_CDP_TRACE=1`).
+///
+/// The trace prints every inbound and outbound protocol frame to stderr,
+/// prefixed `[cdp]`, so a real DevTools session can be diagnosed against the
+/// wire protocol it produces.
+fn cdp_trace_enabled() -> bool {
+    static TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *TRACE.get_or_init(|| {
+        std::env::var("FUSOR_CDP_TRACE").is_ok_and(|value| value == "1")
+    })
+}
+
+/// Logs one protocol frame to stderr when the CDP trace is enabled.
+fn trace_frame(direction: &str, message: &Value) {
+    if cdp_trace_enabled() {
+        eprintln!("[cdp] {direction} {message}");
+    }
+}
+
 fn serve_websocket(stream: TcpStream, session: Arc<DebugSession>) -> io::Result<()> {
     let (outbound_sender, outbound_receiver) = mpsc::channel();
     let client_id = session.attach_client(outbound_sender.clone());
@@ -677,7 +698,10 @@ fn serve_websocket(stream: TcpStream, session: Arc<DebugSession>) -> io::Result<
     let writer_handle = thread::spawn(move || {
         while let Ok(frame) = outbound_receiver.recv() {
             let result = match frame {
-                OutboundFrame::Json(message) => write_websocket_json(&mut writer, &message),
+                OutboundFrame::Json(message) => {
+                    trace_frame("<-", &message);
+                    write_websocket_json(&mut writer, &message)
+                }
                 OutboundFrame::Pong(payload) => write_websocket_frame(&mut writer, 0xA, &payload),
             };
             if result.is_err() {
@@ -699,7 +723,10 @@ fn serve_websocket(stream: TcpStream, session: Arc<DebugSession>) -> io::Result<
             }
             WebSocketFrame::Text(text) => {
                 let response = match serde_json::from_str::<Value>(&text) {
-                    Ok(message) => session.handle_protocol(message),
+                    Ok(message) => {
+                        trace_frame("->", &message);
+                        session.handle_protocol(message)
+                    }
                     Err(error) => {
                         protocol_error(Value::Null, -32700, &format!("invalid JSON: {error}"))
                     }

@@ -2128,8 +2128,10 @@ fn exception_details(
         "lineNumber": line,
         "columnNumber": column,
         "url": url,
+        "scriptId": url,
         "stackTrace": stack_trace,
         "exception": exception,
+        "executionContextId": 1,
     })
 }
 
