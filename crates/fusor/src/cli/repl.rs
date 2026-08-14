@@ -134,7 +134,7 @@ pub(crate) async fn run(inspect_port: Option<u16>, inspect_break: bool) -> u8 {
     )));
     let entry_prefix = format!("file://{}", cwd.display());
 
-    eprintln!("fusor REPL (host sugar, not a spec module record). .exit or Ctrl-D to quit.");
+    eprintln!("Project Fusor REPL. Early Preview. Type .exit or Ctrl-D to quit.");
 
     if let (Some(session), Some(debug_requests)) = (debug_session, debug_requests) {
         // The inspector path installs a suppression-gated print sink: eager
@@ -246,7 +246,7 @@ fn spawn_input_reader() -> mpsc::UnboundedReceiver<Option<String>> {
             }
         };
         loop {
-            match editor.readline("fusor> ") {
+            match editor.readline("> ") {
                 Ok(line) => {
                     let _ = editor.add_history_entry(line.as_str());
                     if input_sender.send(Some(line)).is_err() {
