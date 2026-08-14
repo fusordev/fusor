@@ -110,7 +110,26 @@ pub fn op(attribute: TokenStream, item: TokenStream) -> TokenStream {
         .map(|(index, (name, ty))| {
             let index_literal = syn::Index::from(index);
             let type_text = quote!(#ty).to_string().replace(' ', "");
-            if type_text.ends_with("ResourceId") {
+            if type_text == "JsValue" || type_text == "fusor_runtime::JsValue" {
+                // A JsValue parameter passes through untouched (function
+                // callbacks, raw values the op inspects itself).
+                quote! {
+                    let #name: #ty = match arguments.next() {
+                        ::std::option::Option::Some(value) => value.clone(),
+                        ::std::option::Option::None => {
+                            return ::std::result::Result::Err(
+                                ::fusor_host::ops::op_error_value(
+                                    ctx,
+                                    ::fusor_host::ops::OpError::type_error(
+                                        #index_literal,
+                                        "missing argument",
+                                    ),
+                                ),
+                            );
+                        }
+                    };
+                }
+            } else if type_text.ends_with("ResourceId") {
                 quote! {
                     let #name: #ty = match arguments.next() {
                         ::std::option::Option::Some(value) => {

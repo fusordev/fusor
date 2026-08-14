@@ -9,5 +9,10 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+// The `#[op]` macro expansions reference this crate through absolute
+// `::fusor_host::` paths (they must also work from integration tests);
+// this binding makes those paths resolve inside the crate itself.
+extern crate self as fusor_host;
+
 pub mod r#loop;
 pub mod ops;

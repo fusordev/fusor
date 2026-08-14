@@ -4,6 +4,7 @@
 mod op_runtime;
 mod resources;
 mod serde;
+mod timers;
 
 pub use op_runtime::{
     OpRuntime, OpRuntimeError, install_op_runtime, pending_op_count, poll_op_completions,
@@ -13,6 +14,7 @@ pub use resources::{
     Resource, ResourceId, ResourceTable, ResourceTableError,
 };
 pub use serde::{DeserializationError, JsValueDeserializer, JsValueSerializer, SerializationError};
+pub use timers::install_timers;
 
 use fusor_runtime::{Context, JsValue};
 use std::collections::HashMap;

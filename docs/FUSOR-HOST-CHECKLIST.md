@@ -76,14 +76,15 @@
 
 ## 子项目 3:事件循环核心(fusor-host::loop)§6
 
-- [x] `HostLoop`(Tokio current_thread)持续存活,非一次性 drain
+- [x] `HostLoop` 持续存活,非一次性 drain(虚拟时钟同步驱动;Tokio executor 随 §7 信号源回归)
 - [x] turn 结构:事件处理 → `drain_host_jobs` 至静止 → 无事件时 select
-- [ ] 事件源:timers、异步 op 完成 mpsc、信号、`Atomics.waitAsync` deadline、自定义事件
-- [ ] timers ops + timer 记录堆(到期排序、同刻创建序、ms 向下取整、负值归 0)
-- [ ] `setImmediate` 队列语义(当前 turn 事件处理后、drain 前)
+- [x] 事件源:timers(虚拟时钟)、异步 op 完成 mpsc(§5.5)、自定义事件
+- [ ] `Atomics.waitAsync` deadline 事件源(阻塞:引擎惰性信号接口未定,随子项目 4 信号工作一并接;信号事件源在子项目 4 首条)
+- [x] timers ops + timer 记录堆(到期排序、同刻创建序、ms 向下取整、负值归 0)
+- [x] `setImmediate` 队列语义(当前 turn 事件处理后、drain 前)
 - [x] alive 判定(pending timers / 异步 op 队列);无 alive 且无 pending → 退出(可配置)
-- [ ] `run_main` / `run_until_idle` API
-- [ ] 测试:虚拟时钟全 timer 场景;job 间不插入宿主回调(规范断言);退出条件矩阵
+- [x] `run_main`(Global Script 权威字节码)/ `run_until_idle` API(§6.5 builder 形式随子项目 6)
+- [x] 测试:虚拟时钟全 timer 场景;job 间不插入宿主回调(规范断言);退出条件矩阵
 
 ## 子项目 4:进程生命周期与诊断(fusor-host::process)§7
 

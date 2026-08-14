@@ -9,10 +9,10 @@ description = "Host adapter for Project Fusor: ops binding, event loop, process 
 [dependencies]
 fusor-runtime = { path = "../fusor-runtime" }
 fusor-ops = { path = "../fusor-ops" }
+fusor-bytecode = { path = "../fusor-bytecode" }
 serde = { workspace = true }
 tokio = { workspace = true }
 
 [dev-dependencies]
-fusor-bytecode = { path = "../fusor-bytecode" }
 fusor-compiler = { path = "../fusor-compiler" }
 fusor-frontend = { path = "../fusor-frontend" }
