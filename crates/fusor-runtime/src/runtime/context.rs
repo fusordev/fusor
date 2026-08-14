@@ -2003,11 +2003,35 @@ impl Context<'_> {
         kind: crate::ErrorObjectKind,
         message: &str,
     ) -> Result<JsValue, crate::ExecutionError> {
+        self.error_with_stack(kind, message, "")
+    }
+
+    /// Creates a fresh Error object of one intrinsic family with an
+    /// installed `stack` text (ECMA-262 §20.5), the same materialization
+    /// path interpreter-thrown exceptions use.
+    ///
+    /// The object carries the family's prototype (`%SyntaxError.prototype%`
+    /// for [`crate::ErrorObjectKind::SyntaxError`]) and the observable
+    /// `stack` property renders from the supplied text, so hosts (for
+    /// example a DevTools console) can display engine-created errors with
+    /// the V8-shaped `Name: message` header.
+    ///
+    /// # Errors
+    ///
+    /// Returns a string error when `message` or `stack` is not valid UTF-16,
+    /// or a limit, allocation, or engine error when the object cannot be
+    /// materialized.
+    pub fn error_with_stack(
+        &mut self,
+        kind: crate::ErrorObjectKind,
+        message: &str,
+        stack: &str,
+    ) -> Result<JsValue, crate::ExecutionError> {
         let object = self.runtime.materialize_error_object_of_family(
             self.realm,
             super::ErrorIntrinsicKind::from_error_object_kind(kind),
             JsString::from_utf8(message)?,
-            None,
+            Some(JsString::from_utf8(stack)?),
         )?;
         self.runtime.public_value(StoredValue::Object(object))
     }

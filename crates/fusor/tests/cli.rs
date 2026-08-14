@@ -304,8 +304,8 @@ fn console_evaluations_expand_map_entries_over_the_wire() {
 fn console_evaluations_emit_exception_thrown_events() {
     // V8-aligned: a DevTools-console evaluation failure surfaces twice —
     // the response carries exceptionDetails and an exceptionThrown event
-    // renders the red console entry. This is the `Runtime.evaluate` path
-    // the frontend uses, distinct from the terminal REPL path above.
+    // renders the red console entry. The response precedes the event on the
+    // wire: the frontend deduplicates the console entry by that order.
     let (mut child, port) = spawn_inspected_repl();
     let mut client = WebSocketClient::connect(port);
     client.send(&serde_json::json!({"id": 1, "method": "Runtime.enable", "params": {}}));
@@ -319,14 +319,25 @@ fn console_evaluations_emit_exception_thrown_events() {
         "method": "Runtime.evaluate",
         "params": {"expression": "1 +", "replMode": true, "userGesture": true},
     }));
+    let response = client.recv_until(|message| message.get("id").and_then(|id| id.as_i64()) == Some(2));
+    assert!(
+        response["result"]["exceptionDetails"]["text"]
+            .as_str()
+            .is_some_and(|text| text.starts_with("Uncaught SyntaxError:")),
+        "the response carries the V8-prefixed diagnostic: {response}"
+    );
+    assert_eq!(
+        response["result"]["exceptionDetails"]["exception"]["className"], "SyntaxError",
+        "the exception object names the concrete family"
+    );
     let event = client.recv_until(|message| {
         message.get("method").and_then(|method| method.as_str())
             == Some("Runtime.exceptionThrown")
     });
     let details = &event["params"]["exceptionDetails"];
-    assert!(
-        details["text"].as_str().is_some_and(|text| !text.is_empty()),
-        "the event renders the syntax diagnostic: {details}"
+    assert_eq!(
+        details["exceptionId"], response["result"]["exceptionDetails"]["exceptionId"],
+        "the event reuses the response's exception identity"
     );
 
     child

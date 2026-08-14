@@ -446,6 +446,23 @@ pub enum ExceptionKind {
     UriError,
 }
 
+impl ExceptionKind {
+    /// The ECMAScript constructor name of the error family, e.g.
+    /// `"SyntaxError"`, used for the `Name: message` stack header and error
+    /// display.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::InternalError => "InternalError",
+            Self::RangeError => "RangeError",
+            Self::ReferenceError => "ReferenceError",
+            Self::SyntaxError => "SyntaxError",
+            Self::TypeError => "TypeError",
+            Self::UriError => "URIError",
+        }
+    }
+}
+
 /// Intrinsic Error family carried by a JavaScript Error object.
 ///
 /// This is distinct from [`ExceptionKind`]: explicit JavaScript `throw`

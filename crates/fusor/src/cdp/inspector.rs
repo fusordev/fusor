@@ -654,6 +654,27 @@ fn object_class(
     {
         label = binding.to_owned();
         class_name = binding.to_owned();
+    } else if subtype == Some("error")
+        && let Some(kind) = context.error_object_kind(value).ok().flatten()
+    {
+        // V8 reports the concrete error family, not the shared
+        // `@@toStringTag` ("Error" for every family per ECMA-262 §20.5.1).
+        let name = match kind {
+            fusor_runtime::ErrorObjectKind::Error => "Error",
+            fusor_runtime::ErrorObjectKind::EvalError => "EvalError",
+            fusor_runtime::ErrorObjectKind::RangeError => "RangeError",
+            fusor_runtime::ErrorObjectKind::ReferenceError => "ReferenceError",
+            fusor_runtime::ErrorObjectKind::SyntaxError => "SyntaxError",
+            fusor_runtime::ErrorObjectKind::TypeError => "TypeError",
+            fusor_runtime::ErrorObjectKind::UriError => "URIError",
+            fusor_runtime::ErrorObjectKind::InternalError => "InternalError",
+            fusor_runtime::ErrorObjectKind::AggregateError => "AggregateError",
+        };
+        class_name = name.to_owned();
+        label = match reflect_string(context, intrinsics, value, "message") {
+            Some(message) if !message.is_empty() => format!("{name}: {message}"),
+            _ => name.to_owned(),
+        };
     } else if subtype.is_none()
         && let Some(constructor) = constructor_name(context, intrinsics, value)
     {
@@ -813,13 +834,21 @@ pub fn exception_thrown_event(
     url: &str,
 ) -> Value {
     let (text, line, column, stack_trace, exception_remote) = match exception {
-        CliException::Compile { text, line, column } => (
-            text.clone(),
-            *line,
-            *column,
-            json!({}),
-            json!({"type": "object", "subtype": "error", "description": text}),
-        ),
+        CliException::Compile { text, line, column } => {
+            // V8 prefixes console syntax failures with `Uncaught` and sends a
+            // real SyntaxError object as the exception.
+            let uncaught = format!("Uncaught SyntaxError: {text}");
+            let exception_remote = match intrinsics {
+                Some(intrinsics) => syntax_error_remote(context, state, intrinsics, text, url, *line, *column),
+                None => json!({
+                    "type": "object",
+                    "subtype": "error",
+                    "className": "SyntaxError",
+                    "description": format!("SyntaxError: {text}"),
+                }),
+            };
+            (uncaught, *line, *column, json!({"callFrames": []}), exception_remote)
+        }
         CliException::Execution(error) => {
             let (text, line, column, stack_trace) =
                 execution_error_position(context, intrinsics, error, source);
@@ -827,10 +856,10 @@ pub fn exception_thrown_event(
             (text, line, column, stack_trace, exception_remote)
         }
         CliException::Message(message) => (
-            message.clone(),
+            format!("Uncaught {message}"),
             0,
             0,
-            json!({}),
+            json!({"callFrames": []}),
             json!({"type": "object", "subtype": "error", "description": message}),
         ),
     };
@@ -861,6 +890,37 @@ pub fn evaluation_exception_event(response: &Value) -> Option<Value> {
     }))
 }
 
+/// Renders a syntax failure as a real `SyntaxError` object the way V8
+/// reports console parse errors: an expandable error `RemoteObject` with the
+/// `SyntaxError` class, registered for the frontend to inspect, carrying the
+/// V8 console stack (`Name: message` header plus the evaluation frame).
+fn syntax_error_remote(
+    context: &mut Context<'_>,
+    state: &mut InspectState,
+    intrinsics: &InspectIntrinsics,
+    message: &str,
+    url: &str,
+    line: u64,
+    column: u64,
+) -> Value {
+    let stack = format!(
+        "SyntaxError: {message}\n    at <anonymous> ({url}:{}:{})",
+        line + 1,
+        column + 1
+    );
+    match context.error_with_stack(
+        fusor_runtime::ErrorObjectKind::SyntaxError,
+        message,
+        &stack,
+    ) {
+        Ok(object) => remote_object(context, &mut state.objects, intrinsics, &object, None, true),
+        Err(_) => {
+            let description = format!("SyntaxError: {message}");
+            json!({"type": "object", "subtype": "error", "className": "SyntaxError", "description": description})
+        }
+    }
+}
+
 /// Renders one execution failure as `(text, line, column, stackTrace)` for
 /// CDP `exceptionDetails`, using the retained exception's own position and
 /// message when the engine kept one.
@@ -881,12 +941,15 @@ fn execution_error_position(
         };
         return (text, line, column, exception_stack_trace(exception));
     }
-    (error.to_string(), 0, 0, json!({}))
+    (error.to_string(), 0, 0, json!({"callFrames": []}))
 }
 
 /// Renders the thrown exception of one execution failure as an expandable
-/// `RemoteObject` when the engine retained the actual value, and as a
-/// synthetic error description otherwise.
+/// `RemoteObject`. When the engine retained the actual value it renders
+/// directly; escaped engine errors (interpreter-thrown `TypeError`s,
+/// `ReferenceError`s, dynamic-function `SyntaxError`s) carry no rooted
+/// value, so an equivalent family object is materialized through the
+/// engine's canonical path with the retained frames rendered as its stack.
 fn execution_error_remote_object(
     context: &mut Context<'_>,
     state: &mut InspectState,
@@ -899,7 +962,61 @@ fn execution_error_remote_object(
     {
         return remote_object(context, &mut state.objects, intrinsics, value, None, true);
     }
+    if let ExecutionError::Exception(exception) = error
+        && let Some(intrinsics) = intrinsics
+        && let Some(remote) = engine_error_remote_object(context, state, intrinsics, exception)
+    {
+        return remote;
+    }
     json!({"type": "object", "subtype": "error", "description": error.to_string()})
+}
+
+/// Materializes one escaped engine error (no rooted thrown value) as an
+/// expandable family object: `eval('@')` and `null.x` render the way V8
+/// renders them, with the `Name: message` stack header and the retained
+/// caller frames.
+fn engine_error_remote_object(
+    context: &mut Context<'_>,
+    state: &mut InspectState,
+    intrinsics: &InspectIntrinsics,
+    exception: &fusor_runtime::JsException,
+) -> Option<Value> {
+    let kind = exception.kind()?;
+    let message = exception
+        .message()?
+        .to_utf8_lossy()
+        .ok()?;
+    let family = match kind {
+        fusor_runtime::ExceptionKind::RangeError => fusor_runtime::ErrorObjectKind::RangeError,
+        fusor_runtime::ExceptionKind::ReferenceError => {
+            fusor_runtime::ErrorObjectKind::ReferenceError
+        }
+        fusor_runtime::ExceptionKind::SyntaxError => fusor_runtime::ErrorObjectKind::SyntaxError,
+        fusor_runtime::ExceptionKind::TypeError => fusor_runtime::ErrorObjectKind::TypeError,
+        fusor_runtime::ExceptionKind::InternalError | fusor_runtime::ExceptionKind::UriError => {
+            fusor_runtime::ErrorObjectKind::Error
+        }
+    };
+    let mut stack = format!("{}: {message}\n", kind.name());
+    for frame in exception.caller_frames() {
+        let (line, column) =
+            source_position(frame.source_text(), frame.source_span().start() as usize);
+        stack.push_str(&format!(
+            "    at <anonymous> ({}:{}:{})\n",
+            frame.source_name(),
+            line + 1,
+            column + 1
+        ));
+    }
+    let object = context.error_with_stack(family, &message, &stack).ok()?;
+    Some(remote_object(
+        context,
+        &mut state.objects,
+        intrinsics,
+        &object,
+        None,
+        true,
+    ))
 }
 
 /// Renders one live value as a CDP `RemoteObject`.
@@ -1081,18 +1198,28 @@ fn call_function_on_request(
                 Err(error) => {
                     let (text, line, column) =
                         script_compile_error_position(&error, &function_source);
+                    let uncaught = format!("Uncaught SyntaxError: {text}");
+                    let exception_remote = syntax_error_remote(
+                        context,
+                        state,
+                        intrinsics,
+                        &text,
+                        "console",
+                        line,
+                        column,
+                    );
                     return protocol_result(
                         id,
                         json!({
-                            "result": {"type": "object", "subtype": "error", "description": text},
+                            "result": {"type": "object", "subtype": "error", "description": uncaught},
                             "exceptionDetails": exception_details(
                                 state,
-                                &text,
+                                &uncaught,
                                 line,
                                 column,
                                 "console",
-                                json!({}),
-                                json!({"type": "object", "subtype": "error", "description": text}),
+                                json!({"callFrames": []}),
+                                exception_remote,
                             ),
                         }),
                     );
@@ -1784,18 +1911,20 @@ fn evaluate_request(
             }
             Err(error) => {
                 let (text, line, column) = script_compile_error_position(&error, expression);
+                let uncaught = format!("Uncaught SyntaxError: {text}");
+                let exception_remote = syntax_error_remote(context, state, intrinsics, &text, &source_name, line, column);
                 return protocol_result(
                     id,
                     json!({
-                        "result": {"type": "object", "subtype": "error", "description": text},
+                        "result": {"type": "object", "subtype": "error", "description": uncaught},
                         "exceptionDetails": exception_details(
                             state,
-                            &text,
+                            &uncaught,
                             line,
                             column,
                             &source_name,
-                            json!({}),
-                            json!({"type": "object", "subtype": "error", "description": text}),
+                            json!({"callFrames": []}),
+                            exception_remote,
                         ),
                     }),
                 );
@@ -2227,9 +2356,9 @@ fn script_error_position(
                 })
                 .unwrap_or_default();
             let (line, column) = source_position(source, diagnostic.1);
-            (diagnostic.0, line, column, json!({}))
+            (diagnostic.0, line, column, json!({"callFrames": []}))
         }
-        other => (other.to_string(), 0, 0, json!({})),
+        other => (other.to_string(), 0, 0, json!({"callFrames": []})),
     }
 }
 
@@ -3557,7 +3686,7 @@ mod tests {
                 "<repl>:9",
             );
             let details = &event["params"]["exceptionDetails"];
-            assert_eq!(details["text"], "module link failed");
+            assert_eq!(details["text"], "Uncaught module link failed");
             assert_eq!(details["url"], "<repl>:9");
         });
     }

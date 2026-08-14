@@ -521,8 +521,11 @@ fn reject_parked_import(
     kind: ExceptionKind,
     message: &str,
 ) -> Result<(), ExecutionError> {
-    let object =
-        runtime.materialize_error_object(realm, kind, JsString::from_utf8(message)?, None)?;
+    let message = JsString::from_utf8(message)?;
+    // Host-driven rejections carry no interpreter frames; the stack still
+    // opens with the V8 `Name: message` header.
+    let stack = JsString::from_utf8(&format!("{}: ", kind.name()))?.concat(&message)?;
+    let object = runtime.materialize_error_object(realm, kind, message, Some(stack))?;
     settle_parked_import(runtime, promise, StoredValue::Object(object), true)
 }
 
@@ -546,7 +549,9 @@ pub(crate) fn module_error_rejection_value(
             return Ok(value.stored()?.duplicate());
         }
         if let (Some(kind), Some(message)) = (exception.kind(), exception.message()) {
-            let object = runtime.materialize_error_object(realm, kind, message.clone(), None)?;
+            let stack =
+                JsString::from_utf8(&format!("{}: ", kind.name()))?.concat(&message.clone())?;
+            let object = runtime.materialize_error_object(realm, kind, message.clone(), Some(stack))?;
             return Ok(StoredValue::Object(object));
         }
     }
@@ -554,12 +559,9 @@ pub(crate) fn module_error_rejection_value(
         crate::ModuleErrorPhase::Link => ExceptionKind::SyntaxError,
         crate::ModuleErrorPhase::Evaluate => ExceptionKind::TypeError,
     };
-    let object = runtime.materialize_error_object(
-        realm,
-        kind,
-        JsString::from_utf8(error.message())?,
-        None,
-    )?;
+    let message = JsString::from_utf8(error.message())?;
+    let stack = JsString::from_utf8(&format!("{}: ", kind.name()))?.concat(&message.clone())?;
+    let object = runtime.materialize_error_object(realm, kind, message, Some(stack))?;
     Ok(StoredValue::Object(object))
 }
 
