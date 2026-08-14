@@ -854,7 +854,7 @@ pub fn exception_thrown_event(
                     "description": format!("SyntaxError: {text}"),
                 }),
             };
-            (uncaught, *line, *column, json!({"callFrames": []}), exception_remote)
+            (uncaught, *line, *column, single_frame_stack_trace(url, *line, *column), exception_remote)
         }
         CliException::Execution(error) => {
             let (text, line, column, stack_trace) =
@@ -875,26 +875,6 @@ pub fn exception_thrown_event(
         "method": "Runtime.exceptionThrown",
         "params": {"timestamp": event_timestamp_ms(), "exceptionDetails": details},
     })
-}
-
-/// Builds the `Runtime.exceptionThrown` event for one engine-bound
-/// evaluation whose response carries `exceptionDetails` (a `Runtime.evaluate`
-/// or `Runtime.callFunctionOn` failure), reusing the response's exception
-/// identity so the frontend pairs the console entry with its error.
-///
-/// V8-aligned: console evaluations surface their errors both as the
-/// response's `exceptionDetails` and as an `exceptionThrown` event, which is
-/// what renders the red console error entry. Successful evaluations return
-/// `None`.
-pub fn evaluation_exception_event(response: &Value) -> Option<Value> {
-    let details = response
-        .get("result")?
-        .get("exceptionDetails")?
-        .clone();
-    Some(json!({
-        "method": "Runtime.exceptionThrown",
-        "params": {"timestamp": event_timestamp_ms(), "exceptionDetails": details},
-    }))
 }
 
 /// Renders a syntax failure as a real `SyntaxError` object the way V8
@@ -1230,7 +1210,7 @@ fn call_function_on_request(
                                 line,
                                 column,
                                 "console",
-                                json!({"callFrames": []}),
+                                single_frame_stack_trace("console", line, column),
                                 exception_remote,
                             ),
                         }),
@@ -1945,7 +1925,7 @@ fn evaluate_request(
                             line,
                             column,
                             &source_name,
-                            json!({"callFrames": []}),
+                            single_frame_stack_trace(&source_name, line, column),
                             exception_remote,
                         ),
                     }),
@@ -2371,6 +2351,18 @@ fn exception_remote_object(
         return remote;
     }
     json!({"type": "object", "subtype": "error", "description": error.to_string()})
+}
+
+/// Builds the single-frame `StackTrace` V8 reports for console syntax
+/// failures: the evaluation frame itself, at the diagnostic position.
+fn single_frame_stack_trace(url: &str, line: u64, column: u64) -> Value {
+    json!({"callFrames": [{
+        "functionName": "",
+        "scriptId": url,
+        "url": url,
+        "lineNumber": line,
+        "columnNumber": column,
+    }]})
 }
 
 /// Builds the CDP `StackTrace` for one escaped JavaScript exception from the
@@ -3792,7 +3784,7 @@ mod tests {
     }
 
     #[test]
-    fn console_evaluations_emit_exception_thrown_events() {
+    fn console_evaluations_report_exceptions_in_the_response_alone() {
         with_engine(|context, state, intrinsics| {
             let response = protocol(
                 context,
@@ -3803,19 +3795,18 @@ mod tests {
             );
             let details = &response["result"]["exceptionDetails"];
             assert!(
-                details["text"].as_str().is_some_and(|text| !text.is_empty()),
-                "the response carries the syntax diagnostic"
+                details["text"]
+                    .as_str()
+                    .is_some_and(|text| text.starts_with("Uncaught SyntaxError:")),
+                "the response carries the V8-prefixed diagnostic: {details}"
             );
-            let event = evaluation_exception_event(&response).expect("exception event");
-            assert_eq!(event["method"], "Runtime.exceptionThrown");
             assert_eq!(
-                event["params"]["exceptionDetails"]["exceptionId"],
-                details["exceptionId"],
-                "the event reuses the response's exception identity"
+                details["exception"]["className"], "SyntaxError",
+                "the exception object names the concrete family"
             );
             assert!(
-                event["params"]["timestamp"].is_u64(),
-                "the event carries the wall-clock timestamp"
+                details["exception"]["objectId"].is_string(),
+                "the exception object is expandable"
             );
 
             let clean = protocol(
@@ -3826,8 +3817,8 @@ mod tests {
                 serde_json::json!({"expression": "1 + 1"}),
             );
             assert!(
-                evaluation_exception_event(&clean).is_none(),
-                "successful evaluations emit no event"
+                clean["result"].get("exceptionDetails").is_none(),
+                "successful evaluations carry no exceptionDetails"
             );
         });
     }

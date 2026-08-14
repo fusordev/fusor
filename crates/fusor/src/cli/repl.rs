@@ -335,7 +335,7 @@ async fn run_with_inspector(
         let remaining = host_loop.next_deadline_in();
         tokio::select! {
             Some(request) = debug_requests.recv() => {
-                let response_slot: Rc<RefCell<Option<(serde_json::Value, Option<serde_json::Value>)>>> =
+                let response_slot: Rc<RefCell<Option<serde_json::Value>>> =
                     Rc::new(RefCell::new(None));
                 let slot = Rc::clone(&response_slot);
                 let session_handle = Arc::clone(&session);
@@ -344,26 +344,20 @@ async fn run_with_inspector(
                 let suppressed = Rc::clone(&print_suppressed);
                 let message = request.message;
                 host_loop.post_event(Box::new(move |context| {
-                    let (response, exception_event) = session_handle.handle_engine_protocol(
+                    let response = session_handle.handle_engine_protocol(
                         context,
                         &mut inspect.borrow_mut(),
                         intrinsics.borrow().as_ref().expect("CDP intrinsics prepared"),
                         &suppressed,
                         message,
                     );
-                    // The frontend deduplicates the console entry by wire
-                    // order: the response precedes the exceptionThrown event
-                    // (V8-aligned).
-                    *slot.borrow_mut() = Some((response, exception_event));
+                    *slot.borrow_mut() = Some(response);
                     Ok(())
                 }));
                 if let Err(error) = host_loop.run_one_turn() {
                     eprintln!("fusor: CDP request failed: {error}");
                     continue;
                 }
-                // The transport writes the response frame and then the
-                // exceptionThrown event in sequence: the frontend deduplicates
-                // the console entry by that wire order (V8-aligned).
                 let _ = request
                     .response
                     .send(response_slot.replace(None).expect("CDP response rendered"));

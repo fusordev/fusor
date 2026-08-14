@@ -69,32 +69,38 @@ impl WebSocketClient {
         self.stream.write_all(&frame).expect("frame write");
     }
 
+    /// Reads one text frame, or `None` on timeout/close.
+    fn recv_frame(&mut self) -> Option<serde_json::Value> {
+        let mut header = [0_u8; 2];
+        self.stream.read_exact(&mut header).ok()?;
+        let length = match header[1] & 0x7F {
+            126 => {
+                let mut extended = [0_u8; 2];
+                self.stream.read_exact(&mut extended).ok()?;
+                u16::from_be_bytes(extended) as usize
+            }
+            127 => {
+                let mut extended = [0_u8; 8];
+                self.stream.read_exact(&mut extended).ok()?;
+                u64::from_be_bytes(extended) as usize
+            }
+            length => length as usize,
+        };
+        let mut payload = vec![0_u8; length];
+        self.stream.read_exact(&mut payload).ok()?;
+        if header[0] & 0x0F != 0x1 {
+            return None;
+        }
+        serde_json::from_slice(&payload).ok()
+    }
+
     /// Reads server frames until one matches the predicate; other frames are
     /// ignored. Server frames are unmasked.
     fn recv_until(&mut self, matches: impl Fn(&serde_json::Value) -> bool) -> serde_json::Value {
         loop {
-            let mut header = [0_u8; 2];
-            self.stream.read_exact(&mut header).expect("frame header");
-            let length = match header[1] & 0x7F {
-                126 => {
-                    let mut extended = [0_u8; 2];
-                    self.stream.read_exact(&mut extended).expect("extended length");
-                    u16::from_be_bytes(extended) as usize
-                }
-                127 => {
-                    let mut extended = [0_u8; 8];
-                    self.stream.read_exact(&mut extended).expect("extended length");
-                    u64::from_be_bytes(extended) as usize
-                }
-                length => length as usize,
-            };
-            let mut payload = vec![0_u8; length];
-            self.stream.read_exact(&mut payload).expect("frame payload");
-            if header[0] & 0x0F != 0x1 {
-                continue;
-            }
-            let message: serde_json::Value =
-                serde_json::from_slice(&payload).expect("decode frame");
+            let message = self
+                .recv_frame()
+                .expect("frame within the socket timeout");
             if matches(&message) {
                 return message;
             }
@@ -301,11 +307,11 @@ fn console_evaluations_expand_map_entries_over_the_wire() {
 }
 
 #[test]
-fn console_evaluations_emit_exception_thrown_events() {
-    // V8-aligned: a DevTools-console evaluation failure surfaces twice —
-    // the response carries exceptionDetails and an exceptionThrown event
-    // renders the red console entry. The response precedes the event on the
-    // wire: the frontend deduplicates the console entry by that order.
+fn console_evaluations_report_exceptions_in_the_response_alone() {
+    // V8-aligned: a failing DevTools-console evaluation surfaces through the
+    // response's exceptionDetails alone — no wire-level exceptionThrown event
+    // follows (the event channel is for terminal REPL entries; sending both
+    // makes the frontend render the console entry twice).
     let (mut child, port) = spawn_inspected_repl();
     let mut client = WebSocketClient::connect(port);
     client.send(&serde_json::json!({"id": 1, "method": "Runtime.enable", "params": {}}));
@@ -320,25 +326,32 @@ fn console_evaluations_emit_exception_thrown_events() {
         "params": {"expression": "1 +", "replMode": true, "userGesture": true},
     }));
     let response = client.recv_until(|message| message.get("id").and_then(|id| id.as_i64()) == Some(2));
+    let details = &response["result"]["exceptionDetails"];
     assert!(
-        response["result"]["exceptionDetails"]["text"]
+        details["text"]
             .as_str()
             .is_some_and(|text| text.starts_with("Uncaught SyntaxError:")),
         "the response carries the V8-prefixed diagnostic: {response}"
     );
     assert_eq!(
-        response["result"]["exceptionDetails"]["exception"]["className"], "SyntaxError",
+        details["exception"]["className"], "SyntaxError",
         "the exception object names the concrete family"
     );
-    let event = client.recv_until(|message| {
-        message.get("method").and_then(|method| method.as_str())
-            == Some("Runtime.exceptionThrown")
-    });
-    let details = &event["params"]["exceptionDetails"];
-    assert_eq!(
-        details["exceptionId"], response["result"]["exceptionDetails"]["exceptionId"],
-        "the event reuses the response's exception identity"
-    );
+    // No exceptionThrown event may follow: the frontend doubles the entry
+    // when both the response and the event surface the same failure.
+    client.stream.set_read_timeout(Some(Duration::from_millis(800))).expect("timeout");
+    loop {
+        let frame = client.recv_frame();
+        let Some(message) = frame else {
+            break; // quiet line — no event arrived
+        };
+        assert_ne!(
+            message.get("method").and_then(|method| method.as_str()),
+            Some("Runtime.exceptionThrown"),
+            "console evaluations must not emit exceptionThrown: {message}"
+        );
+    }
+    client.stream.set_read_timeout(Some(Duration::from_secs(15))).expect("timeout");
 
     child
         .stdin

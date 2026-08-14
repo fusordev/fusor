@@ -32,9 +32,7 @@ const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 /// A protocol request that requires the runtime-owning task.
 pub struct EngineRequest {
     pub message: Value,
-    /// The protocol response plus, for failing evaluations, the
-    /// `Runtime.exceptionThrown` event to send after it.
-    pub response: mpsc::Sender<(Value, Option<Value>)>,
+    pub response: mpsc::Sender<Value>,
 }
 
 /// Shared state for the CDP transport and the engine debugger hook.
@@ -171,11 +169,7 @@ impl DebugSession {
         self.resume.notify_all();
     }
 
-    /// Handles one protocol message, returning the response plus (for
-    /// engine-bound failing evaluations) the exceptionThrown event that must
-    /// follow it on the wire: the frontend deduplicates the console entry by
-    /// that order.
-    fn handle_protocol(&self, message: Value) -> (Value, Option<Value>) {
+    fn handle_protocol(&self, message: Value) -> Value {
         let id = message.get("id").cloned().unwrap_or(Value::Null);
         let method = message
             .get("method")
@@ -259,7 +253,7 @@ impl DebugSession {
             method if is_engine_bound_method(method) => return self.forward_to_engine(id, message),
             _ => protocol_error(id, -32601, &format!("unsupported CDP method: {method}")),
         };
-        (response, None)
+        response
     }
 
     /// Handles one engine-bound protocol request on the runtime-owning task.
@@ -272,10 +266,11 @@ impl DebugSession {
     /// evaluation) additionally raise the caller's print-suppression flag so
     /// host output stays silent during a side-effect probe.
     ///
-    /// Returns the protocol response plus, for failing evaluations, the
-    /// V8-aligned `Runtime.exceptionThrown` event. The caller must send the
-    /// response first and the event second: the frontend deduplicates the
-    /// console entry by that order.
+    /// V8-aligned: failing console evaluations surface their errors through
+    /// the response's exceptionDetails alone — no wire-level
+    /// exceptionThrown event (the event channel is for terminal REPL
+    /// entries and page scripts; the frontend renders both when both are
+    /// sent, doubling the console entry).
     pub fn handle_engine_protocol(
         &self,
         context: &mut Context<'_>,
@@ -283,15 +278,12 @@ impl DebugSession {
         intrinsics: &super::inspector::InspectIntrinsics,
         suppress_print: &std::cell::Cell<bool>,
         message: Value,
-    ) -> (Value, Option<Value>) {
+    ) -> Value {
         if lock_state(&self.state).paused {
-            return (
-                protocol_error(
-                    message.get("id").cloned().unwrap_or(Value::Null),
-                    -32000,
-                    "runtime evaluation is unavailable while the debugger is paused",
-                ),
-                None,
+            return protocol_error(
+                message.get("id").cloned().unwrap_or(Value::Null),
+                -32000,
+                "runtime evaluation is unavailable while the debugger is paused",
             );
         }
         let suppress = message
@@ -305,16 +297,7 @@ impl DebugSession {
         self.servicing_engine_request
             .store(false, Ordering::Release);
         suppress_print.set(previous);
-        // V8-aligned: console evaluations surface their failures both as the
-        // response's exceptionDetails and as an exceptionThrown event, which
-        // is what renders the red console error entry. Eager side-effect
-        // probes stay silent.
-        let event = if suppress {
-            None
-        } else {
-            super::inspector::evaluation_exception_event(&response)
-        };
-        (response, event)
+        response
     }
 
     fn compile_script_request(&self, id: Value, params: &Value) -> Value {
@@ -358,26 +341,20 @@ impl DebugSession {
         }
     }
 
-    fn forward_to_engine(&self, id: Value, message: Value) -> (Value, Option<Value>) {
+    fn forward_to_engine(&self, id: Value, message: Value) -> Value {
         if lock_state(&self.state).paused {
-            return (
-                protocol_error(
-                    id,
-                    -32000,
-                    "Runtime.evaluate is unavailable while the debugger is paused",
-                ),
-                None,
+            return protocol_error(
+                id,
+                -32000,
+                "Runtime.evaluate is unavailable while the debugger is paused",
             );
         }
         let (response_sender, response_receiver) = mpsc::channel();
         let Some(engine_sender) = &self.engine_sender else {
-            return (
-                protocol_error(
-                    id,
-                    -32000,
-                    "Runtime.evaluate is unavailable for this target",
-                ),
-                None,
+            return protocol_error(
+                id,
+                -32000,
+                "Runtime.evaluate is unavailable for this target",
             );
         };
         if engine_sender
@@ -387,14 +364,11 @@ impl DebugSession {
             })
             .is_err()
         {
-            return (protocol_error(id, -32000, "debug target is unavailable"), None);
+            return protocol_error(id, -32000, "debug target is unavailable");
         }
-        response_receiver.recv().unwrap_or_else(|_| {
-            (
-                protocol_error(id, -32000, "debug target stopped responding"),
-                None,
-            )
-        })
+        response_receiver
+            .recv()
+            .unwrap_or_else(|_| protocol_error(id, -32000, "debug target stopped responding"))
     }
 
     fn set_breakpoint_by_url(&self, id: Value, params: &Value) -> Value {
@@ -747,22 +721,16 @@ fn serve_websocket(stream: TcpStream, session: Arc<DebugSession>) -> io::Result<
                 }
             }
             WebSocketFrame::Text(text) => {
-                let (response, event) = match serde_json::from_str::<Value>(&text) {
+                let response = match serde_json::from_str::<Value>(&text) {
                     Ok(message) => {
                         trace_frame("->", &message);
                         session.handle_protocol(message)
                     }
-                    Err(error) => (
-                        protocol_error(Value::Null, -32700, &format!("invalid JSON: {error}")),
-                        None,
-                    ),
+                    Err(error) => {
+                        protocol_error(Value::Null, -32700, &format!("invalid JSON: {error}"))
+                    }
                 };
                 if outbound_sender.send(OutboundFrame::Json(response)).is_err() {
-                    break Ok(());
-                }
-                if let Some(event) = event
-                    && outbound_sender.send(OutboundFrame::Json(event)).is_err()
-                {
                     break Ok(());
                 }
             }
@@ -1037,7 +1005,7 @@ mod tests {
     #[test]
     fn compile_script_reports_syntax_errors_without_an_engine() {
         let session = DebugSession::without_engine();
-        let (response, _) = session.handle_protocol(json!({
+        let response = session.handle_protocol(json!({
             "id": 1,
             "method": "Runtime.compileScript",
             "params": {"expression": "function (", "sourceURL": "broken.js"},
@@ -1053,7 +1021,7 @@ mod tests {
     #[test]
     fn compile_script_accepts_valid_scripts_without_an_engine() {
         let session = DebugSession::without_engine();
-        let (response, _) = session.handle_protocol(json!({
+        let response = session.handle_protocol(json!({
             "id": 2,
             "method": "Runtime.compileScript",
             "params": {"expression": "1 + 1", "sourceURL": "ok.js"},
@@ -1065,7 +1033,7 @@ mod tests {
     #[test]
     fn compile_script_tolerates_an_empty_source_url() {
         let session = DebugSession::without_engine();
-        let (response, _) = session.handle_protocol(json!({
+        let response = session.handle_protocol(json!({
             "id": 3,
             "method": "Runtime.compileScript",
             "params": {"expression": "1 + 1", "sourceURL": ""},
@@ -1090,7 +1058,7 @@ mod tests {
             "Runtime.getHeapUsage",
             "Runtime.getIsolateId",
         ] {
-            let (response, _) = session.handle_protocol(json!({"id": 3, "method": method}));
+            let response = session.handle_protocol(json!({"id": 3, "method": method}));
             assert_eq!(
                 response["error"]["code"], -32000,
                 "{method} must route through the engine channel"
