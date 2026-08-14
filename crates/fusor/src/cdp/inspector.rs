@@ -2016,9 +2016,11 @@ fn object_preview(
         class.subtype,
         Some("map") | Some("set") | Some("weakmap") | Some("weakset")
     );
+    let promise = class.subtype == Some("promise");
     // Collection previews render their live entries (V8 shows
-    // `Map(2) {1 => 2, 3 => 4}`), not the `size` field.
-    let fields = if collection {
+    // `Map(2) {1 => 2, 3 => 4}`), not the `size` field; Promise previews
+    // render the state (`Promise {<pending>}`).
+    let fields = if collection || promise {
         None
     } else {
         standard_preview_fields(class.subtype)
@@ -2039,6 +2041,8 @@ fn object_preview(
     };
     let mut properties = if collection {
         collection_preview_rows(context, intrinsics, value, cap)
+    } else if promise {
+        promise_preview_rows(context, intrinsics, value)
     } else {
         keys.iter()
             .filter(|key| !array_like || is_array_index_key(key))
@@ -2150,6 +2154,44 @@ fn collection_preview_count(context: &mut Context<'_>, value: &JsValue) -> usize
         Some(fusor_runtime::CollectionInspection::Values(values)) => values.len(),
         None => 0,
     }
+}
+
+/// The V8 Promise preview rows: the `[[PromiseState]]` string plus the
+/// `[[PromiseResult]]` value preview — the frontend renders them as
+/// `Promise {<pending>}` / `Promise {<fulfilled>: 5}`.
+fn promise_preview_rows(
+    context: &mut Context<'_>,
+    intrinsics: &InspectIntrinsics,
+    value: &JsValue,
+) -> Vec<Value> {
+    let inspection = match context.promise_inspection(value).ok().flatten() {
+        Some(inspection) => inspection,
+        None => return Vec::new(),
+    };
+    let (state, result): (&str, Option<&JsValue>) = match &inspection {
+        PromiseInspection::Pending => ("pending", None),
+        PromiseInspection::Fulfilled(value) => ("fulfilled", Some(value)),
+        PromiseInspection::Rejected(value) => ("rejected", Some(value)),
+    };
+    let mut rows = vec![json!({
+        "name": "[[PromiseState]]",
+        "type": "string",
+        "value": state,
+    })];
+    match result {
+        Some(value) => {
+            if let Some(entry) =
+                preview_entry(context, intrinsics, "[[PromiseResult]]", value, 0)
+            {
+                rows.push(entry);
+            }
+        }
+        None => rows.push(json!({
+            "name": "[[PromiseResult]]",
+            "type": "undefined",
+        })),
+    }
+    rows
 }
 
 /// The V8 entry preview rows of one collection: alternating
@@ -3541,6 +3583,41 @@ mod tests {
             .iter()
             .find(|entry| entry["name"] == name)
             .unwrap_or_else(|| panic!("missing internal property {name}: {internal:?}"))
+    }
+
+    #[test]
+    fn promise_previews_report_the_state() {
+        with_engine(|context, state, intrinsics| {
+            let evaluated = protocol(
+                context,
+                state,
+                intrinsics,
+                "Runtime.evaluate",
+                serde_json::json!({"expression": "new Promise(() => {})", "generatePreview": true}),
+            );
+            let preview = &evaluated["result"]["result"]["preview"];
+            assert_eq!(preview["subtype"], "promise");
+            let names: Vec<&str> = preview["properties"]
+                .as_array()
+                .expect("preview properties")
+                .iter()
+                .map(|entry| entry["name"].as_str().expect("name"))
+                .collect();
+            assert_eq!(names, vec!["[[PromiseState]]", "[[PromiseResult]]"]);
+            assert_eq!(preview["properties"][0]["value"], "pending");
+            assert_eq!(preview["properties"][1]["type"], "undefined");
+
+            let fulfilled = protocol(
+                context,
+                state,
+                intrinsics,
+                "Runtime.evaluate",
+                serde_json::json!({"expression": "Promise.resolve(5)", "generatePreview": true}),
+            );
+            let preview = &fulfilled["result"]["result"]["preview"];
+            assert_eq!(preview["properties"][0]["value"], "fulfilled");
+            assert_eq!(preview["properties"][1]["value"], "5");
+        });
     }
 
     #[test]
