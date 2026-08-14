@@ -91,6 +91,18 @@ impl WeakKey {
             Self::Function(_) | Self::Object(_) => None,
         }
     }
+
+    /// Converts the weak identity back into a stored value when the referent
+    /// is still reachable; dead referents return `None`. Heap referents are
+    /// returned by arena ID without a liveness check — the caller decides
+    /// whether the ID still names a live object.
+    pub(crate) fn stored_value(&self) -> Option<StoredValue> {
+        match self {
+            Self::Symbol(symbol) => symbol.upgrade().map(StoredValue::Symbol),
+            Self::Function(function) => Some(StoredValue::Function(*function)),
+            Self::Object(object) => Some(StoredValue::Object(*object)),
+        }
+    }
 }
 
 #[derive(Clone, Eq, Hash, PartialEq)]
@@ -1143,6 +1155,15 @@ impl MapState {
             .flat_map(|entry| [&entry.key, &entry.value])
     }
 
+    /// Iterates the live `(key, value)` pairs in insertion order, skipping
+    /// deleted tombstones.
+    pub(crate) fn live_entries(&self) -> impl Iterator<Item = (&StoredValue, &StoredValue)> {
+        self.entries
+            .iter()
+            .filter(|entry| entry.live)
+            .map(|entry| (entry.key(), entry.value()))
+    }
+
     pub(crate) fn get(&self, key: &StoredValue) -> Option<&StoredValue> {
         self.index
             .get(&MapKey::from_value(key))
@@ -1366,6 +1387,12 @@ impl WeakMapState {
 /// Non-enumerable `[[WeakSetData]]` indexed by non-owning language identities.
 pub(crate) struct WeakSetState {
     entries: HashSet<WeakKey>,
+}
+
+impl WeakSetState {
+    pub(crate) fn entries(&self) -> impl Iterator<Item = &WeakKey> {
+        self.entries.iter()
+    }
 }
 
 /// The non-owning `[[WeakRefTarget]]` slot of one `WeakRef` instance.
@@ -2965,6 +2992,25 @@ impl TypedArrayElementType {
         }
     }
 
+    /// The ECMAScript constructor name of the typed-array family.
+    #[must_use]
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Int8 => "Int8Array",
+            Self::Uint8 => "Uint8Array",
+            Self::Uint8Clamped => "Uint8ClampedArray",
+            Self::Int16 => "Int16Array",
+            Self::Uint16 => "Uint16Array",
+            Self::Int32 => "Int32Array",
+            Self::Uint32 => "Uint32Array",
+            Self::BigInt64 => "BigInt64Array",
+            Self::BigUint64 => "BigUint64Array",
+            Self::Float16 => "Float16Array",
+            Self::Float32 => "Float32Array",
+            Self::Float64 => "Float64Array",
+        }
+    }
+
     #[must_use]
     pub(crate) const fn is_bigint(self) -> bool {
         matches!(self, Self::BigInt64 | Self::BigUint64)
@@ -3166,6 +3212,18 @@ impl ArrayBufferState {
     #[must_use]
     pub(crate) const fn resizable_max_byte_length(&self) -> Option<usize> {
         self.max_byte_length
+    }
+
+    /// Copies up to `limit` live bytes for host inspection. Detached buffers
+    /// have no data and return an empty copy.
+    pub(crate) fn copy_bytes(&self, limit: usize) -> Vec<u8> {
+        match &self.data {
+            Some(ArrayBufferData::Local(data)) => data.iter().take(limit).copied().collect(),
+            Some(ArrayBufferData::Shared(block)) => block.with_bytes(|bytes| {
+                bytes.iter().take(limit).copied().collect::<Vec<_>>()
+            }),
+            None => Vec::new(),
+        }
     }
 
     pub(crate) fn replace_data(&mut self, data: Vec<u8>) -> Option<Vec<u8>> {

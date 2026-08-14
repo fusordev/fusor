@@ -26,15 +26,16 @@
 //! Public execution-context values plus verified root installation and execution.
 
 use super::{
-    Arc, AtomError, BytecodeFunction, CompilerExecutableKind, Context, DynamicFunctionScriptError,
-    EnvironmentBinding, ErrorObjectKind, ExceptionKind, ExecutionLimits, Function,
-    FunctionImplementation, GlobalScriptError, HandleError, HandleKind, HeapFunction, HeapObject,
-    HeapReference,
+    Arc, AtomError, BoxedPrimitive, BytecodeFunction, CompilerExecutableKind, Context,
+    DataViewByteLength, DynamicFunctionScriptError, EnvironmentBinding, ErrorObjectKind,
+    ExceptionKind, ExecutionLimits, Function, FunctionImplementation, GlobalScriptError,
+    HandleError, HandleKind, HeapFunction, HeapObject, HeapReference,
     InstallError, InstalledCode, InstalledRoot, InstalledTemplate, JsNumber, JsString, JsValue,
     ObjectId, ObjectRecord, OrdinaryDynamicFunctionCompiler, PendingRootEnvironment,
-    PredefinedAtom, PrimitiveValue, PropertyKey, PropertyLayout, RootPublication, Runtime,
-    RuntimeResource, RuntimeUsage, StoredValue, VerifiedBytecode, check_install_limit,
-    global_declaration_error, preflight_opcodes, require_root_kind, usize_to_u64,
+    PredefinedAtom, PrimitiveValue, PromiseState, PropertyKey, PropertyLayout, RootPublication,
+    Runtime, RuntimeResource, RuntimeUsage, StoredValue, TypedArrayLength, VerifiedBytecode,
+    WeakKey, check_install_limit, global_declaration_error, preflight_opcodes, require_root_kind,
+    usize_to_u64,
 };
 use crate::SharedArrayBufferHandle;
 
@@ -161,6 +162,94 @@ fn build_root_function_records(
         prototype,
         property_count: usize_to_u64(function_property_count + usize::from(has_prototype)),
     })
+}
+
+/// The specification-level state of one ECMAScript Promise (ECMA-262
+/// §27.2.1), returned by [`Context::promise_inspection`] for host inspection.
+#[derive(Debug)]
+pub enum PromiseInspection {
+    /// The promise is unsettled (`[[PromiseState]]` is `pending`).
+    Pending,
+    /// The promise is fulfilled; the rooted `[[PromiseResult]]` value.
+    Fulfilled(JsValue),
+    /// The promise is rejected; the rooted `[[PromiseResult]]` reason.
+    Rejected(JsValue),
+}
+
+/// The specification-level slots of one Proxy exotic object (ECMA-262
+/// §10.5), returned by [`Context::proxy_inspection`] for host inspection.
+///
+/// Revocation (§10.5.12) clears both strong edges; `revoked` reports that
+/// state explicitly so a cleared proxy stays distinguishable from a proxy
+/// whose handler or target was a legitimate `null`-ish slot.
+#[derive(Debug)]
+pub struct ProxyInspection {
+    /// The rooted `[[ProxyHandler]]`, or `None` when revoked.
+    pub handler: Option<JsValue>,
+    /// The rooted `[[ProxyTarget]]`, or `None` when revoked.
+    pub target: Option<JsValue>,
+    /// Whether `Proxy.revocable` revocation has run.
+    pub revoked: bool,
+}
+
+/// The ordered internal-slot contents of one Map, Set, WeakMap, or WeakSet
+/// object, returned by [`Context::collection_inspection`] for host
+/// inspection.
+#[derive(Debug)]
+pub enum CollectionInspection {
+    /// The ordered `[[MapData]]` / `[[WeakMapData]]` key/value pairs, each
+    /// rooted as a fresh public root.
+    Entries(Vec<(JsValue, JsValue)>),
+    /// The ordered `[[SetData]]` / `[[WeakSetData]]` values, each rooted as
+    /// a fresh public root.
+    Values(Vec<JsValue>),
+}
+
+/// The byte-data slots of one `ArrayBuffer` or `SharedArrayBuffer` object,
+/// returned by [`Context::array_buffer_inspection`] for host inspection.
+#[derive(Debug)]
+pub struct ArrayBufferInspection {
+    /// The live `[[ArrayBufferByteLength]]`.
+    pub byte_length: usize,
+    /// The `[[ArrayBufferMaxByteLength]]`, present only for resizable
+    /// buffers.
+    pub max_byte_length: Option<usize>,
+    /// Whether the buffer is detached (no live data block).
+    pub detached: bool,
+    /// Whether the buffer is a `SharedArrayBuffer`.
+    pub shared: bool,
+}
+
+/// The view slots of one `DataView` object, returned by
+/// [`Context::data_view_inspection`] for host inspection.
+#[derive(Debug)]
+pub struct DataViewInspection {
+    /// The rooted `[[ViewedArrayBuffer]]`.
+    pub buffer: JsValue,
+    /// The `[[ByteOffset]]`.
+    pub byte_offset: usize,
+    /// The `[[ByteLength]]`, or `None` for a length-tracking view over a
+    /// resizable buffer.
+    pub byte_length: Option<usize>,
+}
+
+/// The view slots of one typed-array exotic object, returned by
+/// [`Context::typed_array_inspection`] for host inspection.
+#[derive(Debug)]
+pub struct TypedArrayInspection {
+    /// The rooted `[[ViewedArrayBuffer]]`.
+    pub buffer: JsValue,
+    /// The `[[ByteOffset]]`.
+    pub byte_offset: usize,
+    /// The `[[TypedArrayLength]]`, or `None` for a length-tracking view over
+    /// a resizable buffer.
+    pub length: Option<usize>,
+    /// The ECMAScript constructor name of the element family, e.g.
+    /// `"Uint8Array"`.
+    pub element_name: &'static str,
+    /// The view's byte length (element width times element count), or `None`
+    /// for a length-tracking view.
+    pub byte_length: Option<usize>,
 }
 
 impl Context<'_> {
@@ -436,6 +525,480 @@ impl Context<'_> {
             })?
             .proxy_state()
             .is_some())
+    }
+
+    /// Returns the specification-level state of one Promise object
+    /// (ECMA-262 §27.2.1) for host inspection, rooting the settled value or
+    /// rejection reason as a fresh public root.
+    ///
+    /// Non-Promise values return `None`. This reads internal slots only and
+    /// runs no observable JavaScript.
+    ///
+    /// # Errors
+    ///
+    /// Returns a handle error for an orphaned, foreign, or stale value, an
+    /// engine fault if the runtime heap does not contain the object, or a
+    /// limit/allocation failure while rooting the settled value.
+    pub fn promise_inspection(
+        &mut self,
+        value: &JsValue,
+    ) -> Result<Option<crate::PromiseInspection>, crate::ExecutionError> {
+        let owner = value.owner()?;
+        self.runtime.validate_owner(&owner, HandleKind::Value)?;
+        let StoredValue::Object(object) = value.stored()? else {
+            return Ok(None);
+        };
+        enum Settled {
+            NotAPromise,
+            Pending,
+            Fulfilled(StoredValue),
+            Rejected(StoredValue),
+        }
+        let settled = {
+            let entry = self.runtime.objects.get(*object).ok_or(
+                crate::EngineFault::StaleHeapEdge {
+                    edge: "object",
+                    index: object.index(),
+                    generation: object.generation(),
+                },
+            )?;
+            match entry.promise_state() {
+                Some(PromiseState::Pending { .. }) => Settled::Pending,
+                Some(PromiseState::Fulfilled(value)) => Settled::Fulfilled(value.duplicate()),
+                Some(PromiseState::Rejected { reason, .. }) => Settled::Rejected(reason.duplicate()),
+                None => Settled::NotAPromise,
+            }
+        };
+        Ok(match settled {
+            Settled::NotAPromise => None,
+            Settled::Pending => Some(crate::PromiseInspection::Pending),
+            Settled::Fulfilled(value) => Some(crate::PromiseInspection::Fulfilled(
+                self.runtime.public_value(value)?,
+            )),
+            Settled::Rejected(reason) => Some(crate::PromiseInspection::Rejected(
+                self.runtime.public_value(reason)?,
+            )),
+        })
+    }
+
+    /// Returns the specification-level slots of one Proxy exotic object
+    /// (ECMA-262 §10.5) for host inspection, rooting the handler and target
+    /// as fresh public roots when present.
+    ///
+    /// Non-Proxy values return `None`. Revocation (ECMA-262 §10.5.12) clears
+    /// both strong edges; `revoked` reports that state explicitly. This reads
+    /// internal slots only and runs no observable JavaScript.
+    ///
+    /// # Errors
+    ///
+    /// Returns a handle error for an orphaned, foreign, or stale value, an
+    /// engine fault if the runtime heap does not contain the object, or a
+    /// limit/allocation failure while rooting the handler or target.
+    pub fn proxy_inspection(
+        &mut self,
+        value: &JsValue,
+    ) -> Result<Option<crate::ProxyInspection>, crate::ExecutionError> {
+        let owner = value.owner()?;
+        self.runtime.validate_owner(&owner, HandleKind::Value)?;
+        let StoredValue::Object(object) = value.stored()? else {
+            return Ok(None);
+        };
+        let Some(state) = self
+            .runtime
+            .objects
+            .get(*object)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "object",
+                index: object.index(),
+                generation: object.generation(),
+            })?
+            .proxy_state()
+            .copied()
+        else {
+            return Ok(None);
+        };
+        let mut root = |reference: Option<HeapReference>| {
+            reference.map_or(Ok(None), |reference| {
+                let stored = match reference {
+                    HeapReference::Function(function) => StoredValue::Function(function),
+                    HeapReference::Object(object) => StoredValue::Object(object),
+                };
+                self.runtime.public_value(stored).map(Some)
+            })
+        };
+        Ok(Some(crate::ProxyInspection {
+            handler: root(state.handler)?,
+            target: root(state.target)?,
+            revoked: state.handler.is_none() && state.target.is_none(),
+        }))
+    }
+
+    /// Returns the ordered entries of one Map, Set, WeakMap, or WeakSet
+    /// object for host inspection, rooting every key and value as a fresh
+    /// public root.
+    ///
+    /// Non-collection values return `None`. Weak-collection keys that have
+    /// already died are skipped: the garbage collector clears those entries
+    /// at its next pass, so they never become observable inspection results.
+    /// This reads internal slots only and runs no observable JavaScript.
+    ///
+    /// # Errors
+    ///
+    /// Returns a handle error for an orphaned, foreign, or stale value, an
+    /// engine fault if the runtime heap does not contain the object, or a
+    /// limit/allocation failure while rooting any entry.
+    pub fn collection_inspection(
+        &mut self,
+        value: &JsValue,
+    ) -> Result<Option<crate::CollectionInspection>, crate::ExecutionError> {
+        let owner = value.owner()?;
+        self.runtime.validate_owner(&owner, HandleKind::Value)?;
+        let StoredValue::Object(object) = value.stored()? else {
+            return Ok(None);
+        };
+        let object_entry = self.runtime.objects.get(*object).ok_or(
+            crate::EngineFault::StaleHeapEdge {
+                edge: "object",
+                index: object.index(),
+                generation: object.generation(),
+            },
+        )?;
+        #[derive(Clone, Copy)]
+        enum Shape {
+            None,
+            Map,
+            Set,
+            WeakMap,
+            WeakSet,
+        }
+        let shape = if object_entry.map_state().is_some() {
+            Shape::Map
+        } else if object_entry.set_state().is_some() {
+            Shape::Set
+        } else if object_entry.weak_map_state().is_some() {
+            Shape::WeakMap
+        } else if object_entry.weak_set_state().is_some() {
+            Shape::WeakSet
+        } else {
+            Shape::None
+        };
+        let stored_entries: Vec<(StoredValue, StoredValue)> = match shape {
+            Shape::None => return Ok(None),
+            Shape::Map => object_entry
+                .map_state()
+                .expect("matched map")
+                .live_entries()
+                .map(|(key, value)| (key.duplicate(), value.duplicate()))
+                .collect(),
+            Shape::Set => object_entry
+                .set_state()
+                .expect("matched set")
+                .map_state()
+                .live_entries()
+                .map(|(key, _)| (key.duplicate(), StoredValue::Undefined))
+                .collect(),
+            Shape::WeakMap => object_entry
+                .weak_map_state()
+                .expect("matched weak map")
+                .ephemeron_entries()
+                .filter_map(|(key, value)| {
+                    self.live_weak_key(key)
+                        .map(|stored| (stored, value.duplicate()))
+                })
+                .collect(),
+            Shape::WeakSet => object_entry
+                .weak_set_state()
+                .expect("matched weak set")
+                .entries()
+                .filter_map(|key| {
+                    self.live_weak_key(key)
+                        .map(|stored| (stored, StoredValue::Undefined))
+                })
+                .collect(),
+        };
+        match shape {
+            Shape::Map | Shape::WeakMap => {
+                let mut entries = Vec::with_capacity(stored_entries.len());
+                for (key, value) in stored_entries {
+                    entries.push(self.runtime.public_value_pair(key, value)?);
+                }
+                Ok(Some(crate::CollectionInspection::Entries(entries)))
+            }
+            Shape::Set | Shape::WeakSet => {
+                let mut values = Vec::with_capacity(stored_entries.len());
+                for (key, _) in stored_entries {
+                    values.push(self.runtime.public_value(key)?);
+                }
+                Ok(Some(crate::CollectionInspection::Values(values)))
+            }
+            Shape::None => unreachable!("handled above"),
+        }
+    }
+
+    /// Converts one weak-collection key into its stored value when the
+    /// referent is still live in this runtime's arenas.
+    fn live_weak_key(&self, key: &WeakKey) -> Option<StoredValue> {
+        let stored = key.stored_value()?;
+        let live = match &stored {
+            StoredValue::Function(function) => self.runtime.functions.get(*function).is_some(),
+            StoredValue::Object(object) => self.runtime.objects.get(*object).is_some(),
+            _ => true,
+        };
+        live.then_some(stored)
+    }
+
+    /// Returns the byte-data slots of one `ArrayBuffer` or
+    /// `SharedArrayBuffer` object for host inspection.
+    ///
+    /// Non-buffer values return `None`. This reads internal slots only and
+    /// runs no observable JavaScript.
+    ///
+    /// # Errors
+    ///
+    /// Returns a handle error for an orphaned, foreign, or stale value, or an
+    /// engine fault if the runtime heap does not contain the object.
+    pub fn array_buffer_inspection(
+        &self,
+        value: &JsValue,
+    ) -> Result<Option<crate::ArrayBufferInspection>, crate::ExecutionError> {
+        let owner = value.owner()?;
+        self.runtime.validate_owner(&owner, HandleKind::Value)?;
+        let StoredValue::Object(object) = value.stored()? else {
+            return Ok(None);
+        };
+        let Some(state) = self
+            .runtime
+            .objects
+            .get(*object)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "object",
+                index: object.index(),
+                generation: object.generation(),
+            })?
+            .array_buffer_state()
+        else {
+            return Ok(None);
+        };
+        Ok(Some(crate::ArrayBufferInspection {
+            byte_length: state.byte_length(),
+            max_byte_length: state.resizable_max_byte_length(),
+            detached: state.is_detached(),
+            shared: state.is_shared(),
+        }))
+    }
+
+    /// Copies up to `limit` live bytes of one `ArrayBuffer` or
+    /// `SharedArrayBuffer` for host inspection.
+    ///
+    /// Non-buffer values and detached buffers return `None`. This reads
+    /// internal slots only and runs no observable JavaScript.
+    ///
+    /// # Errors
+    ///
+    /// Returns a handle error for an orphaned, foreign, or stale value, or an
+    /// engine fault if the runtime heap does not contain the object.
+    pub fn array_buffer_bytes(
+        &self,
+        value: &JsValue,
+        limit: usize,
+    ) -> Result<Option<Vec<u8>>, crate::ExecutionError> {
+        let owner = value.owner()?;
+        self.runtime.validate_owner(&owner, HandleKind::Value)?;
+        let StoredValue::Object(object) = value.stored()? else {
+            return Ok(None);
+        };
+        let Some(state) = self
+            .runtime
+            .objects
+            .get(*object)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "object",
+                index: object.index(),
+                generation: object.generation(),
+            })?
+            .array_buffer_state()
+        else {
+            return Ok(None);
+        };
+        if state.is_detached() {
+            return Ok(None);
+        }
+        Ok(Some(state.copy_bytes(limit)))
+    }
+
+    /// Returns the view slots of one `DataView` object for host inspection,
+    /// rooting the viewed buffer as a fresh public root.
+    ///
+    /// Non-DataView values return `None`. A length-tracking view over a
+    /// resizable buffer reports `byte_length: None`. This reads internal
+    /// slots only and runs no observable JavaScript.
+    ///
+    /// # Errors
+    ///
+    /// Returns a handle error for an orphaned, foreign, or stale value, an
+    /// engine fault if the runtime heap does not contain the object, or a
+    /// limit/allocation failure while rooting the viewed buffer.
+    pub fn data_view_inspection(
+        &mut self,
+        value: &JsValue,
+    ) -> Result<Option<crate::DataViewInspection>, crate::ExecutionError> {
+        let owner = value.owner()?;
+        self.runtime.validate_owner(&owner, HandleKind::Value)?;
+        let StoredValue::Object(object) = value.stored()? else {
+            return Ok(None);
+        };
+        let Some(state) = self
+            .runtime
+            .objects
+            .get(*object)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "object",
+                index: object.index(),
+                generation: object.generation(),
+            })?
+            .data_view_state()
+            .copied()
+        else {
+            return Ok(None);
+        };
+        let buffer = self.runtime.public_value(StoredValue::Object(state.buffer()))?;
+        Ok(Some(crate::DataViewInspection {
+            buffer,
+            byte_offset: state.byte_offset(),
+            byte_length: match state.byte_length() {
+                DataViewByteLength::Fixed(length) => Some(length),
+                DataViewByteLength::Auto => None,
+            },
+        }))
+    }
+
+    /// Returns the view slots of one typed-array exotic object for host
+    /// inspection, rooting the viewed buffer as a fresh public root.
+    ///
+    /// Non-typed-array values return `None`. A length-tracking view over a
+    /// resizable buffer reports `length: None` and `byte_length: None`. This
+    /// reads internal slots only and runs no observable JavaScript.
+    ///
+    /// # Errors
+    ///
+    /// Returns a handle error for an orphaned, foreign, or stale value, an
+    /// engine fault if the runtime heap does not contain the object, or a
+    /// limit/allocation failure while rooting the viewed buffer.
+    pub fn typed_array_inspection(
+        &mut self,
+        value: &JsValue,
+    ) -> Result<Option<crate::TypedArrayInspection>, crate::ExecutionError> {
+        let owner = value.owner()?;
+        self.runtime.validate_owner(&owner, HandleKind::Value)?;
+        let StoredValue::Object(object) = value.stored()? else {
+            return Ok(None);
+        };
+        let Some(state) = self
+            .runtime
+            .objects
+            .get(*object)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "object",
+                index: object.index(),
+                generation: object.generation(),
+            })?
+            .typed_array_state()
+            .copied()
+        else {
+            return Ok(None);
+        };
+        let buffer = self.runtime.public_value(StoredValue::Object(state.buffer()))?;
+        let element = state.element();
+        Ok(Some(crate::TypedArrayInspection {
+            buffer,
+            byte_offset: state.byte_offset(),
+            length: match state.length() {
+                TypedArrayLength::Fixed(length) => Some(length),
+                TypedArrayLength::Auto => None,
+            },
+            element_name: element.name(),
+            byte_length: match state.length() {
+                TypedArrayLength::Fixed(length) => {
+                    Some(length.saturating_mul(element.byte_width()))
+                }
+                TypedArrayLength::Auto => None,
+            },
+        }))
+    }
+
+    /// Returns the `[[DateValue]]` slot of one Date object (ECMA-262 §21.4.5)
+    /// in milliseconds.
+    ///
+    /// Non-Date values return `None`. This reads internal slots only and runs
+    /// no observable JavaScript.
+    ///
+    /// # Errors
+    ///
+    /// Returns a handle error for an orphaned, foreign, or stale value, or an
+    /// engine fault if the runtime heap does not contain the object.
+    pub fn date_value(
+        &self,
+        value: &JsValue,
+    ) -> Result<Option<JsNumber>, crate::ExecutionError> {
+        let owner = value.owner()?;
+        self.runtime.validate_owner(&owner, HandleKind::Value)?;
+        let StoredValue::Object(object) = value.stored()? else {
+            return Ok(None);
+        };
+        Ok(self
+            .runtime
+            .objects
+            .get(*object)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "object",
+                index: object.index(),
+                generation: object.generation(),
+            })?
+            .date_state()
+            .map(|state| state.value()))
+    }
+
+    /// Returns the `[[PrimitiveValue]]` slot of one Number, Boolean, String,
+    /// Symbol, or BigInt wrapper object, rooted as a fresh public root.
+    ///
+    /// Non-wrapper values return `None`. This reads internal slots only and
+    /// runs no observable JavaScript.
+    ///
+    /// # Errors
+    ///
+    /// Returns a handle error for an orphaned, foreign, or stale value, an
+    /// engine fault if the runtime heap does not contain the object, or a
+    /// limit/allocation failure while rooting the payload.
+    pub fn boxed_primitive(
+        &mut self,
+        value: &JsValue,
+    ) -> Result<Option<JsValue>, crate::ExecutionError> {
+        let owner = value.owner()?;
+        self.runtime.validate_owner(&owner, HandleKind::Value)?;
+        let StoredValue::Object(object) = value.stored()? else {
+            return Ok(None);
+        };
+        let Some(payload) = self
+            .runtime
+            .objects
+            .get(*object)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "object",
+                index: object.index(),
+                generation: object.generation(),
+            })?
+            .boxed_primitive()
+        else {
+            return Ok(None);
+        };
+        let stored = match payload {
+            BoxedPrimitive::Boolean(value) => StoredValue::Boolean(*value),
+            BoxedPrimitive::Number(value) => StoredValue::Number(*value),
+            BoxedPrimitive::BigInt(value) => StoredValue::BigInt(Arc::clone(value)),
+            BoxedPrimitive::String(value) => StoredValue::String(value.clone()),
+            BoxedPrimitive::Symbol(value) => StoredValue::Symbol(value.clone()),
+        };
+        self.runtime.public_value(stored).map(Some)
     }
 
     /// Transactionally installs complete verified bytecode and materializes

@@ -216,7 +216,7 @@ async fn run_file(
             return 2;
         }
     };
-    let _debug_session = if let Some(port) = inspect_port {
+    let debug_session = if let Some(port) = inspect_port {
         let session = cdp::DebugSession::without_engine();
         if inspect_break {
             session.request_initial_pause();
@@ -231,7 +231,10 @@ async fn run_file(
             }
         };
         eprintln!("fusor inspector listening on ws://127.0.0.1:{bound_port}/devtools/page/fusor");
-        Some(session)
+        Some((
+            session,
+            Rc::new(RefCell::new(cdp::inspector::InspectState::new())),
+        ))
     } else {
         None
     };
@@ -252,9 +255,25 @@ async fn run_file(
         let outcome_slot = Rc::clone(&outcome);
         let source = source.clone();
         let name = display_name.clone();
+        let emission = debug_session
+            .as_ref()
+            .map(|(session, inspect)| (Arc::clone(session), Rc::clone(inspect)));
         host_loop.post_event(Box::new(move |context| {
             let result =
                 evaluate_script(context, &source, &name, ScriptLimits::default()).map(|_| ());
+            if let Err(error) = &result
+                && let Some((session, inspect)) = &emission
+            {
+                let event = cdp::inspector::exception_thrown_event(
+                    context,
+                    &mut inspect.borrow_mut(),
+                    None,
+                    &cdp::inspector::CliException::from_script_error(error, &source),
+                    &source,
+                    &name,
+                );
+                session.emit_event(event);
+            }
             *outcome_slot.borrow_mut() = Some(result);
             Ok(())
         }));
@@ -319,6 +338,13 @@ async fn run_file(
         {
             Ok(edges) => edges,
             Err(error) => {
+                emit_run_exception(
+                    &mut host_loop,
+                    &debug_session,
+                    cdp::inspector::CliException::from_module_error(&error, &source),
+                    source.clone(),
+                    root_name.clone(),
+                );
                 report_module_error(&root_name, error);
                 return 1;
             }
@@ -326,11 +352,28 @@ async fn run_file(
         let outcome: Rc<RefCell<Option<Result<(), fusor::ModuleEvaluationError>>>> =
             Rc::new(RefCell::new(None));
         let outcome_slot = Rc::clone(&outcome);
-        let source = source.clone();
+        let evaluation_source = source.clone();
         let name = root_name.clone();
+        let emission = debug_session
+            .as_ref()
+            .map(|(session, inspect)| (Arc::clone(session), Rc::clone(inspect)));
         host_loop.post_event(Box::new(move |context| {
-            let result = evaluate_preloaded_module_graph(context, &source, &name, edges, limits)
-                .map(|_| ());
+            let result =
+                evaluate_preloaded_module_graph(context, &evaluation_source, &name, edges, limits)
+                    .map(|_| ());
+            if let Err(error) = &result
+                && let Some((session, inspect)) = &emission
+            {
+                let event = cdp::inspector::exception_thrown_event(
+                    context,
+                    &mut inspect.borrow_mut(),
+                    None,
+                    &cdp::inspector::CliException::from_module_error(error, &evaluation_source),
+                    &evaluation_source,
+                    &name,
+                );
+                session.emit_event(event);
+            }
             *outcome_slot.borrow_mut() = Some(result);
             Ok(())
         }));
@@ -349,6 +392,13 @@ async fn run_file(
         if let Err(error) =
             cli::imports::drain_pending_imports(&mut host_loop, &resolver, limits).await
         {
+            emit_run_exception(
+                &mut host_loop,
+                &debug_session,
+                cdp::inspector::CliException::Message(error.to_string()),
+                source.clone(),
+                root_name.clone(),
+            );
             report_module_error(&root_name, error);
             return 1;
         }
@@ -359,8 +409,25 @@ async fn run_file(
             Rc::new(RefCell::new(None));
         let slot = Rc::clone(&error_slot);
         let name = root_name.clone();
+        let emission = debug_session
+            .as_ref()
+            .map(|(session, inspect)| (Arc::clone(session), Rc::clone(inspect)));
         host_loop.post_event(Box::new(move |context| {
-            *slot.borrow_mut() = fusor::module_evaluation_error(context, &name);
+            let error = fusor::module_evaluation_error(context, &name);
+            if let Some(error) = &error
+                && let Some((session, inspect)) = &emission
+            {
+                let event = cdp::inspector::exception_thrown_event(
+                    context,
+                    &mut inspect.borrow_mut(),
+                    None,
+                    &cdp::inspector::CliException::from_module_error(error, &source),
+                    &source,
+                    &name,
+                );
+                session.emit_event(event);
+            }
+            *slot.borrow_mut() = error;
             Ok(())
         }));
         if let Err(error) = host_loop.run_one_turn() {
@@ -398,6 +465,44 @@ async fn run_file(
         }
         0
     }
+}
+
+/// Forwards one uncaught run-path evaluation failure to the attached
+/// inspector session as a `Runtime.exceptionThrown` event (V8-aligned), from
+/// inside a posted host-loop turn.
+///
+/// The module runner has no inspection intrinsics, so the event renders the
+/// engine-side message without an expandable exception object. Best-effort:
+/// the run path exits right after reporting, so the transport thread wins
+/// the write race in practice but no delivery guarantee exists.
+fn emit_run_exception(
+    host_loop: &mut fusor_host::r#loop::HostLoop,
+    emission: &Option<(
+        Arc<cdp::DebugSession>,
+        Rc<RefCell<cdp::inspector::InspectState>>,
+    )>,
+    exception: cdp::inspector::CliException,
+    source: String,
+    name: String,
+) {
+    let Some((session, inspect)) = emission else {
+        return;
+    };
+    let session = Arc::clone(session);
+    let inspect = Rc::clone(inspect);
+    host_loop.post_event(Box::new(move |context| {
+        let event = cdp::inspector::exception_thrown_event(
+            context,
+            &mut inspect.borrow_mut(),
+            None,
+            &exception,
+            &source,
+            &name,
+        );
+        session.emit_event(event);
+        Ok(())
+    }));
+    let _ = host_loop.run_one_turn();
 }
 
 /// Renders one non-execution top-level error through the unified §7.5 miette

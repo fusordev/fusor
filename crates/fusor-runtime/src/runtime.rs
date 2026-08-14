@@ -53,11 +53,11 @@ use crate::{
     interrupt::InterruptState,
     object::{
         ArrayBufferState, ArrayIterator, ArrayIteratorKind, ArrayState, BoxedPrimitive,
-        DataViewState, DateState, ForInIterator, ForInSnapshot, HeapObject,
+        DataViewByteLength, DataViewState, DateState, ForInIterator, ForInSnapshot, HeapObject,
         IntlSegmentIteratorObjectState, IntlSegmentsObjectState, KeyPhases, ObjectRecord,
-        OwnProperty, PromiseCapability, PromiseReaction, PropertyDeletion, ProxyState, RegExpState,
-        RegExpStringIterator, ShapeInterner, StringIterator, TypedArrayElementType,
-        TypedArrayState,
+        OwnProperty, PromiseCapability, PromiseReaction, PromiseState, PropertyDeletion, ProxyState,
+        RegExpState, RegExpStringIterator, ShapeInterner, StringIterator, TypedArrayElementType,
+        TypedArrayLength, TypedArrayState, WeakKey,
     },
     value::{HeapReference, PrimitiveValue, ReleaseMailbox, RootTarget, SlotValue, StoredValue},
 };
@@ -5705,6 +5705,10 @@ impl Runtime {
 
 mod arrays;
 mod context;
+pub use context::{
+    ArrayBufferInspection, CollectionInspection, DataViewInspection, PromiseInspection,
+    ProxyInspection, TypedArrayInspection,
+};
 mod for_in;
 mod gc;
 mod generators;

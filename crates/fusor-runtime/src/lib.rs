@@ -71,9 +71,10 @@ pub use property::{
     PropertyDescriptorKind, PropertyLayout, PropertyLayoutKind,
 };
 pub use runtime::{
-    CollectionReport, Context, HostFunctionId, ModuleError, ModuleErrorPhase,
-    ModuleEvaluationError, ModuleKey, ModuleLinkError, ModuleLoader, ModuleResolveError,
-    PendingDynamicImport, Realm, Runtime, RuntimeLimits, RuntimeUsage,
+    ArrayBufferInspection, CollectionInspection, CollectionReport, Context, DataViewInspection,
+    HostFunctionId, ModuleError, ModuleErrorPhase, ModuleEvaluationError, ModuleKey,
+    ModuleLinkError, ModuleLoader, ModuleResolveError, PendingDynamicImport, PromiseInspection,
+    ProxyInspection, Realm, Runtime, RuntimeLimits, RuntimeUsage, TypedArrayInspection,
 };
 pub use shared_array_buffer::SharedArrayBufferHandle;
 pub use snapshot::{SNAPSHOT_FORMAT_STAMP, SNAPSHOT_MAGIC, SnapshotError};

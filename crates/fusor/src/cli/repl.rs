@@ -45,6 +45,41 @@ use crate::cdp::{
     inspector,
 };
 
+/// The DevTools bundle the REPL forwards uncaught entry failures to while an
+/// inspector session is attached.
+///
+/// V8-aligned: terminal entries that throw or fail to parse render in the
+/// DevTools console as `Runtime.exceptionThrown` events, in addition to the
+/// miette report on stderr.
+#[derive(Clone)]
+pub(crate) struct ReplInspection {
+    pub session: Arc<cdp::DebugSession>,
+    pub inspect: Rc<RefCell<inspector::InspectState>>,
+    pub intrinsics: Rc<RefCell<Option<inspector::InspectIntrinsics>>>,
+}
+
+impl ReplInspection {
+    /// Renders one uncaught entry failure into the attached DevTools session
+    /// as a `Runtime.exceptionThrown` event, from inside the owning turn.
+    fn emit_exception(
+        &self,
+        context: &mut fusor_runtime::Context<'_>,
+        exception: &inspector::CliException,
+        source: &str,
+        name: &str,
+    ) {
+        let event = inspector::exception_thrown_event(
+            context,
+            &mut self.inspect.borrow_mut(),
+            self.intrinsics.borrow().as_ref(),
+            exception,
+            source,
+            name,
+        );
+        self.session.emit_event(event);
+    }
+}
+
 /// Runs the REPL on stdin/stdout. Returns the process exit code.
 ///
 /// Module entries load their static graph asynchronously on the caller's
@@ -166,6 +201,7 @@ pub(crate) async fn run(inspect_port: Option<u16>, inspect_break: bool) -> u8 {
                     &mut imports,
                     entry_index,
                     true,
+                    None,
                 )
                 .await;
                 // The loop's uncaught/unhandled default paths request the exit code
@@ -286,6 +322,11 @@ async fn run_with_inspector(
         eprintln!("fusor: cannot prepare CDP inspection: the intrinsic setup did not run");
         return 1;
     }
+    let inspection = ReplInspection {
+        session: Arc::clone(&session),
+        inspect: Rc::clone(&inspect),
+        intrinsics: Rc::clone(&intrinsics),
+    };
 
     loop {
         // Read the next deadline synchronously (the select cannot hold a
@@ -347,6 +388,7 @@ async fn run_with_inspector(
                     &mut imports,
                     entry_index,
                     true,
+                    Some(&inspection),
                 ).await;
                 // The loop's uncaught/unhandled default paths request the exit
                 // code (§7.2); honor the request and leave the session.
@@ -376,7 +418,24 @@ async fn evaluate_repl_entry(
     imports: &mut Vec<String>,
     entry_index: u64,
     print_completion: bool,
+    inspection: Option<&ReplInspection>,
 ) {
+    // Forward one failure into the attached DevTools session (when present)
+    // as a `Runtime.exceptionThrown` event, from inside the owning turn.
+    let emit_in_turn = |host_loop: &mut HostLoop,
+                        inspection: Option<&ReplInspection>,
+                        exception: inspector::CliException,
+                        source: String,
+                        name: String| {
+        let Some(inspection) = inspection.cloned() else {
+            return;
+        };
+        host_loop.post_event(Box::new(move |context| {
+            inspection.emit_exception(context, &exception, &source, &name);
+            Ok(())
+        }));
+        let _ = host_loop.run_one_turn();
+    };
     let limits = ScriptLimits::default();
     if has_module_syntax(entry) {
         let mut source = imports.join("\n");
@@ -395,7 +454,9 @@ async fn evaluate_repl_entry(
         {
             Ok(edges) => edges,
             Err(error) => {
+                let exception = inspector::CliException::from_module_error(&error, &source);
                 report_module_error("module entry", error);
+                emit_in_turn(host_loop, inspection, exception, source, name);
                 return;
             }
         };
@@ -407,12 +468,24 @@ async fn evaluate_repl_entry(
         let outcome: Rc<RefCell<Option<Result<(), ModuleEvaluationError>>>> =
             Rc::new(RefCell::new(None));
         let outcome_slot = Rc::clone(&outcome);
-        let source = source.clone();
+        let evaluation_source = source.clone();
         let evaluate_name = name.clone();
+        let emission = inspection.cloned();
+        let emit_source = evaluation_source.clone();
         host_loop.post_event(Box::new(move |context| {
             let result =
-                evaluate_preloaded_module_graph(context, &source, &evaluate_name, gathered, limits)
+                evaluate_preloaded_module_graph(context, &evaluation_source, &evaluate_name, gathered, limits)
                     .map(|value| *value_slot.borrow_mut() = Some(value));
+            if let Err(error) = &result
+                && let Some(inspection) = &emission
+            {
+                inspection.emit_exception(
+                    context,
+                    &inspector::CliException::from_module_error(error, &emit_source),
+                    &emit_source,
+                    &evaluate_name,
+                );
+            }
             *outcome_slot.borrow_mut() = Some(result);
             Ok(())
         }));
@@ -431,14 +504,29 @@ async fn evaluate_repl_entry(
         if let Err(error) =
             crate::cli::imports::drain_pending_imports(host_loop, resolver, limits).await
         {
+            let exception = inspector::CliException::Message(error.to_string());
             report_module_error("module entry", error);
+            emit_in_turn(host_loop, inspection, exception, source.clone(), name.clone());
         }
         // Probe the module's evaluation error inside a turn.
         let error_slot: Rc<RefCell<Option<ModuleEvaluationError>>> = Rc::new(RefCell::new(None));
         let slot = Rc::clone(&error_slot);
         let probe_name = name.clone();
+        let emission = inspection.cloned();
+        let probe_source = source.clone();
         host_loop.post_event(Box::new(move |context| {
-            *slot.borrow_mut() = fusor::module_evaluation_error(context, &probe_name);
+            let error = fusor::module_evaluation_error(context, &probe_name);
+            if let Some(error) = &error
+                && let Some(inspection) = &emission
+            {
+                inspection.emit_exception(
+                    context,
+                    &inspector::CliException::from_module_error(error, &probe_source),
+                    &probe_source,
+                    &probe_name,
+                );
+            }
+            *slot.borrow_mut() = error;
             Ok(())
         }));
         if let Err(error) = host_loop.run_one_turn() {
@@ -462,10 +550,24 @@ async fn evaluate_repl_entry(
         let outcome: Rc<RefCell<Option<Result<(), ScriptEvaluationError>>>> =
             Rc::new(RefCell::new(None));
         let outcome_slot = Rc::clone(&outcome);
+        let drain_entry = entry.to_owned();
+        let drain_name = name.clone();
         let entry = entry.to_owned();
+        let emission = inspection.cloned();
+        let emit_entry = entry.clone();
         host_loop.post_event(Box::new(move |context| {
             let result = evaluate_script(context, &entry, &name, limits)
                 .map(|value| *value_slot.borrow_mut() = Some(value));
+            if let Err(error) = &result
+                && let Some(inspection) = &emission
+            {
+                inspection.emit_exception(
+                    context,
+                    &inspector::CliException::from_script_error(error, &emit_entry),
+                    &emit_entry,
+                    &name,
+                );
+            }
             *outcome_slot.borrow_mut() = Some(result);
             Ok(())
         }));
@@ -484,7 +586,9 @@ async fn evaluate_repl_entry(
         if let Err(error) =
             crate::cli::imports::drain_pending_imports(host_loop, resolver, limits).await
         {
+            let exception = inspector::CliException::Message(error.to_string());
             report_module_error("script entry", error);
+            emit_in_turn(host_loop, inspection, exception, drain_entry, drain_name);
         }
         if print_completion {
             if let Some(value) = completion.replace(None) {

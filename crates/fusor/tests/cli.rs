@@ -2,11 +2,228 @@
 
 use std::{
     fs,
-    io::Write as _,
+    io::{BufRead, BufReader, Read as _, Write as _},
+    net::TcpStream,
     path::PathBuf,
     process::{Command, Stdio},
     sync::atomic::{AtomicU64, Ordering},
+    sync::mpsc,
+    time::Duration,
 };
+
+/// A minimal RFC 6455 client: unmasked server frames are read as JSON text,
+/// client frames are masked as the protocol requires.
+struct WebSocketClient {
+    stream: TcpStream,
+}
+
+impl WebSocketClient {
+    fn connect(port: u16) -> Self {
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect to inspector");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(15)))
+            .expect("read timeout");
+        write!(
+            stream,
+            "GET /devtools/page/fusor HTTP/1.1\r\n\
+             Host: 127.0.0.1\r\n\
+             Upgrade: websocket\r\n\
+             Connection: Upgrade\r\n\
+             Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+             Sec-WebSocket-Version: 13\r\n\r\n"
+        )
+        .expect("handshake write");
+        let mut header = Vec::new();
+        let mut byte = [0_u8; 1];
+        while header.len() < 4 || !header.windows(4).any(|window| window == b"\r\n\r\n") {
+            stream.read_exact(&mut byte).expect("handshake read");
+            header.push(byte[0]);
+        }
+        assert!(
+            header.starts_with(b"HTTP/1.1 101"),
+            "expected a 101 upgrade, got {}",
+            String::from_utf8_lossy(&header)
+        );
+        Self { stream }
+    }
+
+    fn send(&mut self, message: &serde_json::Value) {
+        let payload = serde_json::to_vec(message).expect("encode frame");
+        let mask = [0x11_u8, 0x22, 0x33, 0x44];
+        let mut frame = vec![0x81];
+        // The mask bit lives in the length byte: client frames are always
+        // masked per RFC 6455.
+        match payload.len() {
+            length @ 0..=125 => frame.push(0x80 | length as u8),
+            length @ 126..=65_535 => {
+                frame.push(0x80 | 126);
+                frame.extend_from_slice(&(length as u16).to_be_bytes());
+            }
+            length => {
+                frame.push(0x80 | 127);
+                frame.extend_from_slice(&(length as u64).to_be_bytes());
+            }
+        }
+        frame.extend_from_slice(&mask);
+        frame.extend(payload.iter().enumerate().map(|(index, byte)| byte ^ mask[index % 4]));
+        self.stream.write_all(&frame).expect("frame write");
+    }
+
+    /// Reads server frames until one matches the predicate; other frames are
+    /// ignored. Server frames are unmasked.
+    fn recv_until(&mut self, matches: impl Fn(&serde_json::Value) -> bool) -> serde_json::Value {
+        loop {
+            let mut header = [0_u8; 2];
+            self.stream.read_exact(&mut header).expect("frame header");
+            let length = match header[1] & 0x7F {
+                126 => {
+                    let mut extended = [0_u8; 2];
+                    self.stream.read_exact(&mut extended).expect("extended length");
+                    u16::from_be_bytes(extended) as usize
+                }
+                127 => {
+                    let mut extended = [0_u8; 8];
+                    self.stream.read_exact(&mut extended).expect("extended length");
+                    u64::from_be_bytes(extended) as usize
+                }
+                length => length as usize,
+            };
+            let mut payload = vec![0_u8; length];
+            self.stream.read_exact(&mut payload).expect("frame payload");
+            if header[0] & 0x0F != 0x1 {
+                continue;
+            }
+            let message: serde_json::Value =
+                serde_json::from_slice(&payload).expect("decode frame");
+            if matches(&message) {
+                return message;
+            }
+        }
+    }
+}
+
+/// Spawns `fusor repl --inspect=0`, waits for the inspector startup line on
+/// stderr, and returns the bound port alongside the child.
+fn spawn_inspected_repl() -> (std::process::Child, u16) {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_fusor"))
+        .arg("repl")
+        .arg("--inspect=0")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn fusor repl");
+    let stderr = child.stderr.take().expect("stderr");
+    let (sender, receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            if let Some(port) = line
+                .split("ws://127.0.0.1:")
+                .nth(1)
+                .and_then(|rest| rest.split('/').next())
+                .and_then(|port| port.parse::<u16>().ok())
+            {
+                let _ = sender.send(port);
+            }
+        }
+    });
+    let port = receiver
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the inspector must report its bound port");
+    (child, port)
+}
+
+#[test]
+fn repl_forwards_uncaught_errors_to_the_inspector() {
+    // V8-aligned: a terminal entry that throws renders in the attached
+    // DevTools console as a `Runtime.exceptionThrown` event, not only as a
+    // stderr report.
+    let (mut child, port) = spawn_inspected_repl();
+    let mut client = WebSocketClient::connect(port);
+    client.send(&serde_json::json!({"id": 1, "method": "Runtime.enable", "params": {}}));
+    client.recv_until(|message| {
+        message.get("method").and_then(|method| method.as_str())
+            == Some("Runtime.executionContextCreated")
+    });
+
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin")
+        .write_all(b"throw new Error('cdp-boom')\n")
+        .expect("write the throwing entry");
+
+    let event = client.recv_until(|message| {
+        message.get("method").and_then(|method| method.as_str())
+            == Some("Runtime.exceptionThrown")
+    });
+    let details = &event["params"]["exceptionDetails"];
+    assert!(
+        details["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("cdp-boom")),
+        "the event names the thrown message: {details}"
+    );
+    assert!(details["exceptionId"].is_u64());
+
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin")
+        .write_all(b".exit\n")
+        .expect("write exit");
+    let output = child.wait_with_output().expect("wait for repl");
+    assert!(
+        output.status.success(),
+        "repl failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn repl_forwards_syntax_errors_to_the_inspector() {
+    let (mut child, port) = spawn_inspected_repl();
+    let mut client = WebSocketClient::connect(port);
+    client.send(&serde_json::json!({"id": 1, "method": "Runtime.enable", "params": {}}));
+    client.recv_until(|message| {
+        message.get("method").and_then(|method| method.as_str())
+            == Some("Runtime.executionContextCreated")
+    });
+
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin")
+        .write_all(b"1 +\n")
+        .expect("write the syntax-error entry");
+
+    let event = client.recv_until(|message| {
+        message.get("method").and_then(|method| method.as_str())
+            == Some("Runtime.exceptionThrown")
+    });
+    let details = &event["params"]["exceptionDetails"];
+    assert!(
+        details["text"].as_str().is_some_and(|text| !text.is_empty()),
+        "the syntax error renders its diagnostic text: {details}"
+    );
+    assert_eq!(
+        details["exception"]["subtype"], "error",
+        "the exception renders as an error RemoteObject"
+    );
+
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin")
+        .write_all(b".exit\n")
+        .expect("write exit");
+    let output = child.wait_with_output().expect("wait for repl");
+    assert!(
+        output.status.success(),
+        "repl failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
 
 fn temp_dir(tag: &str) -> PathBuf {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
