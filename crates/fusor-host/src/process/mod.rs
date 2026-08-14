@@ -3,6 +3,7 @@
 //! diagnostic rendering.
 
 pub mod diagnostics;
+pub mod error_codes;
 mod exit_codes;
 mod signals;
 mod state;
@@ -10,6 +11,7 @@ mod state;
 pub use diagnostics::{
     ColorPolicy, HostDiagnostic, MessageDiagnostic, OpDiagnostic, render_diagnostic,
 };
+pub use error_codes::ErrorCode;
 pub use exit_codes::ExitCode;
 pub use signals::{Signal, SignalForwardError, SignalForwarder, SignalState, spawn_signal_forwarder};
 pub(crate) use signals::{install_signal_state, take_signal_state, with_signal_state};

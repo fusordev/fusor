@@ -499,6 +499,19 @@ Node 22+ strip-types 同政策 = **仅可擦除语法**;EXTENSIONS.md 已列为�
 | 快照 | `SnapshotError::{FormatMismatch, IntegrityViolation, OpSetMismatch, ...}` | fail closed,无 panic |
 | 进程 | 文档化 exit code 表(§7.2) | 与错误分类一一对应 |
 
+错误码体系(§7.5):纯数字五位数,按分类区间编排,渲染进统一诊断管线
+(`ErrorCode`,fusor-host::process::error_codes):
+
+| 区间 | 层 | 码 |
+| --- | --- | --- |
+| 10000–10099 | 句柄误用 | 10001 Orphaned、10002 ForeignRuntime、10003 Stale、10004 WrongValueKind |
+| 11000–11099 | 引擎执行 | 11001 未捕获异常、11002 Interrupted、11003 InstructionLimit、11004 Limit、11005 EngineFault、11006 其余引擎故障 |
+| 12000–12099 | 宿主调用 | 12001 Thrown、12002 Execution |
+| 13000–13099 | 模块 | 保留(模块适配器随子项目 6/7) |
+| 14000–14099 | op 层 | 14001 OpError 默认;op 自带数字码原样透传 |
+| 15000–15099 | 快照 | 保留(SnapshotError,子项目 5) |
+| 16000–16099 | 解析/编译 | 保留(frontend 适配器) |
+
 ### 12.2 测试策略
 
 - **引擎侧**(fusor-runtime):补审查发现的缺口——属性 API 全路径(含冻结对象负

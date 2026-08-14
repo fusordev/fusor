@@ -69,8 +69,8 @@ fn the_op_error_contract_formats_classes_and_codes() {
         OpError::of_class("TypeError", "wrong kind").to_string(),
         "TypeError: wrong kind"
     );
-    let coded = OpError::new("failed").with_code("FUS-IO-0001");
-    assert_eq!(coded.code, Some("FUS-IO-0001"));
+    let coded = OpError::new("failed").with_code(14007);
+    assert_eq!(coded.code, Some(14007));
     assert_eq!(
         OpError::type_error(2, "expected a string").to_string(),
         "TypeError: parameter 2: expected a string"

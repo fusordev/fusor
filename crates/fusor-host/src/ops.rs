@@ -107,7 +107,8 @@ pub struct OpDeclaration {
 /// An op returns this when its operation fails in a way JavaScript should
 /// observe. The host adapter converts it into a thrown JavaScript error of
 /// `class` (default `Error`) carrying `message`; `code` is an optional
-/// machine-readable code attached for diagnostics.
+/// numeric machine-readable error code attached for diagnostics (§12.1:
+/// plain numbers, op-layer range 14000–14099).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OpError {
     /// The JavaScript error class name (`"TypeError"`, `"RangeError"`,
@@ -115,8 +116,8 @@ pub struct OpError {
     pub class: Option<&'static str>,
     /// The exact error message the JavaScript side observes.
     pub message: String,
-    /// An optional stable machine-readable error code.
-    pub code: Option<&'static str>,
+    /// An optional numeric machine-readable error code (§12.1).
+    pub code: Option<u16>,
 }
 
 impl OpError {
@@ -140,9 +141,9 @@ impl OpError {
         }
     }
 
-    /// Attaches a stable machine-readable error code.
+    /// Attaches a numeric machine-readable error code (§12.1).
     #[must_use]
-    pub const fn with_code(mut self, code: &'static str) -> Self {
+    pub const fn with_code(mut self, code: u16) -> Self {
         self.code = Some(code);
         self
     }

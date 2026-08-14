@@ -4,9 +4,8 @@
 //! "top-level Display" bypass.
 //!
 //! The engine keeps miette out of `fusor-runtime`, so the adapters live
-//! here in wrapper types. Error codes (the `FUS-xxx-xxx` table, §12.1)
-//! attach to these adapters with the error-code system (subproject 4,
-//! §7.2).
+//! here in wrapper types. Each adapter carries its numeric error code
+//! from the §12.1 classification ([`ErrorCode`]).
 
 use std::fmt;
 use std::io::IsTerminal;
@@ -18,6 +17,7 @@ use miette::{
 };
 
 use crate::ops::OpError;
+use crate::process::error_codes::ErrorCode;
 
 /// The ANSI color policy (§7.5).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -139,6 +139,10 @@ impl fmt::Display for HostDiagnostic {
 impl std::error::Error for HostDiagnostic {}
 
 impl Diagnostic for HostDiagnostic {
+    fn code(&self) -> Option<Box<dyn fmt::Display + '_>> {
+        Some(Box::new(ErrorCode::from_execution_error(&self.error)))
+    }
+
     fn severity(&self) -> Option<Severity> {
         Some(Severity::Error)
     }
@@ -191,6 +195,13 @@ impl fmt::Display for OpDiagnostic {
 impl std::error::Error for OpDiagnostic {}
 
 impl Diagnostic for OpDiagnostic {
+    fn code(&self) -> Option<Box<dyn fmt::Display + '_>> {
+        Some(match self.error.code {
+            Some(code) => Box::new(code) as Box<dyn fmt::Display + '_>,
+            None => Box::new(ErrorCode::OpFailure) as Box<dyn fmt::Display + '_>,
+        })
+    }
+
     fn severity(&self) -> Option<Severity> {
         Some(Severity::Error)
     }
