@@ -2383,7 +2383,7 @@ fn serialize_value(
             .as_number()
             .ok()
             .flatten()
-            .map(fusor_runtime::JsNumber::as_f64)
+            .map(JsNumber::as_f64)
             .filter(|number| number.is_finite())
             .map(Value::from),
         ValueKind::String => value
