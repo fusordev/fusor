@@ -649,6 +649,13 @@ fn object_class(
         && let Some(length) = reflect_number(context, intrinsics, value, "byteLength")
     {
         label = format!("{label}({length})");
+    } else if matches!(
+        subtype,
+        Some("map") | Some("set") | Some("weakmap") | Some("weakset")
+    ) && let Some(size) = reflect_number(context, intrinsics, value, "size")
+    {
+        // V8 labels collections with their live entry count: `Map(2)`.
+        label = format!("{label}({size})");
     } else if subtype.is_none()
         && let Some(binding) = intrinsics.global_binding_name(value)
     {
@@ -913,7 +920,7 @@ fn syntax_error_remote(
         message,
         &stack,
     ) {
-        Ok(object) => remote_object(context, &mut state.objects, intrinsics, &object, None, true),
+        Ok(object) => remote_object(context, &mut state.objects, intrinsics, &object, None, false),
         Err(_) => {
             let description = format!("SyntaxError: {message}");
             json!({"type": "object", "subtype": "error", "className": "SyntaxError", "description": description})
@@ -939,7 +946,12 @@ fn execution_error_position(
             Some(intrinsics) => exception_text(context, intrinsics, exception),
             None => exception.to_string(),
         };
-        return (text, line, column, exception_stack_trace(exception));
+        return (
+            format!("Uncaught {text}"),
+            line,
+            column,
+            exception_stack_trace(exception),
+        );
     }
     (error.to_string(), 0, 0, json!({"callFrames": []}))
 }
@@ -960,7 +972,7 @@ fn execution_error_remote_object(
         && let Some(value) = exception.thrown_value()
         && let Some(intrinsics) = intrinsics
     {
-        return remote_object(context, &mut state.objects, intrinsics, value, None, true);
+        return remote_object(context, &mut state.objects, intrinsics, value, None, false);
     }
     if let ExecutionError::Exception(exception) = error
         && let Some(intrinsics) = intrinsics
@@ -1015,7 +1027,7 @@ fn engine_error_remote_object(
         intrinsics,
         &object,
         None,
-        true,
+        false,
     ))
 }
 
@@ -1519,12 +1531,22 @@ fn collection_entry_rows(
     };
     let mut row = |index: usize, key: Option<&JsValue>, value: &JsValue| {
         let mut properties = Vec::new();
+        let mut description = String::new();
         if let Some(key) = key
             && let Some(entry) = preview_entry(context, intrinsics, "key", key, 0)
         {
+            let rendered = entry["value"].as_str().unwrap_or_default();
+            description.push_str(&format!("{{{rendered} => "));
             properties.push(entry);
         }
         if let Some(entry) = preview_entry(context, intrinsics, "value", value, 0) {
+            let rendered = entry["value"].as_str().unwrap_or_default();
+            if key.is_some() {
+                description.push_str(&format!("{rendered}}}"));
+            } else {
+                // Set rows render the bare value (V8 shows `0: 1`).
+                description.push_str(rendered);
+            }
             properties.push(entry);
         }
         json!({
@@ -1533,11 +1555,11 @@ fn collection_entry_rows(
                 "type": "object",
                 "subtype": "internal#entry",
                 "className": "Object",
-                "description": "Object",
+                "description": description,
                 "preview": {
                     "type": "object",
                     "subtype": "internal#entry",
-                    "description": "Object",
+                    "description": description,
                     "overflow": false,
                     "properties": properties,
                 },
@@ -1995,24 +2017,40 @@ fn object_preview(
         .unwrap_or_default();
     let array_like = matches!(class.subtype, Some("array") | Some("typedarray"));
     let cap = if array_like { 100 } else { 5 };
-    let fields = standard_preview_fields(class.subtype);
+    let collection = matches!(
+        class.subtype,
+        Some("map") | Some("set") | Some("weakmap") | Some("weakset")
+    );
+    // Collection previews render their live entries (V8 shows
+    // `Map(2) {1 => 2, 3 => 4}`), not the `size` field.
+    let fields = if collection {
+        None
+    } else {
+        standard_preview_fields(class.subtype)
+    };
     let own_count = keys
         .iter()
         .filter(|key| !array_like || is_array_index_key(key))
         .count();
-    let fixed_count =
-        fields.map_or(0, <[&str]>::len) + usize::from(class.subtype == Some("typedarray"));
+    let fixed_count = if collection {
+        collection_preview_count(context, value)
+    } else {
+        fields.map_or(0, <[&str]>::len) + usize::from(class.subtype == Some("typedarray"))
+    };
     let overflow = if array_like {
         own_count > cap
     } else {
         own_count + fixed_count > cap
     };
-    let mut properties = keys
-        .iter()
-        .filter(|key| !array_like || is_array_index_key(key))
-        .take(if array_like { 100 } else { cap })
-        .filter_map(|key| property_preview(context, intrinsics, value, key, depth))
-        .collect::<Vec<_>>();
+    let mut properties = if collection {
+        collection_preview_rows(context, intrinsics, value, cap)
+    } else {
+        keys.iter()
+            .filter(|key| !array_like || is_array_index_key(key))
+            .take(if array_like { 100 } else { cap })
+            .filter_map(|key| property_preview(context, intrinsics, value, key, depth))
+            .collect::<Vec<_>>()
+    };
     if let Some(fields) = fields {
         // V8 appends the standard fields after the indices; they live on the
         // prototype, so they are read directly.
@@ -2052,13 +2090,53 @@ fn is_array_index_key(key: &str) -> bool {
         .is_ok_and(|index| index.to_string() == key)
 }
 
+/// The live entry count of one collection, for the preview's overflow math.
+fn collection_preview_count(context: &mut Context<'_>, value: &JsValue) -> usize {
+    match context.collection_inspection(value).ok().flatten() {
+        Some(fusor_runtime::CollectionInspection::Entries(entries)) => entries.len(),
+        Some(fusor_runtime::CollectionInspection::Values(values)) => values.len(),
+        None => 0,
+    }
+}
+
+/// The V8 entry preview rows of one collection: alternating
+/// `key`/`value` PropertyPreviews for Maps, bare `value` rows for Sets.
+fn collection_preview_rows(
+    context: &mut Context<'_>,
+    intrinsics: &InspectIntrinsics,
+    value: &JsValue,
+    cap: usize,
+) -> Vec<Value> {
+    let mut rows = Vec::new();
+    match context.collection_inspection(value).ok().flatten() {
+        Some(fusor_runtime::CollectionInspection::Entries(entries)) => {
+            for (key, entry_value) in entries.iter().take(cap) {
+                if let Some(entry) = preview_entry(context, intrinsics, "key", key, 0) {
+                    rows.push(entry);
+                }
+                if let Some(entry) = preview_entry(context, intrinsics, "value", entry_value, 0) {
+                    rows.push(entry);
+                }
+            }
+        }
+        Some(fusor_runtime::CollectionInspection::Values(values)) => {
+            for entry_value in values.iter().take(cap) {
+                if let Some(entry) = preview_entry(context, intrinsics, "value", entry_value, 0) {
+                    rows.push(entry);
+                }
+            }
+        }
+        None => {}
+    }
+    rows
+}
+
 /// The fixed preview fields V8 appends for built-in binary view classes.
 fn standard_preview_fields(subtype: Option<&str>) -> Option<&'static [&'static str]> {
     match subtype {
         Some("typedarray") => Some(&["buffer", "byteLength", "byteOffset", "length"]),
         Some("arraybuffer") => Some(&["byteLength", "maxByteLength", "resizable", "detached"]),
         Some("dataview") => Some(&["buffer", "byteLength", "byteOffset"]),
-        Some("map") | Some("set") | Some("weakmap") | Some("weakset") => Some(&["size"]),
         Some("regexp") => Some(&[
             "dotAll",
             "flags",
@@ -2278,7 +2356,19 @@ fn exception_remote_object(
     ))) = error
         && let Some(value) = exception.thrown_value()
     {
-        return remote_object(context, &mut state.objects, intrinsics, value, None, true);
+        // Exception RemoteObjects carry no preview (V8 shape): the frontend
+        // fetches the properties itself and appends the preview description
+        // to the entry title otherwise, doubling the message.
+        return remote_object(context, &mut state.objects, intrinsics, value, None, false);
+    }
+    // Escaped engine errors carry no rooted value; materialize the family
+    // object with the retained frames as its stack.
+    if let ScriptEvaluationError::Runtime(GlobalScriptError::Execution(ExecutionError::Exception(
+        exception,
+    ))) = error
+        && let Some(remote) = engine_error_remote_object(context, state, intrinsics, exception)
+    {
+        return remote;
     }
     json!({"type": "object", "subtype": "error", "description": error.to_string()})
 }
@@ -2924,7 +3014,7 @@ mod tests {
             for (source, description, subtype) in [
                 ("({})", "Object", None),
                 ("[1, 2]", "Array(2)", Some("array")),
-                ("new Map()", "Map", Some("map")),
+                ("new Map()", "Map(0)", Some("map")),
                 ("new Proxy({}, {})", "Proxy", Some("proxy")),
                 ("globalThis.Reflect", "Reflect", None),
                 ("new Uint8Array(3)", "Uint8Array(3)", Some("typedarray")),
@@ -3276,11 +3366,21 @@ mod tests {
                 state,
                 intrinsics,
                 "Runtime.evaluate",
-                serde_json::json!({"expression": "new Map()", "generatePreview": true}),
+                serde_json::json!({"expression": "new Map([['a', 1]])", "generatePreview": true}),
             );
             let preview = &response["result"]["result"]["preview"];
-            assert_eq!(preview["properties"][0]["name"], "size");
-            assert_eq!(preview["properties"][0]["value"], "0");
+            // V8 renders the live entries, not the size field:
+            // `Map(1) {a => 1}`.
+            assert_eq!(preview["description"], "Map(1)");
+            let names: Vec<&str> = preview["properties"]
+                .as_array()
+                .expect("preview properties")
+                .iter()
+                .map(|entry| entry["name"].as_str().expect("property name"))
+                .collect();
+            assert_eq!(names, vec!["key", "value"], "one key/value entry row");
+            assert_eq!(preview["properties"][0]["value"], "a");
+            assert_eq!(preview["properties"][1]["value"], "1");
             assert_eq!(preview["overflow"], false);
 
             let response = protocol(
