@@ -15,14 +15,9 @@ async fn op_sleep(ms: u64) -> Result<(), OpError> {
     Ok(())
 }
 
-#[op(name = "custom_read")]
-fn op_renamed(value: u8) -> Result<u8, OpError> {
-    Ok(value)
-}
-
 #[test]
 fn op_declarations_carry_the_default_snake_case_name() {
-    let declaration = __fusor_op_declaration_op_read_text();
+    let declaration = op_read_text::declaration();
     assert_eq!(declaration.name, "op_read_text");
     assert!(!declaration.is_async);
     assert_eq!(declaration.parameter_types, &["String"]);
@@ -30,28 +25,21 @@ fn op_declarations_carry_the_default_snake_case_name() {
 
 #[test]
 fn async_ops_mark_their_declaration() {
-    let declaration = __fusor_op_declaration_op_sleep();
+    let declaration = op_sleep::declaration();
     assert_eq!(declaration.name, "op_sleep");
     assert!(declaration.is_async);
     assert_eq!(declaration.parameter_types, &["u64"]);
 }
 
-#[test]
-fn name_overrides_replace_the_function_name() {
-    let declaration = __fusor_op_declaration_op_renamed();
-    assert_eq!(declaration.name, "custom_read");
-    assert_eq!(declaration.parameter_types, &["u8"]);
-}
 
 #[test]
 fn the_registry_rejects_same_name_conflicts() {
     let mut registry = OpRegistry::new();
-    registry
-        .register(__fusor_op_declaration_op_read_text())
-        .expect("first registration");
+    registry.register(op_read_text::declaration(), op_read_text::call);
+    registry.register(op_read_text::declaration(), op_read_text::call);
     let conflict = registry
-        .register(__fusor_op_declaration_op_read_text())
-        .expect_err("same-name conflict must fail at assembly time");
+        .take_conflict()
+        .expect("same-name conflict must be recorded at assembly time");
     assert_eq!(conflict.name, "op_read_text");
     assert_eq!(
         registry

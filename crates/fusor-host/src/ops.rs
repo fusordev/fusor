@@ -9,21 +9,25 @@ mod serde;
 mod state;
 mod timers;
 
-pub use core::{install_core_ops, set_print_sink};
+pub use core::set_print_sink;
+pub(crate) use core::op_core_print;
+pub(crate) use process::install_process;
+pub(crate) use timers::{
+    op_clear_interval, op_clear_timeout, op_queue_microtask, op_set_immediate, op_set_interval,
+    op_set_timeout,
+};
 pub use state::{OpStateError, OpStateRegistry};
 
 pub use op_runtime::{
     OpRuntime, OpRuntimeError, install_op_runtime, pending_op_count, poll_op_completions,
     spawn_op, take_op_runtime,
 };
-pub use process::install_process;
 pub use resources::{
     Resource, ResourceId, ResourceTable, ResourceTableError,
 };
 pub use serde::{DeserializationError, JsValueDeserializer, JsValueSerializer, SerializationError};
-pub use timers::install_timers;
 
-use fusor_runtime::{Context, JsValue};
+use fusor_runtime::{Context, HostCall, JsValue};
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -172,11 +176,32 @@ impl std::fmt::Display for OpError {
 
 impl std::error::Error for OpError {}
 
+/// The calling glue of one registered op: the `#[op]`-generated adapter
+/// that deserializes the arguments, invokes the op function, and
+/// serializes the result (§5.7).
+pub type OpGlue = fn(&mut Context<'_>, HostCall) -> Result<JsValue, JsValue>;
+
+/// One op registration: its declaration plus the calling glue the assembly
+/// builder installs onto `Fusor.ops` (§9 step 2).
+#[derive(Clone, Copy, Debug)]
+struct RegisteredOp {
+    declaration: OpDeclaration,
+    glue: OpGlue,
+}
+
 /// Assembly-time op registry: collects declarations, detects name conflicts
 /// between overlays before any JavaScript runs (§5.4).
+///
+/// The [`Overlay`](crate::overlay::Overlay) ops hook registers through this
+/// type. Registrations are kept in registration order (deterministic
+/// installation and snapshot layout); same-name conflicts are recorded and
+/// surfaced by the assembly builder through [`Self::take_conflict`] after
+/// each overlay registers (fail closed).
 #[derive(Debug, Default)]
 pub struct OpRegistry {
-    entries: HashMap<&'static str, OpDeclaration>,
+    entries: Vec<RegisteredOp>,
+    index: HashMap<&'static str, usize>,
+    conflict: Option<OpDeclarationConflict>,
 }
 
 impl OpRegistry {
@@ -186,36 +211,45 @@ impl OpRegistry {
         Self::default()
     }
 
-    /// Registers one op declaration.
+    /// Registers one op declaration and its calling glue.
     ///
-    /// # Errors
-    ///
-    /// Returns the previous declaration when another overlay already
-    /// registered the same op name; assembly must fail closed on the
-    /// conflict (§5.4: same-name conflicts are a build-time error).
-    pub fn register(
-        &mut self,
-        declaration: OpDeclaration,
-    ) -> Result<(), OpDeclarationConflict> {
-        if let Some(previous) = self.entries.get(declaration.name) {
-            return Err(OpDeclarationConflict {
-                name: declaration.name,
-                previous: *previous,
-            });
+    /// A same-name registration is recorded as a conflict (§5.4:
+    /// same-name conflicts are a build-time error) and ignored;
+    /// [`Self::take_conflict`] reports the recorded conflict.
+    pub fn register(&mut self, declaration: OpDeclaration, glue: OpGlue) {
+        if let Some(&position) = self.index.get(declaration.name) {
+            if self.conflict.is_none() {
+                self.conflict = Some(OpDeclarationConflict {
+                    name: declaration.name,
+                    previous: self.entries[position].declaration,
+                });
+            }
+            return;
         }
-        self.entries.insert(declaration.name, declaration);
-        Ok(())
+        self.index.insert(declaration.name, self.entries.len());
+        self.entries.push(RegisteredOp { declaration, glue });
+    }
+
+    /// Takes the first recorded same-name conflict, if any.
+    #[must_use]
+    pub fn take_conflict(&mut self) -> Option<OpDeclarationConflict> {
+        self.conflict.take()
     }
 
     /// Returns the registered declaration for an op name.
     #[must_use]
     pub fn get(&self, name: &str) -> Option<&OpDeclaration> {
-        self.entries.get(name)
+        self.index
+            .get(name)
+            .map(|&position| &self.entries[position].declaration)
     }
 
-    /// Iterates the registered declarations in registration order.
-    pub fn declarations(&self) -> impl Iterator<Item = &OpDeclaration> {
-        self.entries.values()
+    /// Iterates the registered (declaration, glue) pairs in registration
+    /// order, ready for installation onto `Fusor.ops` (§9 step 2).
+    pub fn registrations(&self) -> impl Iterator<Item = (OpDeclaration, OpGlue)> + '_ {
+        self.entries
+            .iter()
+            .map(|registered| (registered.declaration, registered.glue))
     }
 }
 
@@ -278,13 +312,17 @@ pub fn op_error_value(context: &mut Context<'_>, error: OpError) -> JsValue {
 /// the realm global (§5.4).
 ///
 /// Both objects are installed as non-writable, non-enumerable,
-/// non-configurable data properties, exactly once per realm.
+/// non-configurable data properties, exactly once per realm. The assembly
+/// builder (`HostRuntime::builder()`, §9) performs this installation as a
+/// fixed host-core step; embedders never call it directly.
 ///
 /// # Errors
 ///
 /// Returns an [`ExecutionError`] when the global refuses the definitions
 /// (for example a frozen global) or allocation fails.
-pub fn install_namespace(context: &mut Context<'_>) -> Result<(), fusor_runtime::ExecutionError> {
+pub(crate) fn install_namespace(
+    context: &mut Context<'_>,
+) -> Result<(), fusor_runtime::ExecutionError> {
     let global = context.global_object()?.into_object()?;
     let fusor_key = context.property_key("Fusor")?;
     let ops_key = context.property_key("ops")?;
@@ -380,4 +418,212 @@ pub(crate) fn define_op_on(
         .into());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    //! Fusor namespace installation and op exposure (§5.4, §5.5): the
+    //! installation primitives the assembly builder (§9) drives.
+
+    use std::sync::Arc;
+
+    use fusor_compiler::CompilationContext;
+    use fusor_frontend::{CompilationGoal, FrontendOptions, GlobalScriptGoal, with_parsed_program};
+    use fusor_ops::op;
+    use fusor_runtime::{Context, ExecutionLimits, Runtime, RuntimeLimits};
+
+    use super::{OpError, install_namespace, install_op};
+
+    #[op]
+    fn op_add(left: i32, right: i32) -> Result<i32, OpError> {
+        Ok(left + right)
+    }
+
+    #[op]
+    fn op_greet(name: String) -> Result<String, OpError> {
+        Ok(format!("hello {name}"))
+    }
+
+    #[op]
+    fn op_fail() -> Result<(), OpError> {
+        Err(OpError::of_class("RangeError", "out of range"))
+    }
+
+    fn compile_global_script(source: &str) -> Arc<fusor_bytecode::VerifiedBytecode> {
+        with_parsed_program(
+            source,
+            FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
+            |unit| {
+                let context =
+                    CompilationContext::new_with_source_name(unit, Arc::from("fusor-namespace.js"))
+                        .expect("storage plan");
+                let tree = context
+                    .compile_global_script(fusor_bytecode::VerificationLimits::default())
+                    .expect("verified Global Script");
+                Arc::new(tree.verified_bytecode().clone())
+            },
+        )
+        .expect("frontend")
+    }
+
+    fn script_text(context: &mut Context<'_>, source: &str) -> String {
+        let authority = compile_global_script(source);
+        let result = context
+            .execute_global_script(authority, ExecutionLimits::default())
+            .expect("script");
+        result
+            .as_string()
+            .expect("live string")
+            .expect("String")
+            .to_utf8_lossy()
+            .expect("UTF-8")
+    }
+
+    fn with_context<T>(operation: impl FnOnce(&mut Context<'_>) -> T) -> T {
+        let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+        let realm = runtime.create_realm().expect("realm");
+        let mut context = runtime.context(&realm).expect("context");
+        operation(&mut context)
+    }
+
+    #[test]
+    fn the_fusor_namespace_installs_with_the_spec_shape() {
+        with_context(|context| {
+            install_namespace(context).expect("namespace");
+            assert_eq!(
+                script_text(
+                    context,
+                    "var f = Object.getOwnPropertyDescriptor(globalThis, 'Fusor');\
+                     var o = Object.getOwnPropertyDescriptor(Fusor, 'ops');\
+                     JSON.stringify({\
+                         present: f !== undefined,\
+                         writable: f.writable,\
+                         enumerable: f.enumerable,\
+                         configurable: f.configurable,\
+                         opsPresent: o !== undefined,\
+                         opsWritable: o.writable,\
+                         opsConfigurable: o.configurable,\
+                         opsObject: typeof Fusor.ops === 'object',\
+                     });",
+                ),
+                "{\"present\":true,\"writable\":false,\"enumerable\":false,\"configurable\":false,\
+                 \"opsPresent\":true,\"opsWritable\":false,\"opsConfigurable\":false,\"opsObject\":true}"
+            );
+        });
+    }
+
+    #[test]
+    fn installed_ops_are_callable_from_javascript() {
+        with_context(|context| {
+            install_namespace(context).expect("namespace");
+            install_op(context, op_add::declaration(), op_add::call)
+                .expect("add");
+            install_op(context, op_greet::declaration(), op_greet::call)
+                .expect("greet");
+            install_op(context, op_fail::declaration(), op_fail::call)
+                .expect("fail");
+
+            assert_eq!(
+                script_text(context, "String(Fusor.ops.op_add(20, 22));"),
+                "42"
+            );
+            assert_eq!(
+                script_text(context, "String(Fusor.ops.op_greet('fusor'));"),
+                "hello fusor"
+            );
+            // OpError classes reach JavaScript as the named intrinsic family.
+            assert_eq!(
+                script_text(
+                    context,
+                    "var kind; try { Fusor.ops.op_fail(); } catch (error) { kind = error.name + ':' + error.message; } String(kind);",
+                ),
+                "RangeError:out of range"
+            );
+        });
+    }
+
+    #[test]
+    fn argument_deserialization_failures_raise_parameter_indexed_type_errors() {
+        with_context(|context| {
+            install_namespace(context).expect("namespace");
+            install_op(context, op_add::declaration(), op_add::call)
+                .expect("add");
+
+            assert_eq!(
+                script_text(
+                    context,
+                    "var kind, message;\
+                     try { Fusor.ops.op_add('not a number', 1); }\
+                     catch (error) { kind = error.name; message = error.message; }\
+                     String(kind + '|' + message);",
+                ),
+                "TypeError|parameter 0: expected a Number, received String"
+            );
+            assert_eq!(
+                script_text(
+                    context,
+                    "var kind, message;\
+                     try { Fusor.ops.op_add(1); }\
+                     catch (error) { kind = error.name; message = error.message; }\
+                     String(kind + '|' + message);",
+                ),
+                "TypeError|parameter 1: missing argument"
+            );
+        });
+    }
+
+    #[op]
+    fn op_with_context(context: &mut Context<'_>, offset: i32) -> Result<i32, OpError> {
+        let global = context
+            .global_object()
+            .map_err(|error| OpError::new(error.to_string()))?
+            .into_object()
+            .map_err(|error| OpError::new(error.to_string()))?;
+        let key = context
+            .property_key("ctx_probe")
+            .map_err(|error| OpError::new(error.to_string()))?;
+        let value = global
+            .get(context, key)
+            .map_err(|error| OpError::new(error.to_string()))?;
+        let base = value
+            .as_i32()
+            .map_err(|error| OpError::new(error.to_string()))?
+            .unwrap_or(0);
+        Ok(base + offset)
+    }
+
+    #[test]
+    fn the_first_context_parameter_is_injected_and_not_a_js_argument() {
+        // The context parameter is host glue, not a JavaScript argument:
+        // the declaration lists only the JS-visible parameters.
+        assert_eq!(op_with_context::declaration().parameter_types, &["i32"]);
+        with_context(|context| {
+            install_namespace(context).expect("namespace");
+            install_op(context, op_with_context::declaration(), op_with_context::call)
+                .expect("op");
+            assert_eq!(
+                script_text(
+                    context,
+                    "globalThis.ctx_probe = 40; String(Fusor.ops.op_with_context(2));",
+                ),
+                "42"
+            );
+        });
+    }
+
+    #[test]
+    fn installing_a_namespace_twice_is_idempotent_and_ops_accumulate() {
+        with_context(|context| {
+            install_namespace(context).expect("namespace");
+            install_namespace(context).expect("namespace again");
+            install_op(context, op_add::declaration(), op_add::call)
+                .expect("add");
+            install_op(context, op_greet::declaration(), op_greet::call)
+                .expect("greet");
+            assert_eq!(
+                script_text(context, "String(Fusor.ops.op_add(1, 2) + '|' + Fusor.ops.op_greet('x'));"),
+                "3|hello x"
+            );
+        });
+    }
 }

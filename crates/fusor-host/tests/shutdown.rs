@@ -9,6 +9,7 @@ use fusor_bytecode::VerifiedBytecode;
 use fusor_compiler::CompilationContext;
 use fusor_frontend::{CompilationGoal, FrontendOptions, GlobalScriptGoal, with_parsed_program};
 use fusor_host::ops::{OpError, OpRuntime, Resource, install_op, install_op_runtime};
+use fusor_host::overlay::{CoreOverlay, HostRuntime};
 use fusor_host::process::{ExitCode, Signal, SignalState, spawn_signal_forwarder};
 use fusor_host::r#loop::HostLoop;
 use fusor_ops::op;
@@ -47,17 +48,14 @@ fn eval_script(
     }
 }
 
-/// A loop with the namespace, timers, and process ops installed.
+/// A loop assembled through the overlay builder with the core ops (§9).
 fn fixture() -> HostLoop {
-    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
-    let realm = runtime.create_realm().expect("realm");
-    {
-        let mut context = runtime.context(&realm).expect("context");
-        fusor_host::ops::install_namespace(&mut context).expect("namespace");
-        fusor_host::ops::install_timers(&mut context).expect("timers");
-        fusor_host::ops::install_process(&mut context).expect("process");
-    }
-    HostLoop::new(runtime, realm).expect("host loop")
+    HostRuntime::builder()
+        .with_overlay(CoreOverlay)
+        .build()
+        .expect("built")
+        .into_loop()
+        .expect("host loop")
 }
 
 /// Runs one turn whose single custom event evaluates `source`.
@@ -130,21 +128,19 @@ fn shutdown_closes_table_exclusive_resources() {
 
 #[test]
 fn shutdown_cancels_pending_async_ops() {
-    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
-    let realm = runtime.create_realm().expect("realm");
+    let mut host_runtime = HostRuntime::builder().build().expect("built");
     {
-        let mut context = runtime.context(&realm).expect("context");
-        fusor_host::ops::install_namespace(&mut context).expect("namespace");
+        let mut context = host_runtime.context().expect("context");
         install_op(
             &mut context,
-            __fusor_op_declaration_op_hang(),
-            __fusor_op_call_op_hang,
+            op_hang::declaration(),
+            op_hang::call,
         )
         .expect("hang op");
     }
     let op_runtime = OpRuntime::new().expect("op runtime");
     install_op_runtime(op_runtime).expect("installed");
-    let mut host = HostLoop::new(runtime, realm).expect("host loop");
+    let mut host = host_runtime.into_loop().expect("host loop");
     eval(&mut host, "Fusor.ops.op_hang();");
     assert_eq!(
         fusor_host::ops::pending_op_count().expect("installed"),

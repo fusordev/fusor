@@ -231,7 +231,7 @@ impl HostLoop {
         // Promise reactions that must reach quiescence before any further
         // host callback (§6.2).
         self.poll_op_completions();
-        self.drain()?;
+        self.drain_routing()?;
         self.run_signal_handlers()?;
         self.fire_due_timers()?;
         while let Some(event) = self.custom_events.pop_front() {
@@ -250,12 +250,12 @@ impl HostLoop {
                 }
                 Err(error) => return Err(error),
             }
-            self.drain()?;
+            self.drain_routing()?;
         }
         // `setImmediate` runs after this turn's events, before the
         // turn-final checkpoint (§6.4).
         self.run_immediates()?;
-        self.drain()?;
+        self.drain_routing()?;
         // The rejection tracker's notifications reconcile at the end of
         // the turn, after the final checkpoint (§7.3).
         self.handle_promise_rejections()?;
@@ -263,7 +263,9 @@ impl HostLoop {
     }
 
     /// Runs the ECMA-262 microtask checkpoint to quiescence; called
-    /// immediately after every host event (§6.2).
+    /// immediately after every host event (§6.2). An escaping job
+    /// exception propagates to the caller (handler-internal drains fail
+    /// closed on it).
     fn drain(&mut self) -> Result<(), ExecutionError> {
         let mut context = self
             .runtime
@@ -272,11 +274,28 @@ impl HostLoop {
         context.drain_host_jobs(ExecutionLimits::default(), None)
     }
 
+    /// The turn-level checkpoint: like [`Self::drain`], but an escaping
+    /// job exception (a throwing microtask, §7.3) routes through the
+    /// uncaught path instead of failing the turn.
+    fn drain_routing(&mut self) -> Result<(), ExecutionError> {
+        let mut context = self
+            .runtime
+            .context(&self.realm)
+            .map_err(ExecutionError::from)?;
+        match context.drain_host_jobs(ExecutionLimits::default(), None) {
+            Err(ExecutionError::Exception(exception)) => {
+                let value = exception_value(&mut context, &exception)?;
+                self.handle_uncaught(value)
+            }
+            other => other,
+        }
+    }
+
     /// Invokes the registered JS SIGINT handler once per pending delivery
     /// (§7.1), draining to quiescence after each invocation (§6.2). The
-    /// receiver is the `Fusor.process` object; a handler that throws goes
-    /// to the uncaughtException path (Node semantics) and its delivery is
-    /// spent.
+    /// receiver is `undefined` (the process object surface is removed,
+    /// §7.1 note); a handler that throws goes to the uncaughtException
+    /// path (Node semantics) and its delivery is spent.
     fn run_signal_handlers(&mut self) -> Result<(), ExecutionError> {
         let pending = self.signals.take_pending_sigint();
         for _ in 0..pending {
@@ -290,7 +309,7 @@ impl HostLoop {
                 .runtime
                 .context(&self.realm)
                 .map_err(ExecutionError::from)?;
-            let receiver = fusor_process_object(&mut context)?;
+            let receiver = context.undefined();
             match invoke_callback_with(&mut context, &handler, receiver, Vec::new()) {
                 Ok(()) => {}
                 Err(CallError::Thrown(error)) => self.handle_uncaught(error)?,
@@ -302,9 +321,9 @@ impl HostLoop {
     }
 
     /// Routes one uncaught JavaScript exception (§7.3): with a registered
-    /// `Fusor.process.on("uncaughtException")` handler the handler runs as
-    /// a host event with the error value (receiver `Fusor.process`) and
-    /// its jobs drain immediately; otherwise the default path renders the
+    /// `Fusor.ops.op_process_on("uncaughtException")` handler the handler runs as
+    /// a host event with the error value (receiver `undefined`) and its
+    /// jobs drain immediately; otherwise the default path renders the
     /// exception and requests exit 1.
     fn handle_uncaught(&mut self, error: JsValue) -> Result<(), ExecutionError> {
         let Some(handler) = with_process_state(|state| state.uncaught_handler.clone())
@@ -330,7 +349,7 @@ impl HostLoop {
             .runtime
             .context(&self.realm)
             .map_err(ExecutionError::from)?;
-        let receiver = fusor_process_object(&mut context)?;
+        let receiver = context.undefined();
         match invoke_callback_with(&mut context, &handler, receiver, vec![error]) {
             Ok(()) => {}
             // A throwing uncaughtException handler is not routed again:
@@ -350,8 +369,8 @@ impl HostLoop {
     /// Reconciles the end-of-turn rejection notifications (§7.3): a
     /// `Reject` whose Promise gained no handler within the turn is an
     /// unhandled rejection — the registered handler receives
-    /// `(reason, promise)` (receiver `Fusor.process`), or the default
-    /// path warns and requests exit 1. `Handle` notifications only cancel
+    /// `(reason, promise)` (receiver `undefined`), or the default path
+    /// warns and requests exit 1. `Handle` notifications only cancel
     /// their matching `Reject`.
     fn handle_promise_rejections(&mut self) -> Result<(), ExecutionError> {
         let events = take_rejection_events();
@@ -395,7 +414,7 @@ impl HostLoop {
                 .runtime
                 .context(&self.realm)
                 .map_err(ExecutionError::from)?;
-            let receiver = fusor_process_object(&mut context)?;
+            let receiver = context.undefined();
             match invoke_callback_with(
                 &mut context,
                 &handler,
@@ -688,8 +707,8 @@ fn invoke_callback(
 }
 
 /// Invokes one host callback with an explicit receiver and argument list
-/// (timer callbacks use `undefined` and no arguments, §6.4; signal and
-/// exception handlers use the `Fusor.process` receiver, §7.1, §7.3).
+/// (timer, signal, and exception handlers all use the `undefined`
+/// receiver, §6.4, §7.1, §7.3).
 fn invoke_callback_with(
     context: &mut Context<'_>,
     callback: &JsValue,
@@ -708,16 +727,6 @@ fn invoke_callback_with(
             ExecutionLimits::default(),
         )
         .map(|_completion| ())
-}
-
-/// Returns the `Fusor.process` object as a value (§7.1: the process
-/// surface lives inside the Fusor namespace).
-fn fusor_process_object(context: &mut Context<'_>) -> Result<JsValue, ExecutionError> {
-    let global = context.global_object()?.into_object()?;
-    let fusor_key = context.property_key("Fusor")?;
-    let fusor = global.get(context, fusor_key)?.into_object()?;
-    let process_key = context.property_key("process")?;
-    fusor.get(context, process_key)
 }
 
 /// Extracts the error value a handler observes from one escaping

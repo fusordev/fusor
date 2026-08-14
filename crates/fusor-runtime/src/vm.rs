@@ -178,8 +178,8 @@ pub(crate) use dynamic_import::{
     reject_dynamic_import_load_kind,
 };
 pub(crate) use promise::{
-    drain_host_jobs_with_limits, fulfill_promise_host, perform_targeted_promise_reactions_host,
-    reject_promise_host,
+    drain_host_jobs_with_limits, enqueue_host_job, fulfill_promise_host,
+    perform_targeted_promise_reactions_host, reject_promise_host,
 };
 
 #[allow(

@@ -12,11 +12,11 @@
 //! Ctrl+C interrupts nothing, exactly like an idle REPL prompt). Force
 //! exits take effect at the next turn boundary and never reset.
 //!
-//! A JS-side SIGINT handler registered through `process.on` replaces the
-//! default policy: each delivery is handed to the handler by the loop
-//! instead of arming the interrupt or the exit, and registering clears
-//! any pending interrupt request. SIGTERM is not interceptable in the
-//! alpha host (documented).
+//! A JS-side SIGINT handler registered through
+//! `Fusor.ops.op_process_on` replaces the default policy: each delivery
+//! is handed to the handler by the loop instead of arming the interrupt
+//! or the exit, and registering clears any pending interrupt request.
+//! SIGTERM is not interceptable in the alpha host (documented).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
@@ -91,7 +91,7 @@ impl SignalState {
     }
 
     /// Requests a process exit with the given code (force signals carry
-    /// `128 + n`, `process.exit` the caller's truncated code, §7.2).
+    /// `128 + n`, `op_process_exit` the caller's truncated code, §7.2).
     ///
     /// Only the first request wins: the exit code never resets, so a
     /// later signal or `process.exit` call cannot replace it. Returns
@@ -106,8 +106,8 @@ impl SignalState {
     }
 
     /// Enables or disables the JS SIGINT handler path (§7.1). The owner
-    /// task toggles this when `process.on("SIGINT", ...)` registers; the
-    /// delivery thread reads it.
+    /// task toggles this when `op_process_on("SIGINT", ...)` registers;
+    /// the delivery thread reads it.
     pub(crate) fn set_js_sigint_handler(&self, registered: bool) {
         self.js_sigint_handler.store(registered, Ordering::SeqCst);
     }
@@ -153,7 +153,7 @@ impl SignalState {
 }
 
 /// Installs the owner-task [`SignalState`] clone into the op-state
-/// registry (the `process.on` op entry point).
+/// registry (the `op_process_on` op entry point).
 ///
 /// # Errors
 ///
@@ -240,9 +240,9 @@ pub fn spawn_signal_forwarder(state: SignalState) -> Result<SignalForwarder, Sig
     // created inside a runtime context: the caller drives one bootstrap
     // block_on and the streams move into the forwarder thread.
     let (sigint, sigterm) = runtime.block_on(async {
-        let mut sigint = signal(SignalKind::interrupt())
+        let sigint = signal(SignalKind::interrupt())
             .map_err(|error| SignalForwardError::Stream(error.to_string()))?;
-        let mut sigterm = signal(SignalKind::terminate())
+        let sigterm = signal(SignalKind::terminate())
             .map_err(|error| SignalForwardError::Stream(error.to_string()))?;
         Ok::<_, SignalForwardError>((sigint, sigterm))
     })?;

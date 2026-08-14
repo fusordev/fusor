@@ -189,14 +189,20 @@ pub fn own_property_keys(&self, ctx: &mut Context) -> Result<Vec<PropertyKey>, E
 #[op]                                       // 同步:反序列化 → 调用 → 序列化
 fn op_read_text(path: String) -> Result<String, OpError> { ... }
 
+#[op]                                       // 首参 Context:注入 js context(不占 JS 参数)
+fn op_queue_microtask(ctx: &mut Context<'_>, callback: JsValue) -> Result<(), OpError> { ... }
+
 #[op(async)]                                // 异步:返回 Promise,future 在 Tokio 上跑
 async fn op_sleep(ms: u64) -> Result<(), OpError> { ... }
 ```
 
-- op 名 = 函数原 snake_case 名,可 `#[op(name = "...")]` 覆盖
+- op 的 JS 名 = Rust 函数名原样(snake_case op 即 `Fusor.ops.op_*`);无 name 覆盖
 - 约定:sync 命名 `op_*`、async 命名 `op_async_*`(仅约定,无机械变换)
-- 宏生成:注册元数据、参数反序列化、返回/错误序列化;op 函数体在宿主 crate,
-  不接触引擎类型
+- 宏生成:同名 mod(`op_read_text::declaration()` / `op_read_text::call`)、参数
+  反序列化、返回/错误序列化;`register_op!(registry, op_read_text)` 一步注册进
+  OpRegistry;op 函数体在宿主 crate,不接触引擎类型
+- 首参 `&mut Context<'_>` = 注入的 js context:glue 传入自身 ctx、不消耗 JS 参数、
+  不进 declaration.parameter_types;async op 禁止(§5.5 single-owner)
 
 ### 5.2 JsValue↔serde 桥接(引擎核心不引入 serde)
 
@@ -220,10 +226,13 @@ async fn op_sleep(ms: u64) -> Result<(), OpError> { ... }
   其下 `Fusor.ops` 子对象
 - 每个 op 以**函数原 snake_case 名**安装为 `Fusor.ops` 属性;overlay 间同名冲突
   在组装期检测 → 构建期报错
+- **op 不做任何全局环境绑定**:只有 `Fusor.ops`(timer op 即
+  `Fusor.ops.op_set_timeout` 等;`print` 全局移除)
 - overlay 的 init ESM 负责把原始 op 包装成惯用 API(类型化 JS 包装层归属 overlay)
-- 宿主全局惯例保留:`setTimeout/setInterval/clearTimeout/clearInterval/setImmediate`
-  (浏览器/Node 惯例)、`queueMicrotask`(ECMA-262 内建,引擎所有);`print` 全局
-  **移除**(输出能力由 overlay/op 提供)
+- `op_queue_microtask` 入引擎 promise-job 队列(ECMA-262 `HostEnqueuePromiseJob`,
+  经 `Context::enqueue_host_job`):与 Promise 反应同一 FIFO 微任务队列,由 loop
+  的检查点 drain 至静止;ECMA-262 内建 `queueMicrotask` 全局包装留待引擎后续
+  直接暴露(同一底层 API)
 
 ### 5.5 异步 op 与单 owner 约束
 
@@ -252,7 +261,9 @@ pub struct ResourceTable { ... }   // add(Rc<dyn Resource>) -> ResourceId(u32 �
 ### 5.7 宏实现
 
 `fusor-ops` 为 proc-macro crate(Rust 硬性要求),输出普通 token 流,只引用
-fusor-host 与 fusor-runtime 公开 API;展开可用 cargo expand 验证。
+fusor-host 与 fusor-runtime 公开 API;`#[op]` 生成同名 mod 承载
+`declaration()`/`call`,`register_op!` 宏一步注册;首参 `&mut Context<'_>`
+注入 js context。展开可用 cargo expand 验证。
 
 ## 6. 子项目 3:事件循环核心(fusor-host::loop)
 
@@ -269,11 +280,14 @@ fusor-host 与 fusor-runtime 公开 API;展开可用 cargo expand 验证。
 
 ### 6.2 ECMA-262 对齐
 
-- Job 队列语义由引擎已有机制承担(`HostEnqueuePromiseJob` FIFO、
+- Job 队列语义由引擎机制承担(`HostEnqueuePromiseJob` FIFO、
   `HostMakeJobCallback`/`HostCallJobCallback` 默认、FinalizationRegistry cleanup
   jobs post-event);loop 负责调度时机
-- 规范性约束(写死并文档化):每个 job 完整执行后才执行下一个;job 之间不插入
-  宿主回调;**每个宿主事件处理后立即 drain 到静止**(微任务检查点)
+- **Promise 已接入 host loop**:Promise 反应(microtask)与
+  `op_queue_microtask` 入同一引擎 job 队列,按入队序 FIFO;loop 在每个宿主事件
+  处理后 drain 至静止(微任务检查点),job 之间不插入宿主回调
+- 检查点逃逸的 job 异常(抛错的 microtask)经 uncaught 路径路由(§7.3),
+  不失败 turn
 - timers/`setImmediate` 是宿主 API(ECMA-262 不管),语义自定义并文档化,不模仿
   libuv 相位怪癖
 
@@ -292,22 +306,21 @@ fusor-host 与 fusor-runtime 公开 API;展开可用 cargo expand 验证。
 
 ### 6.4 timers
 
-`setTimeout/setInterval/clearTimeout/clearInterval/setImmediate` 实现为常规 ops +
-loop 内 timer 记录堆:到期时间排序、同刻到期按创建序;delay 取 ms 向下取整、负值
-归 0(与 Node/浏览器一致);回调经引擎 `CallJobCallback` 语义调用;`setImmediate`
-定义为"当前 turn 事件处理完成后、drain 前"的队列。pending timers 计为存活
-(alive 判定简化版,文档化)。
+`op_set_timeout/op_set_interval/op_clear_timeout/op_clear_interval/op_set_immediate`
+实现为常规 ops + loop 内 timer 记录堆:到期时间排序、同刻到期按创建序;delay 取
+ms 向下取整、负值归 0(与 Node/浏览器一致);回调经引擎 `CallJobCallback` 语义调
+用;`op_set_immediate` 定义为"当前 turn 事件处理完成后、drain 前"的队列。pending
+timers 计为存活(alive 判定简化版,文档化)。`op_queue_microtask` 见 §5.4/§6.2。
 
 ### 6.5 宿主驱动 API
 
 ```rust
-let host = HostRuntime::builder()
-    .with_overlays(&[&CoreOverlay])   // 子项目 6
-    .with_snapshot(blob)             // 子项目 5(可选)
-    .with_init_sources(init)         // 子项目 5(可选)
-    .build()?;
-host.run_main("main.mjs", source)?;   // 主脚本,循环存活直到无 alive 事件
-host.run_until_idle()?;               // 显式驱动(测试用)
+let host = HostRuntime::builder()       // §9:overlay 组装 + init ESM 求值
+    .with_overlay(CoreOverlay)          // 核心 op 集(§9)
+    .build()?                           // 快照 with_snapshot 随子项目 5 接入
+    .into_loop()?;                      // HostLoop 包装(§6.1)
+host.run_main(authority, limits)?;      // 主脚本,循环存活直到无 alive 事件
+host.run_until_idle()?;                 // 显式驱动(测试用)
 ```
 
 ### 6.6 引擎侧增量
@@ -324,9 +337,10 @@ stdin 通道作为事件源进入同一 turn 循环(替代现在 run_with_inspec
 `tokio::signal` 作为事件源(§6.3 ③)。语义:首次 SIGINT → 触发引擎
 `InterruptHandler`(当前 JS 在指令边界抛不可捕获 `Interrupted`,REPL 中即"中断
 当前输入求值");第二次 SIGINT / SIGTERM → 强制退出,exit code = `128 + n`
-(Node 语义)。宿主可注册 JS 侧处理器(`Fusor.process.on("SIGINT", ...)`,经 ops
-暴露);默认策略:无处理器时按上述退出。`process` 对象挂在 `Fusor` 命名空间下
-(`Fusor.process`),不占 global。
+(Node 语义)。宿主可注册 JS 侧处理器(`Fusor.ops.op_process_on("SIGINT", ...)`,经 ops
+暴露);默认策略:无处理器时按上述退出。**无 `Fusor.process` 对象**:process
+op 与其余 op 一样只挂 `Fusor.ops`(alpha 决定;处理器 receiver 为
+`undefined`,惯用 `this` 语义的 JS 胶水留待后续)。
 
 ### 7.2 exit codes(文档化)
 
@@ -336,10 +350,10 @@ stdin 通道作为事件源进入同一 turn 循环(替代现在 run_with_inspec
 | uncaughtException | 1 |
 | unhandledRejection(对齐 Node 15+) | 1 |
 | 强制信号 | 128 + n |
-| `Fusor.process.exit(code)` | code 截断到 8 位(Node 语义:`exit(256)` → 0) |
+| `Fusor.ops.op_process_exit(code)` | code 截断到 8 位(Node 语义:`exit(256)` → 0) |
 | 资源/限制类引擎中止(instruction limit 等) | 2(引擎中止,文档化) |
 
-`Fusor.process.exit(code)` 为常规 op;**退出不等待** pending 异步 op(文档化;
+`Fusor.ops.op_process_exit(code)` 为常规 op;**退出不等待** pending 异步 op(文档化;
 `beforeExit` YAGNI);退出请求在下个 turn 边界生效,首个请求胜出、不可覆盖;
 中断(`Interrupted`)本身不终结进程(REPL 消费),不进表。
 
@@ -402,6 +416,7 @@ shutdown 期间不再 drain 微任务(文档化)。
   `Function.prototype.toString` 显示 `[native code]`
 - **Rust 闭包不可序列化**:堆内 host Function 对象解耦存储——blob 记录"host 槽位 +
   op 元数据",恢复时宿主重建 op 闭包表并重绑定;op 集按序匹配,不匹配 fail closed
+  (host Function 即 `Fusor` 命名空间与 `Fusor.ops.*` 各 op 函数;无 process 对象)
 - **资源表不可序列化**(fd 等运行时资源):快照中不存资源;overlay init 创建的资源
   必须遵循"启动期惰性重建"约束(Deno 同构,文档化)
 - GC 状态不序列化:恢复后从干净标记状态开始;finalization registry 对象保留、
@@ -454,14 +469,19 @@ pub struct OverlaySource { pub specifier: String, pub text: &'static str }
 
 ### 组装语义(`HostRuntime::builder().with_overlay(p1).with_overlay(p2).build()`)
 
+已落地(2026-08-14):builder 固定安装 host core(`Fusor` 命名空间 + process ops
+到 `Fusor.ops`),overlay op 经 `OpRegistry`(注册序确定、同名冲突构建期报错,
+`register_op!` 注册)安装为 `Fusor.ops.<name>`,init 模块图按拓扑序求值
+(`HostBuildError`/`InitModuleError` fail closed)。步骤:
+
 1. 拓扑排序 overlay 依赖,环检测 → 构建期报错(alpha:不做运行时容错)
 2. 所有 op 注册进 `OpRegistry` → 安装为 `Fusor.ops.<name>`(§5.4)
-3. 各 overlay init 模块图按序求值(宿主全局注入发生在 init 模块里,替代现在的
-   `set_global` 引导方式);init 模块可 `import` 其他 overlay 的 init 模块
-   (`PluginModuleLoader` 解析内嵌虚拟模块说明符 + 可选文件系统回退)
+3. 各 overlay init 模块图按序求值;init 模块可 `import` 其他 overlay 的 init
+   模块(内嵌虚拟模块说明符已落地;`PluginModuleLoader` 文件系统回退为条目 4)
 4. 结果状态即快照输入(§8:组装 + init 求值后序列化;加载快照 = 跳过 1–3)
 
-CLI 自身成为"核心 overlay + CLI overlay"的组合,不再手写安装逻辑。引擎侧零改动。
+CLI 自身成为"核心 overlay + CLI overlay"的组合(`CoreOverlay` 已落地:5 个
+timer op + print op + queueMicrotask op),不再手写安装逻辑。引擎侧零改动。
 迁移备注:现 REPL 的 `print` 捕获缓冲(DevTools `Runtime.consoleAPICalled` 事件源)
 改由 console overlay 承担。
 

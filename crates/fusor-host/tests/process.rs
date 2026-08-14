@@ -1,4 +1,4 @@
-//! The `process` global and its ops (§7.1): `Fusor.process.on("SIGINT", ...)`
+//! The `process` global and its ops (§7.1): `Fusor.ops.op_process_on("SIGINT", ...)`
 //! registration, handler delivery through the loop, and the fail-closed
 //! rejection paths.
 
@@ -10,6 +10,7 @@ use fusor_bytecode::VerifiedBytecode;
 use fusor_compiler::CompilationContext;
 use fusor_frontend::{CompilationGoal, FrontendOptions, GlobalScriptGoal, with_parsed_program};
 use fusor_host::process::Signal;
+use fusor_host::overlay::{CoreOverlay, HostRuntime};
 use fusor_host::r#loop::HostLoop;
 use fusor_runtime::{
     Context, ExecutionError, ExecutionLimits, GlobalScriptError, Runtime, RuntimeLimits,
@@ -73,15 +74,12 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
-        let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
-        let realm = runtime.create_realm().expect("realm");
-        {
-            let mut context = runtime.context(&realm).expect("context");
-            fusor_host::ops::install_namespace(&mut context).expect("namespace");
-            fusor_host::ops::install_timers(&mut context).expect("timers");
-            fusor_host::ops::install_process(&mut context).expect("process");
-        }
-        let host = HostLoop::new(runtime, realm).expect("host loop");
+        let host = HostRuntime::builder()
+            .with_overlay(CoreOverlay)
+            .build()
+            .expect("built")
+            .into_loop()
+            .expect("host loop");
         Self { host }
     }
 
@@ -114,7 +112,7 @@ fn a_registered_sigint_handler_receives_deliveries_and_disables_the_default_exit
     let mut fixture = Fixture::new();
     fixture.eval(
         "globalThis.count = 0; \
-         Fusor.process.on('SIGINT', function () { globalThis.count++; });",
+         Fusor.ops.op_process_on('SIGINT', function () { globalThis.count++; });",
     );
     fixture.host.post_signal(Signal::Interrupt);
     fixture.host.post_signal(Signal::Interrupt);
@@ -133,7 +131,7 @@ fn a_registered_sigint_handler_receives_deliveries_and_disables_the_default_exit
 #[test]
 fn a_registered_handler_prevents_script_interruption() {
     let mut fixture = Fixture::new();
-    fixture.eval("Fusor.process.on('SIGINT', function () { globalThis.handler_ran = true; });");
+    fixture.eval("Fusor.ops.op_process_on('SIGINT', function () { globalThis.handler_ran = true; });");
     fixture.host.post_signal(Signal::Interrupt);
     // The delivery must not arm the interrupt request: the long script
     // completes instead of aborting at the poll.
@@ -154,7 +152,7 @@ fn pending_deliveries_keep_the_loop_alive_until_the_handler_runs() {
     let mut fixture = Fixture::new();
     fixture.eval(
         "globalThis.count = 0; \
-         Fusor.process.on('SIGINT', function () { globalThis.count++; });",
+         Fusor.ops.op_process_on('SIGINT', function () { globalThis.count++; });",
     );
     fixture.host.post_signal(Signal::Interrupt);
     assert!(fixture.host.alive(), "a pending delivery is alive work");
@@ -164,11 +162,11 @@ fn pending_deliveries_keep_the_loop_alive_until_the_handler_runs() {
 }
 
 #[test]
-fn the_handler_receiver_is_the_process_object() {
+fn the_handler_receiver_is_undefined() {
     let mut fixture = Fixture::new();
     fixture.eval(
         "globalThis.self_is_process = false; \
-         Fusor.process.on('SIGINT', function () { globalThis.self_is_process = this === Fusor.process; });",
+         Fusor.ops.op_process_on('SIGINT', function () { globalThis.self_is_process = this === globalThis; });",
     );
     fixture.host.post_signal(Signal::Interrupt);
     fixture.host.run_one_turn().expect("turn");
@@ -180,7 +178,7 @@ fn process_on_rejects_unknown_events() {
     let mut fixture = Fixture::new();
     assert_eq!(
         fixture.observe(
-            "try { Fusor.process.on('BOGUS', function () {}); 'accepted'; } \
+            "try { Fusor.ops.op_process_on('BOGUS', function () {}); 'accepted'; } \
              catch (error) { error.constructor.name + ':' + error.message; }"
         ),
         "RangeError:unsupported process event 'BOGUS' (the alpha host supports 'SIGINT', 'uncaughtException', and 'unhandledRejection')"
@@ -192,7 +190,7 @@ fn process_on_rejects_a_non_function_handler() {
     let mut fixture = Fixture::new();
     assert_eq!(
         fixture.observe(
-            "try { Fusor.process.on('SIGINT', 42); 'accepted'; } \
+            "try { Fusor.ops.op_process_on('SIGINT', 42); 'accepted'; } \
              catch (error) { error.constructor.name; }"
         ),
         "TypeError"
@@ -202,7 +200,7 @@ fn process_on_rejects_a_non_function_handler() {
 #[test]
 fn a_throwing_sigint_handler_goes_to_the_uncaught_path() {
     let mut fixture = Fixture::new();
-    fixture.eval("Fusor.process.on('SIGINT', function () { throw new Error('handler boom'); });");
+    fixture.eval("Fusor.ops.op_process_on('SIGINT', function () { throw new Error('handler boom'); });");
     fixture.host.post_signal(Signal::Interrupt);
     fixture.host.run_one_turn().expect("turn");
     assert_eq!(
@@ -215,7 +213,7 @@ fn a_throwing_sigint_handler_goes_to_the_uncaught_path() {
 #[test]
 fn process_exit_requests_the_code_and_stops_the_loop() {
     let mut fixture = Fixture::new();
-    fixture.eval("Fusor.process.exit(3);");
+    fixture.eval("Fusor.ops.op_process_exit(3);");
     assert_eq!(fixture.host.pending_exit_code(), Some(3));
     assert!(!fixture.host.alive(), "an exit request stops the loop");
     fixture.host.run_until_idle().expect("exits without error");
@@ -224,7 +222,7 @@ fn process_exit_requests_the_code_and_stops_the_loop() {
 #[test]
 fn process_exit_zero_is_a_real_exit_request() {
     let mut fixture = Fixture::new();
-    fixture.eval("Fusor.process.exit(0);");
+    fixture.eval("Fusor.ops.op_process_exit(0);");
     assert_eq!(fixture.host.pending_exit_code(), Some(0));
     assert!(!fixture.host.alive());
 }
@@ -232,7 +230,7 @@ fn process_exit_zero_is_a_real_exit_request() {
 #[test]
 fn process_exit_truncates_the_code_to_8_bits() {
     let mut fixture = Fixture::new();
-    fixture.eval("Fusor.process.exit(256);");
+    fixture.eval("Fusor.ops.op_process_exit(256);");
     assert_eq!(
         fixture.host.pending_exit_code(),
         Some(0),
@@ -243,14 +241,14 @@ fn process_exit_truncates_the_code_to_8_bits() {
 #[test]
 fn process_exit_negative_truncates_to_255() {
     let mut fixture = Fixture::new();
-    fixture.eval("Fusor.process.exit(-1);");
+    fixture.eval("Fusor.ops.op_process_exit(-1);");
     assert_eq!(fixture.host.pending_exit_code(), Some(255));
 }
 
 #[test]
 fn the_first_exit_request_wins() {
     let mut fixture = Fixture::new();
-    fixture.eval("Fusor.process.exit(7);");
+    fixture.eval("Fusor.ops.op_process_exit(7);");
     fixture.host.post_signal(Signal::Terminate);
     assert_eq!(
         fixture.host.pending_exit_code(),
@@ -263,7 +261,7 @@ fn the_first_exit_request_wins() {
 fn a_signal_exit_wins_over_a_later_process_exit() {
     let mut fixture = Fixture::new();
     fixture.host.post_signal(Signal::Terminate);
-    fixture.eval("Fusor.process.exit(7);");
+    fixture.eval("Fusor.ops.op_process_exit(7);");
     assert_eq!(
         fixture.host.pending_exit_code(),
         Some(143),
@@ -300,7 +298,7 @@ fn exit_codes_map_engine_errors_and_interrupts() {
 fn an_uncaught_exception_requests_exit_1_by_default() {
     let mut fixture = Fixture::new();
     fixture.eval(
-        "Fusor.ops.setTimeout(function () { throw new Error('boom'); }, 0);",
+        "Fusor.ops.op_set_timeout(function () { throw new Error('boom'); }, 0);",
     );
     fixture.host.run_one_turn().expect("turn");
     assert_eq!(fixture.host.pending_exit_code(), Some(1));
@@ -312,9 +310,9 @@ fn an_uncaught_exception_handler_receives_the_error_and_the_loop_continues() {
     let mut fixture = Fixture::new();
     fixture.eval(
         "globalThis.caught = null; \
-         Fusor.process.on('uncaughtException', function (error) { globalThis.caught = String(error); }); \
-         Fusor.ops.setTimeout(function () { throw new Error('boom'); }, 0); \
-         Fusor.ops.setTimeout(function () { globalThis.after = true; }, 0);",
+         Fusor.ops.op_process_on('uncaughtException', function (error) { globalThis.caught = String(error); }); \
+         Fusor.ops.op_set_timeout(function () { throw new Error('boom'); }, 0); \
+         Fusor.ops.op_set_timeout(function () { globalThis.after = true; }, 0);",
     );
     fixture.host.run_one_turn().expect("turn");
     assert_eq!(
@@ -330,8 +328,8 @@ fn a_throwing_timer_callback_is_spent_not_refired() {
     let mut fixture = Fixture::new();
     fixture.eval(
         "globalThis.count = 0; \
-         Fusor.process.on('uncaughtException', function () { globalThis.count++; }); \
-         Fusor.ops.setTimeout(function () { throw new Error('x'); }, 0);",
+         Fusor.ops.op_process_on('uncaughtException', function () { globalThis.count++; }); \
+         Fusor.ops.op_set_timeout(function () { throw new Error('x'); }, 0);",
     );
     fixture.host.run_one_turn().expect("turn");
     fixture.host.run_one_turn().expect("turn");
@@ -346,7 +344,7 @@ fn a_throwing_timer_callback_is_spent_not_refired() {
 fn run_main_routes_uncaught_exceptions_through_the_handler() {
     let mut fixture = Fixture::new();
     let authority = compile(
-        "Fusor.process.on('uncaughtException', function (error) { globalThis.caught = String(error); }); \
+        "Fusor.ops.op_process_on('uncaughtException', function (error) { globalThis.caught = String(error); }); \
          throw new Error('main boom');",
     );
     fixture
@@ -383,7 +381,7 @@ fn an_unhandled_rejection_handler_receives_reason_and_promise() {
     let mut fixture = Fixture::new();
     fixture.eval(
         "globalThis.reasons = []; \
-         Fusor.process.on('unhandledRejection', function (reason, promise) { \
+         Fusor.ops.op_process_on('unhandledRejection', function (reason, promise) { \
              globalThis.reasons.push(String(reason) + '/' + typeof promise); \
          }); \
          Promise.reject(new Error('rejected'));",
@@ -401,7 +399,7 @@ fn a_rejection_handled_before_turn_end_does_not_fire() {
     let mut fixture = Fixture::new();
     fixture.eval(
         "globalThis.count = 0; \
-         Fusor.process.on('unhandledRejection', function () { globalThis.count++; }); \
+         Fusor.ops.op_process_on('unhandledRejection', function () { globalThis.count++; }); \
          Promise.reject(new Error('x')).catch(function () {});",
     );
     fixture.host.run_one_turn().expect("turn");

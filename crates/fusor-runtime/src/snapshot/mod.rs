@@ -56,7 +56,7 @@ use std::{error::Error, fmt};
 
 use crate::{
     ArrayIndex, AtomError, AtomKind, JsBigInt, JsNumber, JsString, JsStringError, PredefinedAtom,
-    PropertyKey, PropertyLayout, Runtime, ids::ObjectId,
+    PropertyKey, PropertyLayout, Runtime,
     object::{HeapObject, HeapObjectKind, ObjectRecord, PropertySlot, ShapeProperty},
     value::{HeapReference, StoredValue},
 };

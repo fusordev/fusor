@@ -9,7 +9,7 @@ use fusor_runtime::{JsValue, OwnedPromiseRejectionEvent};
 /// The loop-owned process state.
 #[derive(Debug, Default)]
 pub(crate) struct ProcessState {
-    /// The JS-side SIGINT handler registered through `process.on`
+    /// The JS-side SIGINT handler registered through `Fusor.ops.op_process_on`
     /// (§7.1); `None` means the default interrupt/exit policy applies.
     pub sigint_handler: Option<JsValue>,
     /// The JS-side `uncaughtException` handler (§7.3); `None` means the

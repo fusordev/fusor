@@ -5014,6 +5014,9 @@ pub(crate) enum PromiseJob {
         thenable: StoredValue,
         then: FunctionId,
     },
+    HostCallback {
+        function: FunctionId,
+    },
 }
 
 /// One `Function.prototype.bind` result: a callable/constructable function

@@ -1785,6 +1785,21 @@ impl Context<'_> {
     ) -> Result<(), crate::ExecutionError> {
         crate::vm::drain_host_jobs_with_limits(self.runtime, compiler, limits)
     }
+
+    /// Enqueues one host callback into the engine's promise-job queue
+    /// (ECMA-262 `HostEnqueuePromiseJob`): the callback runs at the next
+    /// microtask checkpoint ([`Self::drain_host_jobs`]) in FIFO order with
+    /// Promise reactions, with the `undefined` receiver and no arguments.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`crate::ExecutionError`] when the value is not a
+    /// callable function or the pending-job limit is exhausted.
+    pub fn enqueue_host_job(&mut self, callback: JsValue) -> Result<(), crate::ExecutionError> {
+        let function = callback.into_function().map_err(crate::ExecutionError::from)?;
+        let id = function.id().map_err(crate::ExecutionError::from)?;
+        crate::vm::enqueue_host_job(self.runtime, id)
+    }
 }
 
 /// Converts a function-call failure into a [`crate::CallError`], re-rooting a

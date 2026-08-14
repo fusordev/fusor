@@ -8,9 +8,10 @@ use std::sync::Arc;
 
 use fusor_compiler::CompilationContext;
 use fusor_frontend::{CompilationGoal, FrontendOptions, GlobalScriptGoal, with_parsed_program};
+use fusor_host::overlay::{CoreOverlay, HostRuntime};
 use fusor_host::r#loop::HostLoop;
 use fusor_runtime::{
-    Context, ExecutionError, ExecutionLimits, GlobalScriptError, Runtime, RuntimeLimits,
+    Context, ExecutionError, ExecutionLimits, GlobalScriptError,
 };
 
 /// Evaluates one Global Script, mapping both failure arms onto
@@ -43,16 +44,14 @@ fn compile(source: &str) -> Arc<fusor_bytecode::VerifiedBytecode> {
     .expect("frontend")
 }
 
-/// A loop with the namespace and core ops installed.
+/// A loop assembled through the overlay builder with the core overlay (§9).
 fn fixture() -> HostLoop {
-    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
-    let realm = runtime.create_realm().expect("realm");
-    {
-        let mut context = runtime.context(&realm).expect("context");
-        fusor_host::ops::install_namespace(&mut context).expect("namespace");
-        fusor_host::ops::install_core_ops(&mut context).expect("core ops");
-    }
-    HostLoop::new(runtime, realm).expect("host loop")
+    HostRuntime::builder()
+        .with_overlay(CoreOverlay)
+        .build()
+        .expect("built")
+        .into_loop()
+        .expect("host loop")
 }
 
 #[test]

@@ -11,9 +11,10 @@ use std::time::Duration;
 use fusor_bytecode::VerifiedBytecode;
 use fusor_compiler::CompilationContext;
 use fusor_frontend::{CompilationGoal, FrontendOptions, GlobalScriptGoal, with_parsed_program};
+use fusor_host::overlay::{CoreOverlay, HostRuntime};
 use fusor_host::r#loop::HostLoop;
 use fusor_runtime::{
-    Context, ExecutionError, ExecutionLimits, GlobalScriptError, Runtime, RuntimeLimits,
+    Context, ExecutionError, ExecutionLimits, GlobalScriptError,
 };
 
 /// Compiles one Global Script into the authority `run_main` and
@@ -73,22 +74,12 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
-        let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
-        let realm = runtime.create_realm().expect("realm");
-        {
-            let mut context = runtime.context(&realm).expect("context");
-            fusor_host::ops::install_namespace(&mut context).expect("namespace");
-            fusor_host::ops::install_timers(&mut context).expect("timers");
-            let global = context.global_object().expect("global");
-            let fusor_key = context.property_key("Fusor").expect("key");
-            let has_fusor = global
-                .into_object()
-                .expect("object")
-                .has(&mut context, fusor_key)
-                .expect("has");
-            assert!(has_fusor, "Fusor must be on the realm global after install");
-        }
-        let host = HostLoop::new(runtime, realm).expect("host loop");
+        let host = HostRuntime::builder()
+            .with_overlay(CoreOverlay)
+            .build()
+            .expect("built")
+            .into_loop()
+            .expect("host loop");
         Self { host }
     }
 
@@ -120,7 +111,7 @@ fn a_timeout_fires_when_the_virtual_clock_reaches_its_deadline() {
     let mut fixture = Fixture::new();
     fixture.eval(
         "globalThis.fired = 0; \
-         Fusor.ops.setTimeout(function () { globalThis.fired++; }, 10);",
+         Fusor.ops.op_set_timeout(function () { globalThis.fired++; }, 10);",
     );
     assert!(fixture.host.alive(), "a pending timer keeps the loop alive");
     fixture
@@ -150,9 +141,9 @@ fn same_deadline_timers_fire_in_creation_order() {
     let mut fixture = Fixture::new();
     fixture.eval(
         "globalThis.order = []; \
-         Fusor.ops.setTimeout(function () { globalThis.order.push('a'); }, 5); \
-         Fusor.ops.setTimeout(function () { globalThis.order.push('b'); }, 5); \
-         Fusor.ops.setTimeout(function () { globalThis.order.push('c'); }, 5);",
+         Fusor.ops.op_set_timeout(function () { globalThis.order.push('a'); }, 5); \
+         Fusor.ops.op_set_timeout(function () { globalThis.order.push('b'); }, 5); \
+         Fusor.ops.op_set_timeout(function () { globalThis.order.push('c'); }, 5);",
     );
     fixture
         .host
@@ -166,8 +157,8 @@ fn delays_truncate_toward_zero_and_negative_delays_clamp_to_zero() {
     let mut fixture = Fixture::new();
     fixture.eval(
         "globalThis.neg = false; globalThis.far = false; \
-         Fusor.ops.setTimeout(function () { globalThis.neg = true; }, -5); \
-         Fusor.ops.setTimeout(function () { globalThis.far = true; }, 10.9);",
+         Fusor.ops.op_set_timeout(function () { globalThis.neg = true; }, -5); \
+         Fusor.ops.op_set_timeout(function () { globalThis.far = true; }, 10.9);",
     );
     // A negative delay clamps to 0: it fires on the very next turn.
     assert_eq!(
@@ -188,7 +179,7 @@ fn set_interval_rearms_and_clear_interval_stops_it() {
     let mut fixture = Fixture::new();
     fixture.eval(
         "globalThis.ticks = 0; \
-         globalThis.handle = Fusor.ops.setInterval(function () { globalThis.ticks++; }, 10);",
+         globalThis.handle = Fusor.ops.op_set_interval(function () { globalThis.ticks++; }, 10);",
     );
     assert!(fixture.host.alive(), "a pending interval keeps the loop alive");
     fixture
@@ -215,7 +206,7 @@ fn set_interval_rearms_and_clear_interval_stops_it() {
         "3",
         "40ms: the re-armed deadline fires"
     );
-    fixture.eval("Fusor.ops.clearInterval(globalThis.handle);");
+    fixture.eval("Fusor.ops.op_clear_interval(globalThis.handle);");
     assert!(!fixture.host.alive(), "a cleared interval no longer keeps the loop alive");
     fixture
         .host
@@ -229,7 +220,7 @@ fn a_zero_delay_interval_fires_once_per_turn() {
     let mut fixture = Fixture::new();
     fixture.eval(
         "globalThis.ticks = 0; \
-         globalThis.handle = Fusor.ops.setInterval(function () { globalThis.ticks++; }, 0);",
+         globalThis.handle = Fusor.ops.op_set_interval(function () { globalThis.ticks++; }, 0);",
     );
     // A zero-delay re-arm lands at `now` and must wait for the next sweep;
     // this must terminate instead of re-firing forever in one turn. Each
@@ -245,7 +236,7 @@ fn a_zero_delay_interval_fires_once_per_turn() {
         "2",
         "exactly one more firing in the next turn"
     );
-    fixture.eval("Fusor.ops.clearInterval(globalThis.handle);");
+    fixture.eval("Fusor.ops.op_clear_interval(globalThis.handle);");
     assert!(!fixture.host.alive());
 }
 
@@ -257,13 +248,13 @@ fn set_immediate_runs_after_this_turns_events_and_before_the_drain() {
     // the end of turn 2, before the turn-final checkpoint (§6.4).
     fixture.eval(
         "globalThis.order = []; \
-         Fusor.ops.setTimeout(function () { \
+         Fusor.ops.op_set_timeout(function () { \
              globalThis.order.push('timer'); \
              Promise.resolve().then(function () { globalThis.order.push('job1'); }); \
          }, 0);",
     );
     fixture.eval(
-        "Fusor.ops.setImmediate(function () { \
+        "Fusor.ops.op_set_immediate(function () { \
              globalThis.order.push('immediate'); \
              Promise.resolve().then(function () { globalThis.order.push('job2'); }); \
          }); \
@@ -285,8 +276,8 @@ fn an_immediate_scheduled_by_an_event_runs_at_the_end_of_that_turn() {
     // timer (§6.4: the queue runs after the current turn's events).
     fixture.eval(
         "globalThis.order = []; \
-         Fusor.ops.setTimeout(function () { globalThis.order.push('timer'); }, 0); \
-         Fusor.ops.setImmediate(function () { globalThis.order.push('immediate'); });",
+         Fusor.ops.op_set_timeout(function () { globalThis.order.push('timer'); }, 0); \
+         Fusor.ops.op_set_immediate(function () { globalThis.order.push('immediate'); });",
     );
     assert_eq!(
         fixture.observe("globalThis.order.join(',');"),
@@ -299,8 +290,8 @@ fn set_immediate_keeps_the_loop_alive_and_runs_before_clock_advance() {
     let mut fixture = Fixture::new();
     fixture.eval(
         "globalThis.order = []; \
-         Fusor.ops.setTimeout(function () { globalThis.order.push('timer'); }, 5); \
-         Fusor.ops.setImmediate(function () { globalThis.order.push('immediate'); });",
+         Fusor.ops.op_set_timeout(function () { globalThis.order.push('timer'); }, 5); \
+         Fusor.ops.op_set_immediate(function () { globalThis.order.push('immediate'); });",
     );
     assert!(fixture.host.alive());
     fixture.host.run_until_idle().expect("idle");
@@ -317,7 +308,7 @@ fn run_main_evaluates_the_main_script_then_drives_the_loop_to_idle() {
     let mut fixture = Fixture::new();
     let authority = compile(
         "globalThis.ran = 0; \
-         Fusor.ops.setTimeout(function () { globalThis.ran = 1; }, 3);",
+         Fusor.ops.op_set_timeout(function () { globalThis.ran = 1; }, 3);",
     );
     fixture
         .host

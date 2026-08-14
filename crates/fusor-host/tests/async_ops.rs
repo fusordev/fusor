@@ -1,10 +1,9 @@
 //! Async ops (§5.5): spawn + mpsc completion back to the owner task.
 
-use std::future::Future;
-
-use fusor_host::ops::{OpError, OpRuntime, install_namespace, install_op, install_op_runtime};
+use fusor_host::ops::{OpError, OpRuntime, install_op, install_op_runtime};
+use fusor_host::overlay::HostRuntime;
 use fusor_ops::op;
-use fusor_runtime::{Context, ExecutionLimits, Runtime, RuntimeLimits};
+use fusor_runtime::{Context, ExecutionLimits};
 
 #[op(async)]
 async fn op_async_double(value: i32) -> Result<i32, OpError> {
@@ -25,11 +24,10 @@ async fn op_async_fail() -> Result<(), OpError> {
 fn assert_send_static<T: Send + 'static>(_: T) {}
 
 fn with_host<T>(operation: impl FnOnce(&mut Context<'_>) -> T) -> T {
-    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
-    let realm = runtime.create_realm().expect("realm");
-    let mut context = runtime.context(&realm).expect("context");
+    let mut host_runtime = HostRuntime::builder().build().expect("built");
     let op_runtime = OpRuntime::new().expect("op runtime");
     install_op_runtime(op_runtime).expect("installed");
+    let mut context = host_runtime.context().expect("context");
     operation(&mut context)
 }
 
@@ -96,11 +94,10 @@ fn script_text(context: &mut Context<'_>, source: &str) -> String {
 #[test]
 fn async_ops_return_promises_that_settle_after_polling() {
     with_host(|context| {
-        install_namespace(context).expect("namespace");
         install_op(
             context,
-            __fusor_op_declaration_op_async_double(),
-            __fusor_op_call_op_async_double,
+            op_async_double::declaration(),
+            op_async_double::call,
         )
         .expect("async double");
 
@@ -135,11 +132,10 @@ fn async_ops_return_promises_that_settle_after_polling() {
 #[test]
 fn async_op_errors_reject_the_promise_with_the_op_class() {
     with_host(|context| {
-        install_namespace(context).expect("namespace");
         install_op(
             context,
-            __fusor_op_declaration_op_async_fail(),
-            __fusor_op_call_op_async_fail,
+            op_async_fail::declaration(),
+            op_async_fail::call,
         )
         .expect("async fail");
 

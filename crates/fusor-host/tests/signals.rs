@@ -10,6 +10,7 @@ use fusor_bytecode::VerifiedBytecode;
 use fusor_compiler::CompilationContext;
 use fusor_frontend::{CompilationGoal, FrontendOptions, GlobalScriptGoal, with_parsed_program};
 use fusor_host::process::Signal;
+use fusor_host::overlay::{CoreOverlay, HostRuntime};
 use fusor_host::r#loop::HostLoop;
 use fusor_runtime::{
     Context, ExecutionError, ExecutionLimits, GlobalScriptError, Runtime, RuntimeLimits,
@@ -72,14 +73,12 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
-        let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
-        let realm = runtime.create_realm().expect("realm");
-        {
-            let mut context = runtime.context(&realm).expect("context");
-            fusor_host::ops::install_namespace(&mut context).expect("namespace");
-            fusor_host::ops::install_timers(&mut context).expect("timers");
-        }
-        let host = HostLoop::new(runtime, realm).expect("host loop");
+        let host = HostRuntime::builder()
+            .with_overlay(CoreOverlay)
+            .build()
+            .expect("built")
+            .into_loop()
+            .expect("host loop");
         Self { host }
     }
 
@@ -147,11 +146,11 @@ fn timers_due_in_an_interrupted_turn_fire_in_the_next_turn() {
     let mut fixture = Fixture::new();
     fixture.eval(
         "globalThis.order = []; \
-         Fusor.ops.setTimeout(function () { \
+         Fusor.ops.op_set_timeout(function () { \
              for (let i = 0; i < 100000; i++) { globalThis.acc = i; } \
              globalThis.order.push('a'); \
          }, 0); \
-         Fusor.ops.setTimeout(function () { globalThis.order.push('b'); }, 0);",
+         Fusor.ops.op_set_timeout(function () { globalThis.order.push('b'); }, 0);",
     );
     fixture.host.post_signal(Signal::Interrupt);
     let result = fixture.host.run_one_turn();

@@ -894,6 +894,14 @@ impl Runtime {
                         &mut work,
                     );
                 }
+                PromiseJob::HostCallback { function } => {
+                    mark_heap_reference(
+                        HeapReference::Function(*function),
+                        &mut marked_functions,
+                        &mut marked_objects,
+                        &mut work,
+                    );
+                }
                 PromiseJob::Thenable {
                     promise,
                     realm: _,

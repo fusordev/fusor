@@ -4,11 +4,9 @@
 //! engine `ToString`, falling back to a kind-shaped rendering for values
 //! the host conversion rejects (objects, functions).
 
-use std::cell::RefCell;
+use fusor_runtime::{Context, JsValue, ValueKind};
 
-use fusor_runtime::{Context, ExecutionError, HostCall, JsValue, ValueKind};
-
-use super::{OpDeclaration, OpError, OpStateRegistry, install_op};
+use super::OpStateRegistry;
 
 /// The current print sink: stdout by default. Installed into the
 /// op-state registry by the host builder; the console overlay
@@ -56,39 +54,45 @@ fn format_print_argument(context: &mut Context<'_>, value: &JsValue) -> String {
     }
 }
 
-/// The variadic core print glue (§5.7 shape; variadic parameters are not
-/// expressible in the `#[op]` macro's flat signature).
-fn op_core_print_glue(
-    context: &mut Context<'_>,
-    call: HostCall,
-) -> Result<JsValue, JsValue> {
-    let rendered: Vec<String> = call
-        .arguments()
-        .iter()
-        .map(|value| format_print_argument(context, value))
-        .collect();
-    let line = rendered.join(" ");
-    if !OpStateRegistry::has::<PrintSink>() {
-        let _ = OpStateRegistry::install(PrintSink::default());
-    }
-    OpStateRegistry::with_mut::<PrintSink, _>(|sink| (sink.0)(&line))
-        .map_err(|error| super::op_error_value(context, OpError::new(error.to_string())))?;
-    Ok(context.undefined())
-}
+/// The core print op (§5.4): `Fusor.ops.op_core_print` with variadic
+/// parameters (not expressible in the `#[op]` macro's flat signature), so
+/// the op is hand-rolled here in the same shape the `#[op]` macro
+/// generates — a module named after the op carrying `declaration()` and
+/// `call` — which `register_op!` consumes (§9).
+#[doc(hidden)]
+pub(crate) mod op_core_print {
+    use fusor_runtime::{Context, HostCall, JsValue};
 
-/// Installs the core ops as `Fusor.ops.op_core_print` (§5.4).
-///
-/// # Errors
-///
-/// Returns an [`ExecutionError`] when the op cannot be installed.
-pub fn install_core_ops(context: &mut Context<'_>) -> Result<(), ExecutionError> {
-    install_op(
-        context,
+    use crate::ops::{OpDeclaration, OpError};
+
+    use super::{OpStateRegistry, PrintSink, format_print_argument};
+
+    /// The core print op's declaration.
+    #[must_use]
+    pub(crate) fn declaration() -> OpDeclaration {
         OpDeclaration {
             name: "op_core_print",
             parameter_types: &["...values"],
             is_async: false,
-        },
-        op_core_print_glue,
-    )
+        }
+    }
+
+    /// The variadic core print glue (§5.7 shape).
+    pub(crate) fn call(
+        context: &mut Context<'_>,
+        call: HostCall,
+    ) -> Result<JsValue, JsValue> {
+        let rendered: Vec<String> = call
+            .arguments()
+            .iter()
+            .map(|value| format_print_argument(context, value))
+            .collect();
+        let line = rendered.join(" ");
+        if !OpStateRegistry::has::<PrintSink>() {
+            let _ = OpStateRegistry::install(PrintSink::default());
+        }
+        OpStateRegistry::with_mut::<PrintSink, _>(|sink| (sink.0)(&line))
+            .map_err(|error| ::fusor_host::ops::op_error_value(context, OpError::new(error.to_string())))?;
+        Ok(context.undefined())
+    }
 }

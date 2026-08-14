@@ -1,7 +1,7 @@
 //! The centralized op-state registry: one owner-task singleton table
 //! keyed by `TypeId`, replacing the scattered per-module thread_locals.
 
-use fusor_host::ops::{OpStateError, OpStateRegistry};
+use fusor_host::ops::OpStateRegistry;
 
 #[derive(Debug, Default)]
 struct CounterState {

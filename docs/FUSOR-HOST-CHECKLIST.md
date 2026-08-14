@@ -89,9 +89,9 @@
 ## 子项目 4:进程生命周期与诊断(fusor-host::process)§7
 
 - [x] 信号事件源;SIGINT 首次 → 引擎 `InterruptHandler`;二次 SIGINT/SIGTERM → 128+n(可注入 + `spawn_signal_forwarder` OS 转发;OS 投递按 §7.6 用合成信号测试)
-- [x] JS 侧 `Fusor.process.on("SIGINT", ...)` 注册(op 暴露;处理器替换默认策略、逐次投递、this=Fusor.process;SIGTERM 不可拦截,已文档化)
-- [x] exit code 表(§7.2)实现与文档化(`ExitCode` 枚举 + `from_execution_error` 映射;引擎中止码=2 已补设计);`Fusor.process.exit(code)` op(8 位截断、下个 turn 边界生效、首个请求胜出)
-- [x] uncaughtException / unhandledRejection 默认路径(exit 1)+ 宿主处理器(处理器经 `Fusor.process.on` 注册、作为 loop 事件回调;完整 stack 渲染随 miette 条目 §7.5 落地,当前默认路径渲染错误身份)
+- [x] JS 侧 SIGINT 处理器注册(2026-08-14 变更:`Fusor.process` 对象移除,op 为 `Fusor.ops.op_process_on`;处理器替换默认策略、逐次投递、receiver=undefined;SIGTERM 不可拦截,已文档化)
+- [x] exit code 表(§7.2)实现与文档化(`ExitCode` 枚举 + `from_execution_error` 映射;引擎中止码=2 已补设计);`Fusor.ops.op_process_exit(code)` op(8 位截断、下个 turn 边界生效、首个请求胜出)
+- [x] uncaughtException / unhandledRejection 默认路径(exit 1)+ 宿主处理器(处理器经 `Fusor.ops.op_process_on` 注册、作为 loop 事件回调,receiver=undefined;完整 stack 渲染随 miette 条目 §7.5 落地,当前默认路径渲染错误身份)
 - [x] shutdown 序列 ①–⑤ 按序实现:`HostLoop::shutdown(self) -> ExitCode`(①消费 loop 停新源+forwarder 可控停止 ②take/drop OpRuntime 取消 future ③`close_all_resources` ④waiters 随引擎 Drop ⑤drop Runtime);期间不 drain;清理全部 thread-local 状态,同线程可再装新 loop
 - [x] miette 统一渲染管线(`process::diagnostics`:`ColorPolicy` Auto/Always/Never + `resolve`/`from_env`、单一 `GraphicalReportHandler` 路径;求值层 `HostDiagnostic`(frame→源标签)、op 层 `OpDiagnostic`、默认路径 `MessageDiagnostic`;loop 默认 uncaught/unhandled 路径走该管线);编译/解析/快照层适配随各 crate 落地;CLI/REPL 接入随子项目 6 重组
 - [x] 错误码体系(纯数字五位数,按 §12.1 分类区间编排;`ErrorCode` + `from_execution_error`/`from_call_error` 映射,码表补入设计 §12.1;`HostDiagnostic`/`OpDiagnostic` 渲染码;`OpError.code` 改为 `u16` 数字码)
@@ -110,9 +110,9 @@
 
 ## 子项目 6:Overlay 组装机制(fusor-host::overlay)§9
 
-- [ ] `Overlay` trait + `OverlaySource`
-- [ ] 拓扑排序 + 环检测(构建期报错)
-- [ ] op 注册 → `Fusor.ops` 安装;init 模块图按序求值
+- [x] `Overlay` trait + `OverlaySource`(2026-08-14;`#[op]` 同名 mod + `register_op!`,首参 `&mut Context` 注入)
+- [x] 拓扑排序 + 环检测(构建期报错;重复 overlay 名/未知依赖/重复 init 源一并 fail closed)
+- [x] op 注册 → `Fusor.ops` 安装;init 模块图按序求值(内嵌虚拟说明符互 import;文件系统回退随条目 4)
 - [ ] `PluginModuleLoader`(内嵌虚拟模块说明符 + 文件系统回退)
 - [ ] CLI 重组为"核心 overlay + CLI overlay";`print` 全局移除
 - [ ] DevTools `Runtime.consoleAPICalled` 捕获改由 console overlay 承担

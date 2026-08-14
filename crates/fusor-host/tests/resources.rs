@@ -3,8 +3,9 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use fusor_host::overlay::HostRuntime;
 use fusor_host::ops::{
-    OpError, Resource, ResourceId, ResourceTable, add_resource, install_namespace, install_op,
+    OpError, Resource, ResourceId, ResourceTable, add_resource, install_op,
     install_resource_table, lookup_resource,
 };
 use fusor_ops::op;
@@ -127,15 +128,13 @@ fn close_all_releases_every_resource() {
 
 #[test]
 fn resource_id_parameters_resolve_through_the_installed_table() {
-    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
-    let realm = runtime.create_realm().expect("realm");
-    let mut context = runtime.context(&realm).expect("context");
+    let mut host_runtime = HostRuntime::builder().build().expect("built");
+    let mut context = host_runtime.context().expect("context");
     install_resource_table(ResourceTable::new()).expect("installed");
-    install_namespace(&mut context).expect("namespace");
     install_op(
         &mut context,
-        __fusor_op_declaration_op_use_resource(),
-        __fusor_op_call_op_use_resource,
+        op_use_resource::declaration(),
+        op_use_resource::call,
     )
     .expect("use resource");
 
@@ -172,15 +171,13 @@ fn the_table_is_single_owner_by_construction() {
 
 #[test]
 fn closing_a_resource_makes_its_id_fail_closed_in_ops() {
-    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
-    let realm = runtime.create_realm().expect("realm");
-    let mut context = runtime.context(&realm).expect("context");
+    let mut host_runtime = HostRuntime::builder().build().expect("built");
+    let mut context = host_runtime.context().expect("context");
     install_resource_table(ResourceTable::new()).expect("installed");
-    install_namespace(&mut context).expect("namespace");
     install_op(
         &mut context,
-        __fusor_op_declaration_op_use_resource(),
-        __fusor_op_call_op_use_resource,
+        op_use_resource::declaration(),
+        op_use_resource::call,
     )
     .expect("use resource");
 
