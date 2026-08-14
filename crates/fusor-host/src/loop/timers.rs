@@ -153,6 +153,14 @@ pub(crate) fn install_timer_state(state: TimerState) -> Result<(), TimerState> {
     })
 }
 
+/// Removes the installed timer state (shutdown teardown, §7.4), dropping
+/// the pending callbacks with it so a fresh loop can install on the same
+/// thread.
+#[must_use]
+pub(crate) fn take_timer_state() -> Option<TimerState> {
+    TIMER_STATE.with(|slot| slot.borrow_mut().take())
+}
+
 /// Borrows the installed timer state mutably (the op entry points).
 pub(crate) fn with_timer_state<R>(
     operation: impl FnOnce(&mut TimerState) -> R,

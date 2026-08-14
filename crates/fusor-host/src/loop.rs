@@ -21,15 +21,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::process::{
-    ProcessState, Signal, SignalState, has_pending_rejections, install_process_state,
-    install_signal_state, push_rejection_event, take_rejection_events, with_process_state,
+    ExitCode, ProcessState, Signal, SignalState, has_pending_rejections, install_process_state,
+    install_signal_state, push_rejection_event, take_process_state, take_rejection_events,
+    take_signal_state, with_process_state,
 };
 use fusor_runtime::{
     CallError, Context, ErrorObjectKind, ExceptionKind, ExecutionError, ExecutionLimits,
     GlobalScriptError, JsException, JsValue, PromiseRejectionEvent, PromiseRejectionOperation,
     Realm, Runtime,
 };
-use timers::{TimerState, install_timer_state};
+use timers::{TimerState, install_timer_state, take_timer_state};
 
 /// One custom host event: a closure the loop invokes on the owner task.
 ///
@@ -581,6 +582,42 @@ impl HostLoop {
     /// Queues one custom host event for the next turn (§6.3 event source ⑤).
     pub fn post_event(&mut self, event: HostEvent) {
         self.custom_events.push_back(event);
+    }
+
+    /// Runs the documented shutdown sequence (§7.4):
+    ///
+    /// ① consuming the loop stops every event source;
+    /// ② the installed [`crate::ops::OpRuntime`] is dropped, cancelling
+    ///    every pending async-op future (Tokio cancellation);
+    /// ③ every table-exclusive resource closes
+    ///    ([`crate::ops::close_all_resources`], §5.6);
+    /// ④ `Atomics.waitAsync` waiters cancel through the engine's own
+    ///    drop path when the runtime goes;
+    /// ⑤ the [`Runtime`] is dropped, and with it every remaining
+    ///    loop-owned thread-local state — no microtasks drain in between
+    ///    (§7.4).
+    ///
+    /// Returns the process exit code the driver should use: the pending
+    /// requested code, or [`ExitCode::Clean`].
+    #[must_use]
+    pub fn shutdown(self) -> ExitCode {
+        let exit_code = match self.signals.pending_exit_code() {
+            Some(code) => ExitCode::Requested(code),
+            None => ExitCode::Clean,
+        };
+        // ② Cancel pending async ops: dropping the op runtime drops its
+        // executor and every spawned future.
+        drop(crate::ops::take_op_runtime());
+        // ③ Close table-exclusive resources (§5.6).
+        crate::ops::close_all_resources();
+        // ④–⑤ Tear down the loop-owned state (pending callbacks and
+        // handler roots release while the runtime mailbox is still
+        // alive), then drop the Runtime. No drain happens in between.
+        drop(take_process_state());
+        drop(take_timer_state());
+        drop(take_signal_state());
+        drop(self);
+        exit_code
     }
 
     /// Delivers one signal through the injectable event source (§7.6):

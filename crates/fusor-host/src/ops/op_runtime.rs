@@ -157,6 +157,18 @@ pub fn install_op_runtime(runtime: OpRuntime) -> Result<(), OpRuntime> {
     })
 }
 
+/// Removes the installed owner-task [`OpRuntime`], returning it for the
+/// caller to drop (shutdown step ②, §7.4).
+///
+/// Dropping the returned runtime drops its Tokio executor and therefore
+/// cancels every spawned async-op future (Tokio cancellation semantics);
+/// the completion channel closes and later polls report
+/// [`OpRuntimeError::NotInstalled`].
+#[must_use]
+pub fn take_op_runtime() -> Option<OpRuntime> {
+    OP_RUNTIME.with(|slot| slot.borrow_mut().take())
+}
+
 /// Spawns one async op future through the installed owner-task runtime.
 ///
 /// # Errors

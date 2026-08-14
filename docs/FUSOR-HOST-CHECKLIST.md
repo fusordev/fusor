@@ -92,7 +92,7 @@
 - [x] JS 侧 `Fusor.process.on("SIGINT", ...)` 注册(op 暴露;处理器替换默认策略、逐次投递、this=Fusor.process;SIGTERM 不可拦截,已文档化)
 - [x] exit code 表(§7.2)实现与文档化(`ExitCode` 枚举 + `from_execution_error` 映射;引擎中止码=2 已补设计);`Fusor.process.exit(code)` op(8 位截断、下个 turn 边界生效、首个请求胜出)
 - [x] uncaughtException / unhandledRejection 默认路径(exit 1)+ 宿主处理器(处理器经 `Fusor.process.on` 注册、作为 loop 事件回调;完整 stack 渲染随 miette 条目 §7.5 落地,当前默认路径渲染错误身份)
-- [ ] shutdown 序列 ①–⑤ 按序实现:`close_all` → waiters 取消 → drop Runtime;期间不 drain
+- [x] shutdown 序列 ①–⑤ 按序实现:`HostLoop::shutdown(self) -> ExitCode`(①消费 loop 停新源+forwarder 可控停止 ②take/drop OpRuntime 取消 future ③`close_all_resources` ④waiters 随引擎 Drop ⑤drop Runtime);期间不 drain;清理全部 thread-local 状态,同线程可再装新 loop
 - [ ] miette 统一渲染管线(所有错误层适配 `Diagnostic`)+ 彩色(TTY 检测、`NO_COLOR`、`--no-color`)
 - [ ] 错误码体系(沿用 `FUS-xxx-xxx` 惯例)与 §12.1 分类对应
 - [ ] 测试:合成信号事件(不依赖 OS)、shutdown 每步断言、exit code 矩阵

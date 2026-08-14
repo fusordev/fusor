@@ -42,6 +42,14 @@ pub(crate) fn install_process_state(state: ProcessState) -> Result<(), ProcessSt
     })
 }
 
+/// Removes the installed process state (shutdown teardown, §7.4),
+/// dropping the registered handlers with it so a fresh loop can install
+/// on the same thread.
+#[must_use]
+pub(crate) fn take_process_state() -> Option<ProcessState> {
+    PROCESS_STATE.with(|slot| slot.borrow_mut().take())
+}
+
 /// Borrows the installed process state mutably (the op entry points).
 pub(crate) fn with_process_state<R>(
     operation: impl FnOnce(&mut ProcessState) -> R,

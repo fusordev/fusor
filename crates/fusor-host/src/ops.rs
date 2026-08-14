@@ -9,7 +9,7 @@ mod timers;
 
 pub use op_runtime::{
     OpRuntime, OpRuntimeError, install_op_runtime, pending_op_count, poll_op_completions,
-    spawn_op,
+    spawn_op, take_op_runtime,
 };
 pub use process::install_process;
 pub use resources::{
@@ -68,6 +68,22 @@ pub fn add_resource(
 #[must_use]
 pub fn close_resource(id: u32) -> bool {
     RESOURCE_TABLE.with(|slot| slot.borrow_mut().close(ResourceId::from_u32(id)))
+}
+
+/// Closes every table-exclusive resource in the installed table
+/// (shutdown step ③, §7.4) and returns the number of live entries taken.
+///
+/// Resources still held elsewhere (an embedder `Rc`, a live async-op
+/// future) close when their last holder drops, per the [`Resource`]
+/// contract.
+#[must_use]
+pub fn close_all_resources() -> usize {
+    RESOURCE_TABLE.with(|slot| {
+        let mut table = slot.borrow_mut();
+        let count = table.len();
+        table.close_all();
+        count
+    })
 }
 
 /// Static declaration metadata for one `#[op]` function.

@@ -173,6 +173,13 @@ pub(crate) fn install_signal_state(state: SignalState) -> Result<(), SignalState
     })
 }
 
+/// Removes the installed signal state (shutdown teardown, §7.4) so a
+/// fresh loop can install on the same thread.
+#[must_use]
+pub(crate) fn take_signal_state() -> Option<SignalState> {
+    SIGNAL_STATE.with(|slot| slot.borrow_mut().take())
+}
+
 /// Borrows the installed signal state (the `process.on` op entry point).
 pub(crate) fn with_signal_state<R>(
     operation: impl FnOnce(&SignalState) -> R,
@@ -230,17 +237,20 @@ impl std::error::Error for SignalForwardError {}
 /// One attached OS signal forwarder (§7.1): real SIGINT/SIGTERM
 /// deliveries land in the shared [`SignalState`].
 ///
-/// The forwarder thread runs until process exit; the shutdown sequence
-/// (§7.4) replaces this with a controlled stop.
+/// The forwarder thread runs until [`SignalForwarder::shutdown`] stops it
+/// (shutdown step ①, §7.4).
 #[derive(Debug)]
 pub struct SignalForwarder {
     handle: std::thread::JoinHandle<()>,
+    stop: tokio::sync::oneshot::Sender<()>,
 }
 
 impl SignalForwarder {
-    /// Waits for the forwarder thread to exit (which never happens on its
-    /// own before process exit; §7.4 adds a controlled stop).
-    pub fn join(self) -> std::thread::Result<()> {
+    /// Stops the forwarder (shutdown step ①, §7.4): the signal streams
+    /// are dropped, the thread joins, and OS signals regain their default
+    /// disposition.
+    pub fn shutdown(self) -> std::thread::Result<()> {
+        let _ = self.stop.send(());
         self.handle.join()
     }
 }
@@ -258,18 +268,29 @@ pub fn spawn_signal_forwarder(state: SignalState) -> Result<SignalForwarder, Sig
     use tokio::signal::unix::{SignalKind, signal};
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_time()
+        .enable_io()
         .build()
         .map_err(|error| SignalForwardError::Executor(error.to_string()))?;
-    let mut sigint = signal(SignalKind::interrupt())
-        .map_err(|error| SignalForwardError::Stream(error.to_string()))?;
-    let mut sigterm = signal(SignalKind::terminate())
-        .map_err(|error| SignalForwardError::Stream(error.to_string()))?;
+    // The signal streams register against the reactor, so they must be
+    // created inside a runtime context: the caller drives one bootstrap
+    // block_on and the streams move into the forwarder thread.
+    let (sigint, sigterm) = runtime.block_on(async {
+        let mut sigint = signal(SignalKind::interrupt())
+            .map_err(|error| SignalForwardError::Stream(error.to_string()))?;
+        let mut sigterm = signal(SignalKind::terminate())
+            .map_err(|error| SignalForwardError::Stream(error.to_string()))?;
+        Ok::<_, SignalForwardError>((sigint, sigterm))
+    })?;
+    let (stop, mut stop_rx) = tokio::sync::oneshot::channel();
     let handle = std::thread::Builder::new()
         .name("fusor-signals".to_owned())
         .spawn(move || {
             runtime.block_on(async move {
+                let mut sigint = sigint;
+                let mut sigterm = sigterm;
                 loop {
                     tokio::select! {
+                        _ = &mut stop_rx => break,
                         received = sigint.recv() => {
                             if received.is_some() {
                                 state.deliver(Signal::Interrupt);
@@ -285,5 +306,5 @@ pub fn spawn_signal_forwarder(state: SignalState) -> Result<SignalForwarder, Sig
             });
         })
         .map_err(|error| SignalForwardError::Spawn(error.to_string()))?;
-    Ok(SignalForwarder { handle })
+    Ok(SignalForwarder { handle, stop })
 }
