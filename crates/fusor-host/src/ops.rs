@@ -1,11 +1,14 @@
 //! Op binding layer (§5): declarations, the op error contract, and the
 //! assembly registry.
 
+mod core;
 mod op_runtime;
 mod process;
 mod resources;
 mod serde;
 mod timers;
+
+pub use core::{install_core_ops, set_print_sink};
 
 pub use op_runtime::{
     OpRuntime, OpRuntimeError, install_op_runtime, pending_op_count, poll_op_completions,
