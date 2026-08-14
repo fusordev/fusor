@@ -32,7 +32,13 @@ use fusor_host::ops::set_print_sink;
 use fusor_host::overlay::{CoreOverlay, HostRuntime};
 use tokio::sync::mpsc;
 
-use crate::{cli::overlay::CliOverlay, cli::resolver::NodeLikeResolver, report_error};
+use crate::{
+    cli::overlay::CliOverlay,
+    cli::resolver::NodeLikeResolver,
+    report_execution,
+    report_module_error,
+    report_script_error,
+};
 use crate::cdp::{
     self as cdp,
     format::format_value,
@@ -131,6 +137,9 @@ pub(crate) async fn run(inspect_port: Option<u16>, inspect_break: bool) -> u8 {
     let mut imports: Vec<String> = Vec::new();
     let mut entry_index = 0_u64;
     let mut pending = String::new();
+    // V8 REPL semantics: pending timers fire on schedule — the virtual clock
+    // advances by the real time that passed while waiting for input.
+    let mut watermark = std::time::Instant::now();
     loop {
         let prompt = if pending.is_empty() { "fusor> " } else { "...> " };
         let line = match editor.readline(prompt) {
@@ -160,6 +169,15 @@ pub(crate) async fn run(inspect_port: Option<u16>, inspect_break: bool) -> u8 {
         if entry.trim().is_empty() {
             continue;
         }
+        let elapsed = watermark.elapsed();
+        if let Err(error) = host_loop.advance_time(elapsed) {
+            report_execution("timers", error);
+            continue;
+        }
+        if let Err(error) = host_loop.run_one_turn() {
+            report_execution("timers", error);
+            continue;
+        }
         entry_index += 1;
         evaluate_repl_entry(
             &mut host_loop,
@@ -171,6 +189,7 @@ pub(crate) async fn run(inspect_port: Option<u16>, inspect_break: bool) -> u8 {
             true,
         )
         .await;
+        watermark = std::time::Instant::now();
         // The loop's uncaught/unhandled default paths request the exit code
         // (§7.2); honor the request and leave the session.
         if let Some(code) = host_loop.pending_exit_code() {
@@ -228,6 +247,9 @@ async fn run_with_inspector(
     let mut entry_index = 0_u64;
     let mut imports = Vec::new();
     let mut pending = String::new();
+    // V8 REPL semantics: pending timers fire on schedule — the virtual clock
+    // advances by the real time that passed while waiting for input.
+    let mut watermark = std::time::Instant::now();
 
     // CDP inspection state lives in one owner (this task); the engine-side
     // intrinsics are created inside a turn and held across turns.
@@ -306,6 +328,15 @@ async fn run_with_inspector(
                 if entry.trim().is_empty() {
                     continue;
                 }
+                let elapsed = watermark.elapsed();
+                if let Err(error) = host_loop.advance_time(elapsed) {
+                    report_execution("timers", error);
+                    continue;
+                }
+                if let Err(error) = host_loop.run_one_turn() {
+                    report_execution("timers", error);
+                    continue;
+                }
                 entry_index += 1;
                 evaluate_repl_entry(
                     host_loop,
@@ -316,6 +347,7 @@ async fn run_with_inspector(
                     entry_index,
                     true,
                 ).await;
+                watermark = std::time::Instant::now();
                 // The loop's uncaught/unhandled default paths request the exit
                 // code (§7.2); honor the request and leave the session.
                 if let Some(code) = host_loop.pending_exit_code() {
@@ -354,7 +386,7 @@ async fn evaluate_repl_entry(
         {
             Ok(edges) => edges,
             Err(error) => {
-                report_error("module entry", &error);
+                report_module_error("module entry", error);
                 return;
             }
         };
@@ -376,13 +408,13 @@ async fn evaluate_repl_entry(
             Ok(())
         }));
         if let Err(error) = host_loop.run_one_turn() {
-            report_error("module entry", &error);
+            report_execution("module entry", error);
             return;
         }
         match outcome.replace(None) {
             Some(Ok(())) => {}
             Some(Err(error)) => {
-                report_error("module entry", &error);
+                report_module_error("module entry", error);
                 return;
             }
             None => return,
@@ -390,7 +422,7 @@ async fn evaluate_repl_entry(
         if let Err(error) =
             crate::cli::imports::drain_pending_imports(host_loop, resolver, limits).await
         {
-            report_error("module entry", &error);
+            report_module_error("module entry", error);
         }
         // Probe the module's evaluation error inside a turn.
         let error_slot: Rc<RefCell<Option<ModuleEvaluationError>>> = Rc::new(RefCell::new(None));
@@ -401,15 +433,11 @@ async fn evaluate_repl_entry(
             Ok(())
         }));
         if let Err(error) = host_loop.run_one_turn() {
-            report_error("module entry", &error);
+            report_execution("module entry", error);
             return;
         }
         if let Some(error) = error_slot.replace(None) {
-            report_error("module entry", &error);
-        }
-        // Pending timers fire before the next prompt (virtual clock).
-        if let Err(error) = host_loop.run_until_idle() {
-            report_error("module entry", &error);
+            report_module_error("module entry", error);
         }
         if print_completion {
             if let Some(value) = completion.replace(None) {
@@ -433,13 +461,13 @@ async fn evaluate_repl_entry(
             Ok(())
         }));
         if let Err(error) = host_loop.run_one_turn() {
-            report_error("script entry", &error);
+            report_execution("script entry", error);
             return;
         }
         match outcome.replace(None) {
             Some(Ok(())) => {}
             Some(Err(error)) => {
-                report_error("script entry", &error);
+                report_script_error("script entry", error);
                 return;
             }
             None => return,
@@ -447,10 +475,7 @@ async fn evaluate_repl_entry(
         if let Err(error) =
             crate::cli::imports::drain_pending_imports(host_loop, resolver, limits).await
         {
-            report_error("script entry", &error);
-        }
-        if let Err(error) = host_loop.run_until_idle() {
-            report_error("script entry", &error);
+            report_module_error("script entry", error);
         }
         if print_completion {
             if let Some(value) = completion.replace(None) {

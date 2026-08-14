@@ -187,6 +187,7 @@ impl HostRuntimeBuilder {
             // of the overlays.
             install_namespace(&mut context).map_err(HostBuildError::Execution)?;
             install_process(&mut context).map_err(HostBuildError::Execution)?;
+            crate::ops::install_clock_state();
             // Overlay ops (§9 step 2): register in dependency order, fail
             // closed on the first same-name conflict, then install.
             let mut registry = OpRegistry::new();

@@ -363,7 +363,6 @@ dependencies = [
  "fusor-frontend",
  "fusor-host",
  "fusor-runtime",
- "miette",
  "rustyline",
  "serde_json",
  "sha1",

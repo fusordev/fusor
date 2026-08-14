@@ -93,7 +93,7 @@
 - [x] exit code 表(§7.2)实现与文档化(`ExitCode` 枚举 + `from_execution_error` 映射;引擎中止码=2 已补设计);`Fusor.ops.op_process_exit(code)` op(8 位截断、下个 turn 边界生效、首个请求胜出)
 - [x] uncaughtException / unhandledRejection 默认路径(exit 1)+ 宿主处理器(处理器经 `Fusor.ops.op_process_on` 注册、作为 loop 事件回调,receiver=undefined;完整 stack 渲染随 miette 条目 §7.5 落地,当前默认路径渲染错误身份)
 - [x] shutdown 序列 ①–⑤ 按序实现:`HostLoop::shutdown(self) -> ExitCode`(①消费 loop 停新源+forwarder 可控停止 ②take/drop OpRuntime 取消 future ③`close_all_resources` ④waiters 随引擎 Drop ⑤drop Runtime);期间不 drain;清理全部 thread-local 状态,同线程可再装新 loop
-- [x] miette 统一渲染管线(`process::diagnostics`:`ColorPolicy` Auto/Always/Never + `resolve`/`from_env`、单一 `GraphicalReportHandler` 路径;求值层 `HostDiagnostic`(frame→源标签)、op 层 `OpDiagnostic`、默认路径 `MessageDiagnostic`;loop 默认 uncaught/unhandled 路径走该管线);编译/解析/快照层适配随各 crate 落地;CLI/REPL 接入随子项目 6 重组
+- [x] miette 统一渲染管线(`process::diagnostics`:`ColorPolicy` Auto/Always/Never + `resolve`/`from_env`、单一 `GraphicalReportHandler` 路径;求值层 `HostDiagnostic`(frame→源标签)、op 层 `OpDiagnostic`、默认路径 `MessageDiagnostic`;loop 默认 uncaught/unhandled 路径走该管线);编译/解析/快照层适配随各 crate 落地;CLI/REPL 接入已落地(条目 117 重组:求值错误按值分派 `report_execution`/`report_script_error`/`report_module_error`,数字码折进头部行;内置样式:unicode×color/nocolor、ascii×2、narratable、json、debug,无 rustc 布局内置主题)
 - [x] 错误码体系(纯数字五位数,按 §12.1 分类区间编排;`ErrorCode` + `from_execution_error`/`from_call_error` 映射,码表补入设计 §12.1;`HostDiagnostic`/`OpDiagnostic` 渲染码;`OpError.code` 改为 `u16` 数字码)
 - [x] 测试:合成信号事件(不依赖 OS)、shutdown 每步断言、exit code 矩阵(全部落地:signals 6、process 22、shutdown 7、error_codes 4、diagnostics 6)
 

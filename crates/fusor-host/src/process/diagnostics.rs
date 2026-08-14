@@ -60,7 +60,7 @@ impl ColorPolicy {
         )
     }
 
-    /// The miette theme for the resolved policy.
+    /// The miette graphical theme for the resolved policy.
     fn theme(self) -> GraphicalTheme {
         match self {
             Self::Always => GraphicalTheme::unicode(),
@@ -121,17 +121,21 @@ impl fmt::Display for HostDiagnostic {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         // The raw ExecutionError Display flattens exceptions to
         // "uncaught JavaScript value"; the diagnostic carries the exact
-        // class and message so the report names the failure (§7.5).
+        // class and message so the report names the failure (§7.5). The
+        // numeric error code is folded into the header line — a standalone
+        // miette `code()` would render on its own floating line and shift
+        // REPL input.
+        let code = ErrorCode::from_execution_error(&self.error);
         match self.exception() {
             Some(exception) => match (exception.kind(), exception.message()) {
                 (Some(kind), Some(message)) => write!(
                     formatter,
-                    "uncaught {kind:?}: {}",
+                    "{code} uncaught {kind:?}: {}",
                     message.to_utf8_lossy().unwrap_or_default()
                 ),
-                _ => formatter.write_str("uncaught JavaScript value"),
+                _ => write!(formatter, "{code} uncaught JavaScript value"),
             },
-            None => self.error.fmt(formatter),
+            None => write!(formatter, "{code} {error}", error = self.error),
         }
     }
 }
@@ -139,10 +143,6 @@ impl fmt::Display for HostDiagnostic {
 impl std::error::Error for HostDiagnostic {}
 
 impl Diagnostic for HostDiagnostic {
-    fn code(&self) -> Option<Box<dyn fmt::Display + '_>> {
-        Some(Box::new(ErrorCode::from_execution_error(&self.error)))
-    }
-
     fn severity(&self) -> Option<Severity> {
         Some(Severity::Error)
     }

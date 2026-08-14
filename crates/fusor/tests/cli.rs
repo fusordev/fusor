@@ -194,6 +194,43 @@ fn run_path_drives_the_host_loop_for_set_immediate() {
 }
 
 #[test]
+fn run_path_waits_real_time_for_pending_timers() {
+    // A delayed timer keeps the process alive: the runner sleeps until the
+    // deadline instead of advancing the virtual clock instantly (§6.3). The
+    // callback measures its own latency through `op_core_now`, so parallel
+    // test load cannot mask the wait.
+    let directory = temp_dir("timeout");
+    let _cleanup = Cleanup(directory.clone());
+    fs::write(
+        directory.join("entry.mjs"),
+        "var t0 = Fusor.ops.op_core_now();\n\
+         Fusor.ops.op_set_timeout(function () {\n\
+             print(Fusor.ops.op_core_now() - t0);\n\
+         }, 500);\n",
+    )
+    .expect("write entry");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_fusor"))
+        .arg(directory.join("entry.mjs"))
+        .output()
+        .expect("spawn fusor");
+    assert!(
+        output.status.success(),
+        "fusor run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let observed: f64 = stdout
+        .trim()
+        .parse()
+        .unwrap_or_else(|_| panic!("expected the timer latency on stdout: {stdout}"));
+    assert!(
+        observed >= 400.0,
+        "the timer must fire after its delay, not instantly (observed {observed} ms)"
+    );
+}
+
+#[test]
 fn run_path_top_level_await_observes_the_awaited_value() {
     let directory = temp_dir("tla");
     let _cleanup = Cleanup(directory.clone());

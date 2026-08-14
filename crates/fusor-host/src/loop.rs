@@ -474,6 +474,25 @@ impl HostLoop {
         with_timer_state(|state| state.next_deadline()).ok().flatten()
     }
 
+    /// Returns the virtual duration until the next timer deadline (§6.4),
+    /// or `None` when no timer is pending.
+    ///
+    /// Hosts that wait in real time (V8 semantics — a delayed timer fires
+    /// after its delay, not instantly) sleep this long, then call
+    /// [`Self::advance_time`] with the same duration and run a turn. The
+    /// virtual clock never advances on its own; [`Self::run_until_idle`]
+    /// advances it instantly for hosts that prefer the simulated select.
+    #[must_use]
+    pub fn next_deadline_in(&self) -> Option<Duration> {
+        with_timer_state(|state| {
+            state
+                .next_deadline()
+                .map(|deadline| deadline.saturating_duration_since(state.now))
+        })
+        .ok()
+        .flatten()
+    }
+
     /// Returns whether any event is due this turn.
     fn turn_has_work(&self) -> bool {
         !self.custom_events.is_empty()

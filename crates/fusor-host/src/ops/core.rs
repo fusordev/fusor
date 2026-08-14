@@ -128,3 +128,63 @@ pub(crate) mod op_core_gc {
         Ok(context.undefined())
     }
 }
+
+/// The monotonic clock anchor for [`op_core_now`] (§5.4): captured when the
+/// host core installs, so `performance.now()`-style readings are relative to
+/// the process time origin (V8 semantics: a high-resolution timestamp in
+/// milliseconds, monotonically increasing, unaffected by system clock
+/// changes).
+#[derive(Debug)]
+pub struct ClockState {
+    start: std::time::Instant,
+}
+
+impl Default for ClockState {
+    fn default() -> Self {
+        Self {
+            start: std::time::Instant::now(),
+        }
+    }
+}
+
+/// Installs the clock anchor when no clock state exists yet (idempotent, like
+/// the print sink).
+pub(crate) fn install_clock_state() {
+    if !OpStateRegistry::has::<ClockState>() {
+        let _ = OpStateRegistry::install(ClockState::default());
+    }
+}
+
+/// The core clock op: `Fusor.ops.op_core_now` returns the elapsed
+/// milliseconds since the process time origin (`performance.now()`
+/// semantics, V8-aligned): a finite non-negative `Number`, monotonically
+/// non-decreasing across calls.
+#[doc(hidden)]
+pub(crate) mod op_core_now {
+    use fusor_runtime::{Context, HostCall, JsNumber, JsValue};
+
+    use crate::ops::OpDeclaration;
+
+    use super::{ClockState, OpStateRegistry};
+
+    /// The core now op's declaration.
+    #[must_use]
+    pub(crate) fn declaration() -> OpDeclaration {
+        OpDeclaration {
+            name: "op_core_now",
+            parameter_types: &[],
+            is_async: false,
+        }
+    }
+
+    /// Returns the elapsed milliseconds since the time origin (§5.7 shape).
+    pub(crate) fn call(
+        context: &mut Context<'_>,
+        _call: HostCall,
+    ) -> Result<JsValue, JsValue> {
+        let elapsed = OpStateRegistry::with::<ClockState, _>(|state| state.start.elapsed())
+            .map(|elapsed| elapsed.as_secs_f64() * 1_000.0)
+            .unwrap_or(0.0);
+        Ok(context.number(JsNumber::from_f64(elapsed)))
+    }
+}

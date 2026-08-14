@@ -247,20 +247,36 @@ async fn run_file(
             Ok(())
         }));
         if let Err(error) = host_loop.run_one_turn() {
-            report_error(&display_name, &error);
+            report_execution(&display_name, error);
             return 1;
         }
         match outcome.replace(None) {
             Some(Ok(())) => {}
             Some(Err(error)) => {
-                report_error(&display_name, &error);
+                report_script_error(&display_name, error);
                 return 1;
             }
             None => return 1,
         }
-        if let Err(error) = host_loop.run_until_idle() {
-            report_error(&display_name, &error);
-            return 1;
+        // Real-time idle wait (V8 semantics, §6.3): pending timers keep the
+        // process alive — sleep until the next deadline, advance the virtual
+        // clock to match, and run the firing turn.
+        loop {
+            if !host_loop.alive() {
+                break;
+            }
+            let Some(remaining) = host_loop.next_deadline_in() else {
+                break;
+            };
+            tokio::time::sleep(remaining).await;
+            if let Err(error) = host_loop.advance_time(remaining) {
+                report_execution(&display_name, error);
+                return 1;
+            }
+            if let Err(error) = host_loop.run_one_turn() {
+                report_execution(&display_name, error);
+                return 1;
+            }
         }
         // The loop's uncaught/unhandled default paths request the exit code
         // (§7.2); honor it on the way out.
@@ -291,7 +307,7 @@ async fn run_file(
         {
             Ok(edges) => edges,
             Err(error) => {
-                report_error(&root_name, &error);
+                report_module_error(&root_name, error);
                 return 1;
             }
         };
@@ -307,13 +323,13 @@ async fn run_file(
             Ok(())
         }));
         if let Err(error) = host_loop.run_one_turn() {
-            report_error(&root_name, &error);
+            report_execution(&root_name, error);
             return 1;
         }
         match outcome.replace(None) {
             Some(Ok(())) => {}
             Some(Err(error)) => {
-                report_error(&root_name, &error);
+                report_module_error(&root_name, error);
                 return 1;
             }
             None => return 1,
@@ -321,7 +337,7 @@ async fn run_file(
         if let Err(error) =
             cli::imports::drain_pending_imports(&mut host_loop, &resolver, limits).await
         {
-            report_error(&root_name, &error);
+            report_module_error(&root_name, error);
             return 1;
         }
         // A top-level-await graph settles asynchronously while the drain runs
@@ -336,16 +352,32 @@ async fn run_file(
             Ok(())
         }));
         if let Err(error) = host_loop.run_one_turn() {
-            report_error(&root_name, &error);
+            report_execution(&root_name, error);
             return 1;
         }
         if let Some(error) = error_slot.replace(None) {
-            report_error(&root_name, &error);
+            report_module_error(&root_name, error);
             return 1;
         }
-        if let Err(error) = host_loop.run_until_idle() {
-            report_error(&root_name, &error);
-            return 1;
+        // Real-time idle wait (V8 semantics, §6.3): pending timers keep the
+        // process alive — sleep until the next deadline, advance the virtual
+        // clock to match, and run the firing turn.
+        loop {
+            if !host_loop.alive() {
+                break;
+            }
+            let Some(remaining) = host_loop.next_deadline_in() else {
+                break;
+            };
+            tokio::time::sleep(remaining).await;
+            if let Err(error) = host_loop.advance_time(remaining) {
+                report_execution(&root_name, error);
+                return 1;
+            }
+            if let Err(error) = host_loop.run_one_turn() {
+                report_execution(&root_name, error);
+                return 1;
+            }
         }
         // The loop's uncaught/unhandled default paths request the exit code
         // (§7.2); honor it on the way out.
@@ -356,17 +388,51 @@ async fn run_file(
     }
 }
 
-/// Prints a top-level error through `miette`.
-///
-/// The facade errors (`ScriptEvaluationError`/`ModuleEvaluationError`) wrap the
-/// leaf failure in several Rust typing layers (`…` → `GlobalScriptError` →
-/// `ExecutionError`) whose `Display` all delegate to the same message. Those
-/// layers are not a user-facing cause chain, so they are deliberately not
-/// walked — reporting the top-level error once avoids the duplicate
-/// `caused by:` lines a naive `source()` walk would emit.
+/// Renders one non-execution top-level error through the unified §7.5 miette
+/// pipeline (`process::diagnostics`) as a message diagnostic with the CLI
+/// origin prefix, honoring the environment color policy.
 pub(crate) fn report_error(origin: &str, error: &dyn Error) {
-    let report = miette::Report::msg(format!("{origin}: {error}"));
-    eprintln!("{report:?}");
+    let policy = fusor_host::process::diagnostics::ColorPolicy::from_env();
+    let rendered = fusor_host::process::diagnostics::render_diagnostic(
+        fusor_host::process::diagnostics::MessageDiagnostic::new(format!("{origin}: {error}")),
+        policy,
+    );
+    eprint!("{rendered}");
+}
+
+/// Renders one engine [`ExecutionError`] through the §7.5 pipeline as a
+/// [`HostDiagnostic`]: the exception identity, its numeric error code, and
+/// frame labels inside the retained source text.
+pub(crate) fn report_execution(origin: &str, execution: fusor_runtime::ExecutionError) {
+    let _ = origin;
+    let policy = fusor_host::process::diagnostics::ColorPolicy::from_env();
+    let rendered = fusor_host::process::diagnostics::render_diagnostic(
+        fusor_host::process::diagnostics::HostDiagnostic::new(execution),
+        policy,
+    );
+    eprint!("{rendered}");
+}
+
+/// Renders one script evaluation failure: the facade's `Runtime` arm carries
+/// an [`ExecutionError`] (rendered as a [`HostDiagnostic`]); every other arm
+/// renders as a message.
+pub(crate) fn report_script_error(origin: &str, error: fusor::ScriptEvaluationError) {
+    match error {
+        fusor::ScriptEvaluationError::Runtime(fusor_runtime::GlobalScriptError::Execution(
+            execution,
+        )) => report_execution(origin, execution),
+        other => report_error(origin, &other),
+    }
+}
+
+/// Renders one module evaluation failure: the `Execution` arm carries an
+/// [`ExecutionError`] (rendered as a [`HostDiagnostic`]); every other arm
+/// renders as a message.
+pub(crate) fn report_module_error(origin: &str, error: fusor::ModuleEvaluationError) {
+    match error {
+        fusor::ModuleEvaluationError::Execution(execution) => report_execution(origin, execution),
+        other => report_error(origin, &other),
+    }
 }
 
 #[cfg(test)]

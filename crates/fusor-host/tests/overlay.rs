@@ -371,6 +371,26 @@ fn the_core_overlay_provides_the_core_ops() {
 }
 
 #[test]
+fn the_core_clock_op_returns_a_monotonic_high_resolution_timestamp() {
+    let mut host = HostRuntime::builder()
+        .with_overlay(CoreOverlay)
+        .build()
+        .expect("built");
+    // `performance.now()` semantics (V8-aligned): a finite non-negative
+    // Number of milliseconds since the process time origin, monotonically
+    // non-decreasing across calls.
+    assert_eq!(
+        eval_string(
+            &mut host,
+            "var a = Fusor.ops.op_core_now();\
+             var b = Fusor.ops.op_core_now();\
+             String(typeof a === 'number' && isFinite(a) && a >= 0 && b >= a);",
+        ),
+        "true"
+    );
+}
+
+#[test]
 fn a_built_host_runtime_drives_the_event_loop() {
     let bumped = Rc::new(Cell::new(0u32));
     let read = Rc::clone(&bumped);

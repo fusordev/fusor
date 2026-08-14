@@ -293,7 +293,7 @@ pub enum GlobalDeclarationRejectionKind {
 }
 
 /// Failure to turn verified bytecode into one runtime-local function.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum InstallError {
     /// An exact opcode is outside this interpreter profile.
     UnsupportedOpcode {
@@ -917,7 +917,7 @@ impl Error for DynamicFunctionCompileFailure {
 }
 
 /// Failure while invoking one runtime function.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum ExecutionError {
     /// A public handle was orphaned, foreign, stale, or had the wrong kind.
     Handle(HandleError),
