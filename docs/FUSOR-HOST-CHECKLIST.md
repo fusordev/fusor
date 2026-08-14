@@ -94,7 +94,7 @@
 - [x] uncaughtException / unhandledRejection 默认路径(exit 1)+ 宿主处理器(处理器经 `Fusor.process.on` 注册、作为 loop 事件回调;完整 stack 渲染随 miette 条目 §7.5 落地,当前默认路径渲染错误身份)
 - [x] shutdown 序列 ①–⑤ 按序实现:`HostLoop::shutdown(self) -> ExitCode`(①消费 loop 停新源+forwarder 可控停止 ②take/drop OpRuntime 取消 future ③`close_all_resources` ④waiters 随引擎 Drop ⑤drop Runtime);期间不 drain;清理全部 thread-local 状态,同线程可再装新 loop
 - [x] miette 统一渲染管线(`process::diagnostics`:`ColorPolicy` Auto/Always/Never + `resolve`/`from_env`、单一 `GraphicalReportHandler` 路径;求值层 `HostDiagnostic`(frame→源标签)、op 层 `OpDiagnostic`、默认路径 `MessageDiagnostic`;loop 默认 uncaught/unhandled 路径走该管线);编译/解析/快照层适配随各 crate 落地;CLI/REPL 接入随子项目 6 重组
-- [ ] 错误码体系(沿用 `FUS-xxx-xxx` 惯例)与 §12.1 分类对应
+- [ ] 错误码体系(纯数字码,按 §12.1 分类区间编排)与 §12.1 分类对应
 - [ ] 测试:合成信号事件(不依赖 OS)、shutdown 每步断言、exit code 矩阵
 
 ## 子项目 5:Snapshot 与初始化脚本(fusor-runtime + fusor-host)§8

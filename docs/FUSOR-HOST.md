@@ -371,7 +371,7 @@ shutdown 期间不再 drain 微任务(文档化)。
 - **彩色输出**:ANSI 色(severity 配色、源片段 + span 下划线 + label、错误码/建议);
   TTY 检测 + `NO_COLOR` 尊重 + `--no-color` 显式开关;非 TTY 降级无色
 - **内容**:结构化 StackTrace(§4.3)映射回源文件与 span;错误码与 §12.1 分类对应
-  (沿用项目 `FUS-xxx-xxx` 惯例);相关行提供修复建议(如裸说明符解析失败 → 提示
+  (纯数字错误码,按分类区间编排);相关行提供修复建议(如裸说明符解析失败 → 提示
   可能的 node_modules 路径)
 - 项目已用 miette(ARCHITECTURE.md:35"host diagnostics 不以 Miette 输出为语义真
   值")——本项是渲染层完成,非引入
