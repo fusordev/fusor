@@ -8065,6 +8065,96 @@ fn snapshot_restore_rebinds_host_functions_by_name() {
 }
 
 #[test]
+fn snapshot_restore_fails_closed_on_corrupted_function_bytecode() {
+    let authority = compile_test_function("function probe() { return 1; }", "probe");
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let templates = runtime.stage_templates(&authority).expect("templates");
+    let code = runtime
+        .code
+        .try_insert(crate::runtime::InstalledCode {
+            authority: Arc::clone(&authority),
+            realm: crate::ids::RealmId::ZERO,
+            templates,
+            live_functions: 1,
+        })
+        .expect("code");
+    runtime
+        .insert_heap_function(crate::runtime::HeapFunction {
+            implementation: crate::runtime::FunctionImplementation::Bytecode(
+                crate::runtime::BytecodeFunction {
+                    code,
+                    template: authority.root_id(),
+                    environment: Vec::new(),
+                    environment_eval_shadows: Vec::new(),
+                    eval_environment: None,
+                    lexical_receiver: None,
+                    lexical_eval_in_function: false,
+                    lexical_eval_in_class_field_initializer: false,
+                    lexical_new_target: None,
+                    lexical_derived_constructor: None,
+                    lexical_derived_this: None,
+                    has_instance_elements: false,
+                    home_object: None,
+                },
+            ),
+            object: ObjectRecord::from_parts(
+                None,
+                true,
+                false,
+                Arc::new(Vec::new()),
+                None,
+                Vec::new(),
+            ),
+            public_roots: 0,
+        })
+        .expect("function");
+    let blob = runtime.snapshot().expect("snapshot");
+
+    // Corrupt one byte inside the embedded verified-bytecode payload:
+    // the load-time re-verification must reject it, never panic.
+    let mut damaged = blob.clone();
+    // Locate the functions section payload: walk the section frames.
+    let mut position = 8 + 4 + 4; // magic + stamp + section count
+    let mut sections = u32::from_le_bytes([
+        damaged[12], damaged[13], damaged[14], damaged[15],
+    ]);
+    while sections > 0 {
+        let tag = damaged[position];
+        position += 1;
+        let length = u64::from_le_bytes([
+            damaged[position],
+            damaged[position + 1],
+            damaged[position + 2],
+            damaged[position + 3],
+            damaged[position + 4],
+            damaged[position + 5],
+            damaged[position + 6],
+            damaged[position + 7],
+        ]) as usize;
+        position += 8;
+        if tag == 4 {
+            // code count (4) + byte length (4) + FUSRBYTE magic: corrupt
+            // one byte of the magic.
+            damaged[position + 4 + 4] ^= 0xFF;
+            break;
+        }
+        position += length + 4; // payload + CRC-32
+        sections -= 1;
+    }
+    let mut restored = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let error = restored
+        .from_snapshot(&damaged)
+        .expect_err("corrupted bytecode must be rejected");
+    // The per-section CRC-32 catches the damage before the payload is
+    // even decoded; the load-time re-verification is the second layer
+    // for structurally intact but invalid payloads.
+    assert!(
+        matches!(error, crate::SnapshotError::IntegrityViolation),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn snapshot_fails_closed_on_unsupported_heap_content() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     // An accessor slot is not serializable yet (§8.2 intermediate).
