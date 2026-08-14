@@ -208,3 +208,87 @@ fn a_throwing_sigint_handler_fails_the_turn_closed() {
         "a throwing handler fails the turn closed: {result:?}"
     );
 }
+
+#[test]
+fn process_exit_requests_the_code_and_stops_the_loop() {
+    let mut fixture = Fixture::new();
+    fixture.eval("process.exit(3);");
+    assert_eq!(fixture.host.pending_exit_code(), Some(3));
+    assert!(!fixture.host.alive(), "an exit request stops the loop");
+    fixture.host.run_until_idle().expect("exits without error");
+}
+
+#[test]
+fn process_exit_zero_is_a_real_exit_request() {
+    let mut fixture = Fixture::new();
+    fixture.eval("process.exit(0);");
+    assert_eq!(fixture.host.pending_exit_code(), Some(0));
+    assert!(!fixture.host.alive());
+}
+
+#[test]
+fn process_exit_truncates_the_code_to_8_bits() {
+    let mut fixture = Fixture::new();
+    fixture.eval("process.exit(256);");
+    assert_eq!(
+        fixture.host.pending_exit_code(),
+        Some(0),
+        "256 truncates to 0 (Node semantics)"
+    );
+}
+
+#[test]
+fn process_exit_negative_truncates_to_255() {
+    let mut fixture = Fixture::new();
+    fixture.eval("process.exit(-1);");
+    assert_eq!(fixture.host.pending_exit_code(), Some(255));
+}
+
+#[test]
+fn the_first_exit_request_wins() {
+    let mut fixture = Fixture::new();
+    fixture.eval("process.exit(7);");
+    fixture.host.post_signal(Signal::Terminate);
+    assert_eq!(
+        fixture.host.pending_exit_code(),
+        Some(7),
+        "a later SIGTERM does not replace the requested code"
+    );
+}
+
+#[test]
+fn a_signal_exit_wins_over_a_later_process_exit() {
+    let mut fixture = Fixture::new();
+    fixture.host.post_signal(Signal::Terminate);
+    fixture.eval("process.exit(7);");
+    assert_eq!(
+        fixture.host.pending_exit_code(),
+        Some(143),
+        "the turn after a force exit is a no-op: process.exit never runs"
+    );
+}
+
+#[test]
+fn exit_codes_map_engine_errors_and_interrupts() {
+    use fusor_host::process::ExitCode;
+    use fusor_runtime::ExecutionError;
+
+    let abort = ExecutionError::EngineFault(fusor_runtime::EngineFault::RuntimeInvariant {
+        message: "boom",
+    });
+    assert_eq!(
+        ExitCode::from_execution_error(&abort),
+        Some(ExitCode::EngineAbort)
+    );
+    assert_eq!(ExitCode::EngineAbort.as_i32(), 2, "documented engine-abort code");
+    let interrupt = ExecutionError::Interrupted { executed: 42 };
+    assert_eq!(
+        ExitCode::from_execution_error(&interrupt),
+        None,
+        "an interrupt is not a process exit by itself"
+    );
+    assert_eq!(ExitCode::Clean.as_i32(), 0);
+    assert_eq!(ExitCode::UncaughtException.as_i32(), 1);
+    assert_eq!(ExitCode::UnhandledRejection.as_i32(), 1);
+    assert_eq!(ExitCode::Requested(130).as_i32(), 130);
+}

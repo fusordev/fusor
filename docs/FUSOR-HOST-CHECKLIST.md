@@ -90,7 +90,7 @@
 
 - [x] 信号事件源;SIGINT 首次 → 引擎 `InterruptHandler`;二次 SIGINT/SIGTERM → 128+n(可注入 + `spawn_signal_forwarder` OS 转发;OS 投递按 §7.6 用合成信号测试)
 - [x] JS 侧 `process.on("SIGINT", ...)` 注册(op 暴露;处理器替换默认策略、逐次投递、this=process;SIGTERM 不可拦截,已文档化)
-- [ ] exit code 表(§7.2)实现与文档化;`process.exit(code)` op
+- [x] exit code 表(§7.2)实现与文档化(`ExitCode` 枚举 + `from_execution_error` 映射;引擎中止码=2 已补设计);`process.exit(code)` op(8 位截断、下个 turn 边界生效、首个请求胜出)
 - [ ] uncaughtException / unhandledRejection 默认路径(完整 stack + exit 1)+ 宿主处理器
 - [ ] shutdown 序列 ①–⑤ 按序实现:`close_all` → waiters 取消 → drop Runtime;期间不 drain
 - [ ] miette 统一渲染管线(所有错误层适配 `Diagnostic`)+ 彩色(TTY 检测、`NO_COLOR`、`--no-color`)

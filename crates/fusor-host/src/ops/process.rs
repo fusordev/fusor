@@ -1,5 +1,5 @@
-//! Process-global ops (§7.1) installed on the realm-global `process`
-//! object.
+//! Process-global ops (§7.1, §7.2) installed on the realm-global
+//! `process` object.
 
 use fusor_ops::op;
 use fusor_runtime::{Context, ExecutionError, JsValue};
@@ -34,6 +34,22 @@ fn op_process_on(event: String, handler: JsValue) -> Result<(), OpError> {
     Ok(())
 }
 
+/// Truncates the JavaScript-supplied exit code to 8 bits (Node
+/// semantics: `process.exit(256)` exits 0, `process.exit(-1)` exits 255);
+/// non-finite values resolve to 0.
+fn resolve_exit_code(code: f64) -> i32 {
+    (code as i32) & 0xFF
+}
+
+#[op(name = "exit")]
+fn op_process_exit(code: f64) -> Result<(), OpError> {
+    with_signal_state(|state| {
+        state.request_exit(resolve_exit_code(code));
+    })
+    .map_err(|error| OpError::new(error.to_string()))?;
+    Ok(())
+}
+
 /// Installs one op on the global `process` object (§7.1).
 fn install_process_op<F>(
     context: &mut Context<'_>,
@@ -52,8 +68,12 @@ where
 
 /// Installs the global `process` object and its ops (§7): a non-writable,
 /// non-enumerable, non-configurable data property on the realm global,
-/// with `process.on` (§7.1) on it. Repeated installation is idempotent,
-/// like [`super::install_namespace`].
+/// with `process.on` (§7.1) and `process.exit` (§7.2) on it. Repeated
+/// installation is idempotent, like [`super::install_namespace`].
+///
+/// `process.exit(code)` truncates the code to 8 bits and requests the
+/// exit; it does not wait for pending async ops, and the exit takes
+/// effect at the next turn boundary (§7.2, documented).
 ///
 /// # Errors
 ///
@@ -87,5 +107,10 @@ pub fn install_process(context: &mut Context<'_>) -> Result<(), ExecutionError> 
         context,
         __fusor_op_declaration_op_process_on(),
         __fusor_op_call_op_process_on,
+    )?;
+    install_process_op(
+        context,
+        __fusor_op_declaration_op_process_exit(),
+        __fusor_op_call_op_process_exit,
     )
 }

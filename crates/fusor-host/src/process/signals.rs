@@ -55,7 +55,8 @@ impl Signal {
 #[derive(Clone, Debug, Default)]
 pub struct SignalState {
     interrupt: Arc<AtomicBool>,
-    force_exit: Arc<AtomicI32>,
+    exit_requested: Arc<AtomicBool>,
+    exit_code: Arc<AtomicI32>,
     js_sigint_handler: Arc<AtomicBool>,
     pending_sigint: Arc<AtomicU32>,
 }
@@ -77,16 +78,31 @@ impl SignalState {
                     // `swap(true)` reports whether a request was already
                     // outstanding: that makes this delivery the second
                     // SIGINT.
-                    self.force_exit.store(signal.exit_code(), Ordering::SeqCst);
+                    self.request_exit(signal.exit_code());
                     true
                 } else {
                     false
                 }
             }
             Signal::Terminate => {
-                self.force_exit.store(signal.exit_code(), Ordering::SeqCst);
+                self.request_exit(signal.exit_code());
                 true
             }
+        }
+    }
+
+    /// Requests a process exit with the given code (force signals carry
+    /// `128 + n`, `process.exit` the caller's truncated code, §7.2).
+    ///
+    /// Only the first request wins: the exit code never resets, so a
+    /// later signal or `process.exit` call cannot replace it. Returns
+    /// `true` when this call is the one that requested the exit.
+    pub(crate) fn request_exit(&self, code: i32) -> bool {
+        if self.exit_requested.swap(true, Ordering::SeqCst) {
+            false
+        } else {
+            self.exit_code.store(code, Ordering::SeqCst);
+            true
         }
     }
 
@@ -123,14 +139,16 @@ impl SignalState {
         self.interrupt.store(false, Ordering::SeqCst);
     }
 
-    /// Returns the pending force-exit code (§7.2), if one was requested.
+    /// Returns the pending exit code (§7.2), if an exit was requested.
     ///
-    /// The code never resets: a force exit terminates the process.
+    /// The code never resets: the first exit request terminates the
+    /// process.
     #[must_use]
     pub fn pending_exit_code(&self) -> Option<i32> {
-        match self.force_exit.load(Ordering::SeqCst) {
-            0 => None,
-            code => Some(code),
+        if self.exit_requested.load(Ordering::SeqCst) {
+            Some(self.exit_code.load(Ordering::SeqCst))
+        } else {
+            None
         }
     }
 }
